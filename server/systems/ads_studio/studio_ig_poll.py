@@ -348,9 +348,31 @@ def after_meta_authorization_failure() -> None:
         print(f"[albayan] Studio Meta connection check failed ({type(error).__name__}).")
 
 
+def _note_page_health(page: dict[str, Any], read: dict[str, Any]) -> None:
+    """R2: a check's reads speak for the linked page's health as a reply does (social_studio.
+    _page_health_after_meta): a per-page refusal (page_problem_reason: the role lost, a permission
+    missing, a page limit) marks the page with its fix step and raises the day's alert; reads that
+    answered clear a reason a reply can clear. Albayan's own pause proves nothing. Never raises."""
+    if read["pausedLocally"]:
+        return
+    reason = ""
+    if read["errorCode"]:
+        reason = _social.page_problem_reason(_meta.MetaAdsError(read["errorCode"], "", provider_code=read["providerCode"]))
+        if not reason:
+            return  # an ordinary or global failure (Albayan's own token: the check above) is not the page's
+    try:
+        entity = _social._ctx()["get_entity"](PAGES_TYPE, page["id"])
+    except Exception as error:
+        print(f"[albayan] Instagram check could not read the page's health ({type(error).__name__}).")
+        return
+    if entity and not entity.get("deleted"):
+        _social._page_health_after_meta({**(entity.get("data") or {}), "id": page["id"]}, reason, succeeded=not reason)
+
+
 def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "manual_check",
                           now: datetime | None = None) -> dict[str, Any]:
     """Read the account's recent comments and feed the new ones to process_comment (module docstring).
+    The reads also update the linked page's health (_note_page_health, R2).
 
     Returns ``read``, ``new``, ``replied``, ``skipped`` plus ``errorCode``, ``providerCode``,
     ``mediaRead``, ``pausedLocally`` (Albayan's Meta pause refused the read: nothing reached Meta),
@@ -372,6 +394,7 @@ def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "m
                                    with_author=True, media_limit=IG_MEDIA_READ, skip_media=unchanged)
     if read["errorCode"] == "authorization":
         after_meta_authorization_failure()
+    _note_page_health(page, read)
     with db_conn() as conn:
         floor = rule_floor_second(conn, page["ownerId"])
     if floor is not None:

@@ -194,7 +194,7 @@ from .page_media import create_page_media_router
 from .clothes_media import create_clothes_media_router
 from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from .systems.ads_studio.studio_api import create_studio_router
-from .systems.ads_studio.studio_privacy import redact_staff_identity, register_redacted_type, scrub_studio_personal_data_conn  # P1-05, P1-16
+from .systems.ads_studio.studio_privacy import redact_staff_identity, register_redacted_type, scrub_studio_personal_data_conn, studio_audit_resources_conn  # P1-05, P1-16
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -3414,7 +3414,8 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
     ):
         # SECURITY: Log failed current password verification (potential session theft detection)
         audit(str(user.get("id")), "password_change_failed", "auth", str(user.get("id")), "Current password verification failed", {"ip": ip})
-        raise HTTPException(status_code=401, detail="Invalid current password")
+        # 403, not 401: the session is still valid, and every client build reads a 401 as "signed out".
+        raise HTTPException(status_code=403, detail="Invalid current password")
     
     # Reset rate limit on successful current password verification
     reset_rate_limit(key)
@@ -11571,6 +11572,13 @@ def create_collection_item(
     else:
         body_data = body.data
 
+    if collection in {"receipts", "ads"}:
+        # A stale user list must not hand a new job to a deleted or non-driver account
+        # (PATCH refuses the same assignment with the same text).
+        _drv = sanitize_str(str((body_data or {}).get("deliveryPersonId") or "")).strip()[:80]
+        if _drv and not _active_delivery_user(_drv):
+            raise HTTPException(status_code=400, detail="deliveryPersonId must be an active delivery user")
+
     if collection == AD_CAMPAIGN_COLLECTION:
         saved = _create_ad_campaign_atomic(entity_id, body_data, user)
     elif collection in {"clothesProducts", "clothesShipments"}:
@@ -12161,34 +12169,38 @@ def update_collection_item(
             raise HTTPException(status_code=403, detail="Forbidden")
         delivery_grant_patch = _delivery_ok
 
-    if collection == "receipts" and not delivery_grant_patch and role_lower not in {"delivery", "admin"}:
-        # A staff edit grant is not a way around the delivery workflow: a
-        # finished (Delivered/Canceled) job cannot be handed back to a driver,
-        # and an accepted job cannot be moved backwards. Office edits that
-        # end the workflow (paid in the office, refund, cancel) stay allowed.
+    if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
+        # An edit grant is not a way around the delivery workflow: a finished
+        # (Delivered/Canceled) job cannot be handed back to a driver, and an
+        # accepted job cannot be moved backwards (admins included, as on /settle).
+        # Office edits that end the workflow (paid in the office, refund, cancel) stay allowed.
         _status_updates = sanitize_json(body.data or {}) or {}
-        if "deliveryStatus" in _status_updates:
-            _current_status = str((existing.get("data") or {}).get("deliveryStatus") or "").strip()
-            _next_status = str(_status_updates.get("deliveryStatus") or "").strip()
-            # Anything else (an empty value, a different spelling) would revive
-            # the job on the driver's list, so only these moves are accepted.
+        _existing_data = existing.get("data") or {}
+        _current_status = str(_existing_data.get("deliveryStatus") or "").strip()
+        _next_status = str(_status_updates.get("deliveryStatus") or "").strip()
+        if "deliveryStatus" in _status_updates and _next_status != _current_status:
+            # An empty value or a different spelling would revive the job on the driver's
+            # list; an unchanged legacy value (re-sent by an ad edit) is left alone.
+            delivery_workflow.refuse_unknown_status(_status_updates)
             _allowed_next = delivery_workflow.STAFF_ALLOWED_NEXT.get(_current_status)  # shared with /settle and /unsettle
-            if _allowed_next is not None and _next_status not in _allowed_next:
-                _existing_data = existing.get("data") or {}
+            _staff_refused = role_lower != "admin" and _allowed_next is not None and _next_status not in _allowed_next
+            if _staff_refused or (_current_status, _next_status) == ("In Progress", "Needs Delivery"):
                 _delivery_change = any(
                     key in _status_updates and _status_updates.get(key) != _existing_data.get(key)
                     for key in ("deliveryPersonId", "statusDetail", "isReceivedInOffice")
                 )
-                if len(_status_updates) > 1 and not _delivery_change and isinstance(body.data, dict):
+                if len(set(_status_updates) - {"_lastModified"}) > 1 and not _delivery_change and isinstance(body.data, dict):
                     # A mixed edit (phone, notes, amounts...) from an older app build that
-                    # re-derives deliveryStatus on every save: keep the finished status. An
+                    # re-derives deliveryStatus on every save: keep the stored status. An
                     # edit that also re-points the job (driver, collection method) is refused.
                     body.data.pop("deliveryStatus", None)
-                else:
+                elif _staff_refused:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Cannot change status from '{_current_status}' to '{_next_status}' - a delivery job cannot be reopened or moved backwards",
                     )
+                else:  # an admin re-queueing an accepted job: /settle's refusal and text
+                    delivery_workflow.refuse_regression(_existing_data, {"deliveryStatus": _next_status}, role_lower, active_driver=_active_delivery_user)
 
     if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
         _driver_updates = sanitize_json(body.data or {}) or {}
@@ -13302,6 +13314,9 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
             )
         scrub_actor_name_stamps_conn(conn, user_id, old_name, now, lock_suffix=suffix)  # editedBy / metaImportCompletedByName
         scrub_studio_personal_data_conn(conn, user_id)  # P1-16: studio WhatsApp number, reply-log commenter data; never the ledger
+        for resource_type, resource_id in studio_audit_resources_conn(conn, user_id):  # R2: an admin's message once quoted a rule name
+            conn.execute(text("UPDATE audit_logs SET message=:message WHERE resource_type=:type AND resource_id=:id"),
+                         {"message": "Activity retained after account privacy anonymization", "type": resource_type, "id": resource_id})
 
         updated = conn.execute(
             text("SELECT * FROM users WHERE id=:id LIMIT 1"),

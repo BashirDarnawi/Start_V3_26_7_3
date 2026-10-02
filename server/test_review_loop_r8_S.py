@@ -22,6 +22,7 @@ Run: python -m pytest server/test_review_loop_r8_S.py -q
 import os
 import secrets
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("ALBAYAN_META_BACKGROUND_SYNC", "false")
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, text
@@ -157,8 +159,15 @@ def graph(monkeypatch):
     def forbidden_get(self, path, params=None):
         raise AssertionError(f"unexpected Graph GET {path}")
 
-    monkeypatch.setattr(meta_ads.MetaAdsClient, "_post",
-                        lambda self, path, data=None, *, access_token=None: fake.post(path, data, access_token))
+    def fake_post(self, path, data=None, *, access_token=None):
+        # As the real _request does right before a send leaves (round 2: the reply's in-flight mark);
+        # a mark that fails sends nothing.
+        before_send = meta_ads._META_BEFORE_SEND.get()
+        if before_send is not None:
+            before_send()
+        return fake.post(path, data, access_token)
+
+    monkeypatch.setattr(meta_ads.MetaAdsClient, "_post", fake_post)
     monkeypatch.setattr(meta_ads.MetaAdsClient, "page_access_token", lambda self, page_id: f"PAGE-TOKEN-{page_id}")
     monkeypatch.setattr(meta_ads.MetaAdsClient, "_get", forbidden_get)
     return fake
@@ -459,10 +468,13 @@ def test_a_released_retry_keeps_what_went_out_when_its_save_was_lost(actors, gra
     assert _log_row(owner, comment_id)["retryAfter"]  # every action hit a temporary problem
     graph.fail.clear()
     graph.fail["/comments"] = RuntimeError("the connection broke in the middle of the public reply")
-    state = {"lose_save": True}
+    state = {"lose_save": True, "lost": 0}
 
     def save_lost():  # only the DM's per-action save is lost (the DB blinked right after Meta accepted it)
-        return state["lose_save"] and graph.calls[-1:] == [f"{meta}/messages"]
+        # One write: the next one is the public reply's own in-flight mark (round 2), which must land.
+        lose = state["lose_save"] and graph.calls[-1:] == [f"{meta}/messages"] and not state["lost"]
+        state["lost"] += 1 if lose else 0
+        return lose
 
     _flaky_log_writes(monkeypatch, save_lost)
     later = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -478,3 +490,83 @@ def test_a_released_retry_keeps_what_went_out_when_its_save_was_lost(actors, gra
     assert sent.count(f"{meta}/messages") == 2  # the failed first try and the one that landed: never a third
     row = _log_row(owner, comment_id)
     assert row["actions"] == ["dm", "public", "like"] and row["retryAfter"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt round 2: a reply still waiting for the page lane is not "in flight"
+# ---------------------------------------------------------------------------
+
+
+class _WatchedLock:
+    """The page lane's request lock, telling when a request starts to wait for it."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.waiting = threading.Event()
+
+    def __enter__(self):
+        self.waiting.set()
+        self.lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.lock.release()
+        return False
+
+
+def test_a_reply_still_waiting_for_the_page_lane_is_answered_after_a_restart(actors, monkeypatch):
+    """The reply was marked inFlight BEFORE it waited for the page lane (a busy page, a burst): a process
+    stopped while it waited (a redeploy) left a row saying a send began although nothing left Albayan, so
+    the stuck-claim sweep closed it (skipActions) and the comment was never answered. Each action is now
+    marked as its own request leaves: such a row is re-armed and answered exactly once."""
+    a, owner = actors["a"]["cookies"], actors["a"]["id"]
+    posts = []
+
+    def handler(request):  # Meta (the real _request runs): records the reply POSTs that leave Albayan
+        if request.method == "POST":
+            posts.append(request.url.path.split("/", 2)[2])
+        return httpx.Response(200, json={"id": "1", "success": True})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(meta_ads.httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    monkeypatch.setattr(meta_ads.MetaAdsClient, "page_access_token", lambda self, page_id: f"PAGE-TOKEN-{page_id}")
+    monkeypatch.setenv("ALBAYAN_META_MIN_REQUEST_INTERVAL_MS", "100")
+    lane = _WatchedLock()
+    lanes = {"studio_results": meta_ads._MetaLaneState(), "page": meta_ads._MetaLaneState()}
+    lanes["page"].request_lock = lane
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATES", lanes)
+    for name, value in (("_META_REMOTE_BACKOFF_UNTIL", 0.0), ("_META_APP_WIDE_UNTIL", 0.0),
+                        ("_META_PROVIDER_STATE_REFRESHED_AT", time.monotonic() + 3600),
+                        ("_META_LANE_STATE_REFRESHED_AT", time.monotonic() + 3600)):
+        monkeypatch.setattr(meta_ads, name, value)  # no pause stored by another module's test
+    meta = _meta_id()
+    _link(actors, "a", meta)
+    _rule(a, publicReply="Thanks! We sent you the price")
+    comment_id = f"{meta}_9"
+    real_refusal = meta_ads._lane_refusal_seconds
+    lane.lock.acquire()  # the page lane is busy with the replies queued before this one
+    worker = threading.Thread(target=_comment, args=(meta, comment_id), daemon=True)
+    try:
+        worker.start()
+        assert lane.waiting.wait(10)  # the reply now waits for the lane
+        row = _log_row(owner, comment_id)
+        assert row["processing"] is True and row["actions"] == [] and posts == []
+        assert not row.get("inFlight")  # before the fix: ["public"], although nothing was sent
+        # The process stops here (a redeploy): the waiting reply is never sent. (The thread ends as
+        # soon as it gets the lane, before anything else runs.)
+        monkeypatch.setattr(meta_ads, "_lane_refusal_seconds", lambda *args: (_ for _ in ()).throw(SystemExit()))
+    finally:
+        lane.lock.release()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    monkeypatch.setattr(meta_ads, "_lane_refusal_seconds", real_refusal)
+    assert posts == [] and not _log_row(owner, comment_id).get("inFlight")
+    now = datetime.now(timezone.utc)
+    _retry(now + timedelta(minutes=16))  # the stuck-claim sweep after the restart
+    row = _log_row(owner, comment_id)
+    assert row["processing"] is False and row["retryAfter"] and not row.get("skipActions")  # before: skipActions, lost
+    _retry(now + timedelta(minutes=17))
+    assert [path for path in posts if path.startswith(comment_id)] == [f"{comment_id}/comments"]  # answered once
+    row = _log_row(owner, comment_id)
+    assert row["actions"] == ["public"] and row["retryAfter"] == "" and row["inFlight"] == [] and row["error"] == ""
+    assert studio.reply_log_outcome(row) == "sent"

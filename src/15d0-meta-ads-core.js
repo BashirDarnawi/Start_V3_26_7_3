@@ -1,9 +1,5 @@
-// META ADS — SECURE READ-ONLY SYNCHRONIZATION. Albayan stays the source of
-// truth for customers, receipts, payments, rates, photos and notes; Meta facts
-// live only in server-controlled meta* fields, shown beside Albayan's values.
-// STARTUP half: what ad rows/cards/headers draw, the dialog state sign-out
-// resets, the two closers. The dialogs ship in lazy meta-tools.js
-// (src/15d-meta-ads.js) via 15d1-meta-tools-loader.js.
+// META ADS (read-only sync): Albayan owns customers, money, photos and notes; Meta facts stay in
+// server-set meta* fields. Startup half (rows, cards, headers, closers); dialogs: lazy meta-tools.js.
 
 const metaAdsUi = {
   open: false, // the renderer draws only while open: a late load never reopens a closed dialog
@@ -83,9 +79,8 @@ function metaAdsTotalRemainingMinor(ad) {
 }
 
 function metaAdCurrencyIsKnownUSD(ad) {
-  // Must be KNOWN dollars. A draft carries Meta's budget minors before the ad
-  // account's currency is read, so guessing USD would lock EUR 30 in as $30 of
-  // customer debt. Unknown stays manual until a later sync learns it.
+  // KNOWN dollars only: a draft has budget minors before the currency is read, and guessing
+  // USD would book EUR 30 as $30 of debt. Unknown stays manual until a sync learns it.
   return String(ad?.metaCurrency || '').trim().toUpperCase() === 'USD';
 }
 
@@ -99,9 +94,8 @@ function metaAdAutoBudgetUSD(ad) {
 }
 
 function metaAdRealSpendUSD(ad) {
-  // Meta's actual spend in dollars, or null when it cannot be trusted: not
-  // linked, never synced (a 0 before the first sync would wrongly promise
-  // "nothing was spent"), or an ad account that is not known to be in USD.
+  // Meta's spend in dollars, or null when untrusted: not linked, never synced (a 0 then would
+  // promise "nothing spent"), or an account not known to be USD.
   if (!ad?.metaAdId || !ad.metaSyncedAt) return null;
   if (!metaAdCurrencyIsKnownUSD(ad)) return null;
   const minor = Number(ad.metaSpendMinor);
@@ -144,27 +138,35 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
 }
 
 function adPagePictureUrl(ad, adPage) {
-  // Our OWN archived copy wins: signed fbcdn links expire (and stop working
-  // entirely once the Meta link is gone), the stored data URL does not.
+  // Our archived copy wins: signed fbcdn links expire, the stored data URL does not.
   const stored = String(adPage?.metaPagePictureData || ad?.metaPagePictureData || '').trim();
   if (stored.indexOf('data:image/') === 0) return stored;
-  // Lean page record (server lists omit the archived picture): the picture
-  // route serves it by id, through the native interceptor on the phone.
+  // Lean page (lists omit the archive): the picture route serves it by id (phone: native interceptor).
   if (adPage && adPage._mediaOmitted === true && adPage.id && String(adPage.metaPagePictureArchivedFrom || '').trim() && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
     return protectedImageUrl(`/api/collections/pages/${encodeURIComponent(String(adPage.id))}/picture?v=${Math.max(0, Number(adPage._lastModified) || 0)}`);
   }
-  // Server-synced Facebook Page profile picture: the ad's own copy first
-  // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
-  // the linked page record's copy for ads the sync has not revisited yet.
+  // Synced page picture: the ad's own copy first (each sync refreshes its signed URL), then the
+  // linked page's copy for ads the sync has not revisited.
   const url = String(ad?.metaPagePictureUrl || adPage?.metaPagePictureUrl || '').trim();
   return /^https:\/\//i.test(url) ? url : '';
 }
 
-// The ad creative to display: archived copy first, signed link as fallback.
-function metaAdThumbnailSrc(ad) {
+// The ad creative: our archived copy (inline, or by route on lean rows), else Meta's expiring
+// link. img: for an <img> src (the packaged app's interceptor).
+function metaAdThumbnailSrc(ad, img) {
   const stored = String(ad?.metaThumbnailData || '').trim();
   if (stored.indexOf('data:image/') === 0) return stored;
+  if (ad?.id && String(ad.metaThumbnailArchivedFrom || '').trim() && isServerModeEnabled()) {
+    const path = `/api/collections/ads/${encodeURIComponent(String(ad.id))}/meta-thumbnail?v=${Math.max(0, Number(ad._lastModified) || 0)}`;
+    return img ? protectedImageUrl(path) : getServerBaseUrl() + path;
+  }
   return String(ad?.metaThumbnailUrl || '').trim();
+}
+
+// Meta's link: no referrer. Our route: the session (credentials in the packaged app, as uploads).
+function metaAdThumbnailImgAttrs(ad) {
+  const src = metaAdThumbnailSrc(ad, true);
+  return `src="${Security.escapeHtml(src)}"${src === String(ad?.metaThumbnailUrl || '').trim() ? ' referrerpolicy="no-referrer"' : (getServerBaseUrl() && src.indexOf('data:') ? ' crossorigin="use-credentials"' : '')}`;
 }
 
 function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
@@ -186,9 +188,8 @@ function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
 }
 
 function adPageAvatarError(img) {
-  // Signed avatar URLs expire between syncs. A dead one disappears quietly
-  // instead of leaving a broken-image circle beside the ad photo; the next
-  // sync pass stores a fresh URL.
+  // Signed avatar URLs expire between syncs: drop a dead one quietly (no broken circle); the
+  // next sync stores a fresh URL.
   img?.closest?.('.ad-page-avatar')?.remove();
 }
 
@@ -208,7 +209,7 @@ function renderMetaAdThumbnail(ad, isAr) {
     ? (isAr ? 'صورة الصفحة — صورة الإعلان الأصلية غير متاحة من Meta' : "Page picture — Meta does not expose this ad's original photo")
     : (isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image');
   return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
-    <img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
+    <img ${metaAdThumbnailImgAttrs(ad)} alt="${label}" loading="lazy" decoding="async" onerror="metaAdsThumbnailError(this)">
     <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
   </button>`;
 }
@@ -244,9 +245,8 @@ function renderAdPrimaryThumbnail(ad, isAr) {
 }
 
 function adUploadedThumbnailError(img) {
-  // Never replace a failed Albayan upload with a Meta/page picture: that can
-  // show a believable but wrong image. Keep the failure explicit and retryable
-  // through View Photos / Choose main photo.
+  // Never swap a failed upload for a Meta/page picture (believable but wrong): keep the failure
+  // explicit, retryable via View Photos / Choose main photo.
   const button = img?.closest?.('.meta-ad-thumbnail-button');
   if (!button || button.classList.contains('meta-ad-thumbnail-placeholder')) return;
   const unavailable = metaAdsIsArabic() ? 'الصورة المرفوعة غير متاحة' : 'Uploaded photo unavailable';
@@ -282,7 +282,7 @@ function openMetaAdPreview(adId) {
         <div class="min-w-0"><h2 id="meta-ad-preview-title" class="truncate font-black text-slate-800 dark:text-white">${Security.escapeHtml(title)}</h2><p class="truncate text-xs text-slate-500">${Security.escapeHtml(ad.metaAdAccountName || '')}</p></div>
         <button type="button" onclick="document.getElementById('meta-ad-preview-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
+      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img ${metaAdThumbnailImgAttrs(ad)} alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain"></div>
     </div>
   </div>`);
   lucide.createIcons();
@@ -323,10 +323,8 @@ const metaInsightsUi = {
 };
 
 function metaAdsActiveRemainingSummary() {
-  // Combined remaining budget of every Albayan ad whose linked Meta ad is
-  // currently ACTIVE, grouped per ad account. Pure local computation.
-  // Open-ended ads (daily budget, no end date) have no total budget, so they
-  // are reported separately instead of silently contributing 0.
+  // Remaining budget of ads whose Meta ad is ACTIVE, per ad account (local only). Open-ended
+  // ads (daily budget, no end) have no total: listed apart, never counted as 0.
   const byAccount = new Map();
   let totalMinor = 0;
   let count = 0;
@@ -383,9 +381,8 @@ function renderMetaAdStatusSummary(ad, isAr) {
   const liveStatus = String(ad.metaEffectiveStatus || ad.metaConfiguredStatus || 'UNKNOWN');
   const synced = metaAdsFormatDate(ad.metaSyncedAt, true);
   const errorCode = String(ad.metaSyncErrorCode || '');
-  // Meta throttling is one shared provider pause, not a failure of this ad.
-  // Older rows may still contain the previous per-ad error; hide it here and
-  // show the single safe retry state in the Meta Sync dialog instead.
+  // Throttling is one shared Meta pause, not this ad's failure: hide old per-ad errors here; the
+  // Meta Sync dialog shows the single retry state.
   const providerThrottle = errorCode.toLowerCase().includes('rate_limited');
   const error = providerThrottle ? '' : String(ad.metaSyncError || '');
   const accountName = String(ad.metaAdAccountName || '').trim();

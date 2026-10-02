@@ -30,6 +30,12 @@ def admin():
                           "VALUES (:id,'R5 Money Admin',:email,'Admin',:perm,:h,:s,:a,:i,false,:now,NULL,:now)"),
                      {"id": new_id("user"), "email": ADMIN_EMAIL, "perm": json_dumps({}), "h": pw.hash_hex, "s": pw.salt_hex,
                       "a": pw.algo, "i": pw.iterations, "now": now})
+        # A new delivery job only goes to an active Delivery account (bug hunt r2).
+        conn.execute(text("INSERT INTO users (id,name,email,role,permissions_json,password_hash,password_salt,password_algo,"
+                          "password_iterations,deleted,created_at,created_by,last_modified) "
+                          "VALUES (:id,'R5 Money Driver',:email,'Delivery',:perm,:h,:s,:a,:i,false,:now,NULL,:now)"),
+                     {"id": DRIVER_ID, "email": f"r5-money-driver-{TAG}@tests.albayanhub.com", "perm": json_dumps({}),
+                      "h": pw.hash_hex, "s": pw.salt_hex, "a": pw.algo, "i": pw.iterations, "now": now})
     login = client.post("/api/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
     assert login.status_code == 200, login.text
     cookies = {"albayan_session": login.cookies.get("albayan_session")}

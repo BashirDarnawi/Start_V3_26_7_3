@@ -111,7 +111,8 @@ async function main() {
       } else {
         f.sandbox.clearServerCollectionsForVisibility = () => slow.promise;
         f.sandbox.serverLoadAllData = async () => ({ ok: true });
-        operation = f.sandbox.reloadServerDataForAccessChange({ role: 'Admin', permissions: {} }, () => false);
+        f.state.currentUser.role = 'Employee';  // a real narrowing: this Admin was demoted
+        operation = f.sandbox.reloadServerDataForAccessChange({ id: 'admin', role: 'Admin', permissions: {} }, () => false);
       }
       await flush();
       assert.equal(f.elements.has('company-debt-coverage-modal'), false);
@@ -278,6 +279,316 @@ async function main() {
     assert.equal(await f.sandbox.refreshCurrentUserPermissions(), true);
     assert.equal(f.state.currentUser.role, 'Employee');
   });
+  // ---- Bug-hunt round 2: iPhone key order, access grants, sign-out address/badge, signed-out dialog links ----
+  await test('R2 ios-1: Security.stableJson ignores key order, keeps array order, skips undefined and survives a cycle', async () => {
+    const stable = fixture().run('Security.stableJson');
+    assert.equal(stable({ b: 1, a: { d: 2, c: [{ y: 1, x: 2 }] } }), stable({ a: { c: [{ x: 2, y: 1 }], d: 2 }, b: 1 }));
+    assert.notEqual(stable([1, 2]), stable([2, 1]));
+    assert.equal(stable({ a: 1, gone: undefined }), '{"a":1}');
+    const shared = { x: 1 }; const loop = { shared }; loop.self = loop;
+    assert.equal(stable({ a: shared, b: shared }), '{"a":{"x":1},"b":{"x":1}}');
+    assert.equal(stable(loop), '{"self":null,"shared":{"x":1}}');
+  });
+  for (const [label, reply, expected] of [
+    ['only reorders the permission keys (iPhone native reply) is no access change', { customers: ['view'], receipts: ['view'] }, false],
+    ['adds an action is still an access change', { customers: ['view'], receipts: ['view', 'edit'] }, true]
+  ]) {
+    await test(`R2 ios-1: a permission refresh that ${label}`, async () => {
+      const f = fixture(); f.sandbox.isServerModeEnabled = () => true;
+      f.state.currentUser = { id: 'emp', name: 'Emp', role: 'Employee', permissions: { receipts: ['view'], customers: ['view'] }, subscriptions: [] };
+      f.state.users = [f.state.currentUser];
+      f.sandbox.apiJson = async () => ({ id: 'emp', name: 'Emp', role: 'Employee', permissions: reply, subscriptions: [] });
+      assert.equal(await f.sandbox.refreshCurrentUserPermissions(), expected);  // before: true for the reorder too
+    });
+  }
+  // The receipt form re-saved over stored Paid receipt r1; only the serial can differ.
+  async function resaveReceipt(payments, serial) {
+    const f = fixture();
+    f.sandbox.crypto.getRandomValues = v => require('node:crypto').webcrypto.getRandomValues(v);
+    f.state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', _lastModified: 1, status: 'Paid', isPaid: true,
+      serialNumber: '123', finalReceiptNo: '123', amountUSD: 100, amountLocal: 500, exchangeRate: 5, paymentMethod: 'Cash (LYD)',
+      editCount: 1, editHistory: [{ editedAt: '2026-09-01', editedBy: 'Admin', changes: [{ field: 'Status', from: 'Not Paid', to: 'Paid' }] }], payments }];
+    const field = value => ({ value, dataset: {}, classList: { add() {}, remove() {} }, focus() {} });
+    const nodes = Object.fromEntries(Object.entries({ 'receipt-editing-id': 'r1', 'receipt-customer-id': 'c1', 'receipt-status': 'Paid',
+      'paid-collection-value': 'office', 'notpaid-collection-value': 'office', 'receipt-serial': serial, 'receipt-delivery-place': '',
+      'receipt-quoted-delivery-fee': '0', 'receipt-phone-search': '' }).map(([id, value]) => [id, field(value)]));
+    const cells = { '.payment-method': 'Cash (LYD)', '.payment-amount': '500', '.payment-rate1': '1', '.payment-rate2': '5', '.collection-type': 'office' };
+    const row = { querySelector: sel => (sel in cells ? { value: cells[sel] } : null) };
+    f.sandbox.document.getElementById = id => nodes[id] || null;
+    f.sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? [row] : []);
+    const saved = [];
+    f.sandbox.updateRecord = async (array, id, record) => { saved.push(record); return true; };
+    await f.run('_saveReceiptFromModalInner()');
+    assert.equal(saved.length, 1);
+    return saved[0];
+  }
+  await test('R2 ios-1: re-saving a receipt whose payment row the iPhone stored in another key order records no "Payments" edit', async () => {
+    const native = [{ rate2: 5, method: 'Cash (LYD)', amount: 500, rate: 1, collectionType: 'office', deliveryPersonId: '' }];
+    const same = await resaveReceipt(native, '123');
+    assert.equal(same.editCount, 1, JSON.stringify(same.editHistory));  // before: 2, "Payments: 1 payment(s) -> 1 payment(s)"
+    assert.equal(same.editHistory.length, 1);
+    const serial = await resaveReceipt(native, '124');
+    assert.equal(serial.editCount, 2);
+    assert.deepEqual(Array.from(serial.editHistory[1].changes, change => change.field), ['Serial Number']);
+  });
+  await test('R2 ios-1: re-saving an ad whose funding rows the iPhone stored in another key order records no "Receipt Funding" edit', async () => {
+    const f = fixture();
+    f.state.pages = [{ id: 'p1', name: 'Page', customerId: 'c1' }];
+    f.state.receipts = [{ id: 'P', customerId: 'c1', amountUSD: 60, amountLocal: 300, exchangeRate: 5, status: 'Paid', isPaid: true, deliveryStatus: 'Office', payments: [], transfers: [] }];
+    const ad = { id: 'adP', customerId: 'c1', pageId: 'p1', status: 'Active', paymentStatus: 'paid', isPaid: true, collectionMethod: 'in_shop',
+      deliveryStatus: 'Office', amountUSD: 60, amountLocal: 300, exchangeRate: 5, receiptId: 'P', dueAllocations: [],
+      receiptAllocations: [{ amountUSD: 60, receiptId: 'P' }],
+      startDate: '2026-09-01T00:00:00.000Z', endDate: '2026-09-10T00:00:00.000Z', editCount: 0, editHistory: [], _lastModified: 7 };
+    Object.assign(f.state, { ads: [ad], modalData: ad, activeModal: 'ad', tempAdFunding: { allocations: [{ receiptId: 'P', amountUSD: '60.00' }] },
+      tempMergeFunding: { enabled: false, allocations: [] }, tempAdPhotos: [], tempAdPhotosDirty: false });
+    const values = { 'ad-payment-status': 'paid', 'ad-collection-method': '', 'ad-start-date': '2026-09-01', 'ad-end-date': '2026-09-10',
+      'ad-days': '9', 'ad-page': 'p1', 'ad-customer-id': 'c1' };
+    f.sandbox.document.getElementById = id => (id in values ? { value: values[id], dataset: {}, classList: { add() {}, remove() {}, toggle() {} } } : null);
+    const saved = [];
+    f.sandbox.isServerModeEnabled = () => true;
+    f.sandbox.closeModal = () => {};
+    f.sandbox.saveAdThroughAtomicServer = async (action, id, version, data) => { saved.push(data); return data; };
+    await f.sandbox.handleModalSubmit();
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].editCount, 0, JSON.stringify(saved[0].editHistory));  // before: 1, "Receipt Funding: 1 allocation(s) ..."
+  });
+
+  // An admin changed this user's access; live sync runs reloadServerDataForAccessChange.
+  function accessChangeFixture(before, after) {
+    const f = fixture();
+    f.makeElement('app-modal');
+    f.state.currentUser = { id: 'emp', name: 'Emp', role: 'Employee', ...after };
+    f.state.users = [f.state.currentUser];
+    f.state.activeModal = 'receipt'; f.state.modalData = { id: 'r1' };
+    f.state.tempReceiptPhotos = ['data:image/jpeg;base64,AAAA']; f.state.receiptSearch = 'Tripoli';
+    f.run("_deliveryCompletionOpen = { id: 'r9', lastMod: 7 }; db = null");
+    f.storage.setItem('albayan_delivery_draft_r9', '{"notes":"typed"}');
+    let loads = 0;
+    f.sandbox.serverLoadAllData = async () => { loads += 1; return { ok: true }; };
+    const reload = () => f.sandbox.reloadServerDataForAccessChange({ id: 'emp', role: 'Employee', ...before }, () => false);
+    return { ...f, reload, loads: () => loads };
+  }
+  await test('R2 auth-sync-1: a pure grant keeps the open form, its photos, filters and the delivery draft, and still reloads', async () => {
+    const f = accessChangeFixture({ permissions: { receipts: ['view'], ads: ['view'] }, subscriptions: ['clothes_system'] },
+      { permissions: { ads: ['view', 'export'], receipts: ['view', 'edit'], customers: ['add'] }, subscriptions: ['clothes_system', 'ads_studio'] });
+    await f.reload();
+    assert.equal(f.state.activeModal, 'receipt'); assert.equal(f.state.modalData?.id, 'r1');  // before: null
+    assert.equal(f.state.tempReceiptPhotos.length, 1); assert.equal(f.state.receiptSearch, 'Tripoli');
+    assert.equal(f.run('_deliveryCompletionOpen?.id'), 'r9');
+    assert.equal(f.storage.getItem('albayan_delivery_draft_r9'), '{"notes":"typed"}');
+    assert.equal(f.elements.has('app-modal'), true);
+    assert.equal(f.loads(), 1);
+  });
+  for (const [label, before, after] of [
+    ['removing customers.viewContacts (same role)', { permissions: { customers: ['view', 'viewContacts'] } }, { permissions: { customers: ['view'] } }],
+    ['adding review to adCampaignRequests (a narrower scope)', { permissions: { adCampaignRequests: ['view'] } }, { permissions: { adCampaignRequests: ['view', 'review'] } }],
+    ['a removed subscription', { permissions: {}, subscriptions: ['clothes_system'] }, { permissions: {}, subscriptions: [] }],
+    ['a role change', { role: 'Employee', permissions: {} }, { role: 'Delivery', permissions: {} }]
+  ]) {
+    await test(`R2 auth-sync-1: ${label} still closes the dialogs and drops the drafts`, async () => {
+      const f = accessChangeFixture(before, after);
+      await f.reload();
+      assert.equal(f.state.activeModal, null); assert.equal(f.state.tempReceiptPhotos.length, 0);
+      assert.equal(f.storage.getItem('albayan_delivery_draft_r9'), null);
+      assert.equal(f.elements.has('app-modal'), false);
+      assert.equal(f.loads(), 1);
+    });
+  }
+
+  // This tab's address bar: replaceState/pushState move it as a browser does.
+  function addressBar(f, url) {
+    const loc = f.sandbox.window.location;
+    const go = next => { const u = new URL(String(next), 'http://localhost'); loc.pathname = u.pathname; loc.search = u.search; loc.href = u.href; };
+    f.sandbox.URLSearchParams = URLSearchParams;
+    f.sandbox.window.history = { state: null,
+      replaceState(value, _title, next) { this.state = value; go(next); }, pushState(value, _title, next) { this.state = value; go(next); } };
+    go(url);
+    return { go, url: () => loc.pathname + loc.search };
+  }
+  for (const path of ['logout', 'expiry', 'emergency sign-out']) {
+    await test(`R2 auth-sync-4: ${path} drops the filtered address, so the next person's sign-in starts unfiltered`, async () => {
+      const f = fixture();
+      const address = addressBar(f, '/receipts?customer=c_A1&receipt=r_A9');
+      f.sandbox.isServerModeEnabled = () => true;
+      f.sandbox.showSessionTransitionOverlay = () => ({ remove() {} });
+      f.run('db = null');
+      f.state.currentView = 'receipts';
+      if (path === 'expiry') {
+        await f.sandbox.handleServerAuthExpired(f.sandbox.getServerSessionIdentity());
+      } else {
+        f.sandbox.flushPendingUserUpdates = async () => {};
+        f.sandbox.apiLogout = async () => { if (path !== 'logout') throw new Error('failed logout'); };
+        f.sandbox.console.error = () => {};  // the failed logout falls back to emergencyFinishClientSignOut
+        await f.sandbox.handleLogout();
+      }
+      assert.equal(f.state.currentUser, null);
+      assert.ok(!address.url().includes('customer='), address.url());  // before: /receipts?customer=c_A1&receipt=r_A9
+      const next = { id: 'emp_b', name: 'B', role: 'Employee', permissions: { receipts: ['view'] } };
+      f.sandbox.handleLogin = async () => {
+        f.state.currentUser = next; f.state.users = [next];
+        f.run('resetPerUserListFilters()');
+        f.state.currentView = f.sandbox.getPostLoginLandingViewForUser(next);
+        return true;
+      };
+      await f.sandbox.loginFromCurrentRoute('b@example.com', 'pw', false);
+      await flush();
+      assert.equal(f.state.currentUser, next);
+      assert.equal(f.state.receiptCustomerFilter, '');  // before: 'c_A1'
+      assert.equal(f.state.receiptRecordFilter, '');  // before: 'r_A9'
+    });
+  }
+
+  // A body that really mounts the sync badge, and timers fired by hand.
+  function badgeFixture() {
+    const f = fixture();
+    f.sandbox.isServerModeEnabled = () => true;
+    f.sandbox.showSessionTransitionOverlay = () => ({ remove() {} });
+    f.run('db = null');
+    f.sandbox.document.createElement = () => {
+      const node = { style: {}, dataset: {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} },
+        remove: () => { if (f.elements.get(node.id) === node) f.elements.delete(node.id); } };
+      return node;
+    };
+    f.sandbox.document.body.appendChild = node => { f.elements.set(node.id, node); return node; };
+    const timers = new Map(); let nextId = 0;
+    f.sandbox.setTimeout = (fn, ms) => { nextId += 1; timers.set(nextId, { fn, ms }); return nextId; };
+    f.sandbox.clearTimeout = id => { timers.delete(id); };
+    const fire = ms => { for (const [id, timer] of [...timers]) if (timer.ms === ms) { timers.delete(id); timer.fn(); } };
+    const notes = [];
+    f.sandbox.showNotification = (title, message, type) => notes.push(`${type}: ${title}`);
+    return { ...f, fire, notes, badge: () => f.elements.get('sync-status-indicator') || null };
+  }
+  await test('R2 auth-sync-3: a live-sync tick that finds the session expired leaves no "Syncing..." badge on the login screen', async () => {
+    const f = badgeFixture();
+    f.sandbox.console.warn = () => {};
+    f.sandbox.apiFetch = async () => ({ ok: false, status: 401, statusText: '', headers: { get: () => '' }, text: async () => '{"detail":"Not authenticated"}' });
+    await f.sandbox.serverLiveSyncTick();  // every request answers 401
+    await flush();
+    assert.equal(f.state.currentUser, null, 'the 401 signed this device out');
+    f.fire(1200);  // the tick's slow-sync badge timer (SYNC_BADGE_SLOW_MS)
+    assert.equal(f.badge(), null);  // before: "Syncing..." on the login screen, forever
+    assert.equal(f.run('_syncIndicatorShowTimer'), null);
+  });
+  await test('R2 auth-sync-3: Log out removes a "Sync failed - Tap to retry" badge; a tap while signed out paints and says nothing', async () => {
+    const f = badgeFixture();
+    f.sandbox.serverLiveSyncOnce = async () => ({ ok: false });  // what a 503 tick returns
+    await f.sandbox.serverLiveSyncTick();
+    assert.equal(f.badge()?.dataset.status, 'error');
+    f.sandbox.flushPendingUserUpdates = async () => {};
+    f.sandbox.apiLogout = async () => {};
+    await f.sandbox.handleLogout();
+    assert.equal(f.badge(), null);  // before: the red badge stayed on the login screen
+    f.notes.length = 0;
+    await f.sandbox.manualSyncData();
+    assert.equal(f.badge(), null); assert.deepEqual(f.notes, []);
+  });
+  await test('R2 auth-sync-3: a delivery dashboard Refresh tapped while signed out, or still loading at Log out, leaves no badge', async () => {
+    const f = badgeFixture();
+    const driver = f.state.currentUser;
+    f.state.currentUser = null;
+    f.sandbox.apiLoadCollectionAll = async () => [];
+    await f.sandbox.refreshDeliveryDashboard();
+    assert.equal(f.badge(), null); assert.deepEqual(f.notes, []);  // before: "Syncing..." then "Synced" on the login screen
+    f.state.currentUser = driver;
+    const reply = deferred();
+    f.sandbox.apiLoadCollectionAll = () => reply.promise;
+    const refreshing = f.sandbox.refreshDeliveryDashboard();
+    f.sandbox.flushPendingUserUpdates = async () => {};
+    f.sandbox.apiLogout = async () => {};
+    await f.sandbox.handleLogout();
+    f.notes.length = 0;
+    reply.reject(Object.assign(new Error('session changed'), { code: 'SERVER_SESSION_CHANGED' }));
+    await refreshing;
+    assert.equal(f.badge(), null); assert.deepEqual(f.notes, []);  // before: "Sync failed - Tap to retry" + "Refresh Failed"
+  });
+
+  // A dialog link opened while signed out: /receipts?modal=receipt&id=r1.
+  function bootLinkFixture() {
+    const f = fixture();
+    const address = addressBar(f, '/receipts?modal=receipt&id=r1');
+    f.run("_bootModalParams = { modal: 'receipt', id: 'r1' }");  // captured as the page loaded
+    const timers = [];
+    f.sandbox.setTimeout = fn => { timers.push(fn); return timers.length; };
+    const opened = [];
+    f.sandbox.editReceipt = id => { opened.push(id); f.state.activeModal = 'receipt'; f.state.modalData = { id }; };
+    let popstate = null;
+    f.sandbox.window.addEventListener = (type, handler) => { if (type === 'popstate') popstate = handler; };
+    f.sandbox.setupUrlRouting();
+    const back = (url, view) => { address.go(url); popstate({ state: { view } }); };
+    const signIn = user => { f.state.currentUser = user; f.state.users = [user]; };
+    return { ...f, opened, back, signIn, runTimers: () => timers.splice(0).forEach(fn => fn()) };
+  }
+  const linkAdmin = { id: 'admin', name: 'Admin', role: 'Admin', permissions: {} };
+  await test('R2 auth-sync-5: a dialog link opened while signed out opens right after sign-in, never again on a later Back', async () => {
+    const f = bootLinkFixture();
+    f.signIn(linkAdmin);
+    f.sandbox.restoreRequestedViewAfterLogin('receipts');
+    f.runTimers();
+    assert.deepEqual(f.opened, ['r1']);  // before: nothing opened at sign-in
+    f.sandbox.navigateTo('customers'); f.sandbox.navigateTo('ads');
+    f.back('/customers', 'customers'); f.runTimers();
+    assert.deepEqual(f.opened, ['r1']);
+  });
+  await test('R2 auth-sync-5: a sign-in that skips the restore (app browser login) never replays the link on Back', async () => {
+    const f = bootLinkFixture();
+    f.signIn(linkAdmin);
+    f.sandbox.navigateTo('customers'); f.sandbox.navigateTo('ads');
+    f.back('/customers', 'customers'); f.runTimers();
+    assert.deepEqual(f.opened, []);  // before: the receipt popped open on this Back
+  });
+  await test('R2 auth-sync-5: a link still pending at Log out is dropped, so the next person\'s sign-in never opens it', async () => {
+    const f = bootLinkFixture();
+    f.signIn(linkAdmin);  // a sign-in that skipped the restore (app browser login)
+    f.sandbox.flushPendingUserUpdates = async () => {};
+    f.sandbox.showSessionTransitionOverlay = () => ({ remove() {} });
+    f.run("Security.escapeHtml = text => String(text ?? '')");  // this fake document has no innerHTML
+    assert.equal(await f.sandbox.handleLogout(), true);
+    f.signIn({ id: 'emp', name: 'Emp', role: 'Employee', permissions: { receipts: ['view'] } });
+    f.sandbox.restoreRequestedViewAfterLogin('receipts');
+    f.runTimers();
+    assert.deepEqual(f.opened, []);  // before: the previous session's receipt opened for the next person
+  });
+  await test('R2 auth-sync-5: a link to a view this user may not open is dropped at sign-in', async () => {
+    const f = bootLinkFixture();
+    f.signIn({ id: 'emp', name: 'Emp', role: 'Employee', permissions: { customers: ['view'] } });
+    f.sandbox.restoreRequestedViewAfterLogin('receipts');
+    f.runTimers();
+    assert.equal(f.run('_bootModalParams'), null);  // before: still waiting for a Back press
+    assert.deepEqual(f.opened, []);
+  });
+  // Bug hunt r2 (R2-client-auth-sync-2): servers now answer a mistyped current
+  // password with 403; older servers answered 401, which apiJson read as an
+  // expired session (sign-out + wiped device data) although the session lived.
+  for (const status of [403, 401]) {
+    await test(`a mistyped current password (HTTP ${status}) keeps the user signed in with their data`, async () => {
+      const f = fixture();
+      Object.assign(f.sandbox, { AbortController, Response, Headers, DOMException, console: { ...f.sandbox.console, warn() {} } });
+      const notes = []; const overlays = []; const requests = [];
+      f.sandbox.showNotification = (title, message, type) => notes.push([title, message, type]);
+      f.sandbox.showSessionTransitionOverlay = message => { overlays.push(message); return { remove() {} }; };
+      f.sandbox.wipeAuthenticatedServerDataFromClient = async () => {};
+      f.sandbox.fetch = async (url, options) => {
+        requests.push(`${options.method} ${new URL(url, 'http://localhost').pathname}`);
+        return new Response(JSON.stringify({ detail: 'Invalid current password' }), { status, headers: { 'Content-Type': 'application/json' } });
+      };
+      f.makeElement('cp-current').value = 'MistypedOld123!';
+      f.makeElement('cp-new').value = 'BrandNewPass123';
+      f.makeElement('cp-confirm').value = 'BrandNewPass123';
+      f.run('db = null');
+      const user = { id: 'u_staff1', name: 'Staff One', role: 'Employee', permissions: { customers: ['view'] } };
+      Object.assign(f.state, { serverMode: true, currentUser: user, users: [user], currentView: 'settings',
+        customers: [{ id: 'c1', name: 'Customer A' }, { id: 'c2', name: 'Customer B' }], receipts: [{ id: 'r1', customerId: 'c1' }],
+        activeModal: 'change-password', modalData: {} });
+      await f.sandbox.handleModalSubmit();
+      for (let i = 0; i < 20; i += 1) await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(requests, ['POST /api/auth/password-change']);
+      assert.equal(f.state.currentUser, user, 'still signed in: the server session is valid');
+      assert.equal(f.state.customers.length, 2); assert.equal(f.state.receipts.length, 1);
+      assert.equal(f.state.activeModal, 'change-password', 'the dialog stays open for another try');
+      assert.deepEqual(overlays, []);
+      assert.deepEqual(notes, [['Error', 'Invalid current password', 'error']], 'no "Session Expired"');
+    });
+  }
   console.log(`\n${passed} session/privacy regressions passed.`);
 }
 

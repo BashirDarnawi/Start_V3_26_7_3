@@ -452,6 +452,24 @@ def meta_call_lane(lane: str, *, subject: Any = ""):
         _META_LANE_CONTEXT.reset(marker)
 
 
+_META_BEFORE_SEND: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "albayan_meta_before_send", default=None
+)
+
+
+@contextmanager
+def before_meta_send(callback: Callable[[], None]):
+    """Run ``callback`` for each request of this block as it leaves Albayan: inside its lane's lock,
+    after the pause checks and the pacing wait, right before the send (R2: Social Studio marks a
+    reply in flight there, not while it still waits for the lane). If the callback raises, nothing
+    is sent."""
+    marker = _META_BEFORE_SEND.set(callback)
+    try:
+        yield
+    finally:
+        _META_BEFORE_SEND.reset(marker)
+
+
 def _resolve_call_lane(lane: str | None, access_token: str | None) -> tuple[str, str]:
     """(lane, subject) of one request: its own lane, else the surrounding meta_call_lane block,
     else the page lane for a call sent with a Page token, else the admin lane."""
@@ -1522,16 +1540,15 @@ class MetaAdsClient:
         code = str(error.get("code") or status or "meta_error") if isinstance(error, dict) else str(status)
         subcode = str(error.get("error_subcode") or "") if isinstance(error, dict) else ""
         provider_code = f"{code}.{subcode}" if subcode else code
-        if status in {401, 403} or code == "190":
+        if code == "190":
             return MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code=provider_code)
-        if status == 404 or code == "803" or (code == "100" and subcode == "33"):  # plain 100 = invalid parameter, retried via the slim fallback
-            return MetaAdsError("not_found", "The selected Meta ad was not found or is no longer accessible.", provider_code=provider_code)
         # 4/17/32/613 are classic Graph throttling; the 80xxx family is the
         # Marketing API's per-ad-account/business throttling, which arrives as
         # a plain HTTP 400. Both mean "wait, then continue" — treating them as
         # permanent failures is what used to freeze photos and budgets behind
         # multi-hour backoffs whenever an account was busy. Which lanes wait is
         # decided by the limit's scope (_record_meta_throttle, PLAN P3-00b).
+        # Read before the HTTP status (R2): Meta also sends a limit as HTTP 403.
         if status == 429 or code in {
             "4", "17", "32", "613",
             "80000", "80001", "80002", "80003", "80004",
@@ -1550,6 +1567,10 @@ class MetaAdsClient:
                 subcode=subcode,
             )
             return MetaAdsError("rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True, provider_code=provider_code)
+        if status in {401, 403}:
+            return MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code=provider_code)
+        if status == 404 or code == "803" or (code == "100" and subcode == "33"):  # plain 100 = invalid parameter, retried via the slim fallback
+            return MetaAdsError("not_found", "The selected Meta ad was not found or is no longer accessible.", provider_code=provider_code)
         # Graph codes 1 ("unknown"/"please reduce the amount of data") and 2
         # ("service temporarily unavailable") are transient in practice. They
         # must keep the short retry clock, otherwise one hiccup parks an ad's
@@ -1677,6 +1698,9 @@ class MetaAdsClient:
             wait_seconds = _meta_request_interval_seconds() - elapsed
             if server_config and last_request and wait_seconds > 0:
                 time.sleep(min(wait_seconds, _meta_request_interval_seconds()))  # never longer than one interval
+            before_send = _META_BEFORE_SEND.get()
+            if before_send is not None:
+                before_send()  # before_meta_send: raising here sends nothing
             try:
                 with httpx.Client(
                     timeout=float(self.config.request_timeout_seconds),
@@ -6149,9 +6173,19 @@ def unlink_meta_ad(
     return _thin_ad_entity(entity), False
 
 
+def _system_token_refused(error: MetaAdsError) -> bool:
+    """Meta refused Albayan's token itself (Graph code 190, or HTTP 401 with no code): one
+    provider-wide condition, not this ad's. A permission refusal (3, 10, 200-299, a 403) is not."""
+    return error.code == "authorization" and str(error.provider_code or "").split(".")[0] in {"190", "401"}
+
+
 def _sync_failure_delay_ms(
     config: MetaAdsConfig, failure_count: int, error: MetaAdsError
 ) -> int:
+    if _system_token_refused(error):
+        # R2: no growing backoff for a dead token, so a renewed one resyncs every ad within
+        # one normal interval (the per-ad error stays: it is where staff see "Reconnect").
+        return min(config.sync_interval_minutes * 60_000, 6 * 60 * 60_000)
     if error.retryable:
         # A transient Meta limit must not make a new draft wait the normal
         # 15-minute refresh period after its very first enrichment attempt.
@@ -6544,6 +6578,8 @@ def _sync_due_meta_ads_unlocked(limit: int | None = None) -> list[dict[str, Any]
             failed = _record_meta_sync_failure_or_park(ad_id, error, version)
             if failed:
                 updated.append(failed)
+            if _system_token_refused(error):
+                break  # R2: every ad would be refused the same way; one call a pass is enough
         except Exception:
             # Never leak third-party exception text into logs or ad data.
             failed = _record_meta_sync_failure_or_park(
@@ -7619,10 +7655,11 @@ def create_meta_ads_router(
             background_tasks.add_task(flush_webhook_counts, reserved=True)
         if isinstance(payload, dict) and payload.get("object") in ("page", "instagram"):
             # Page/Instagram comment events belong to Social Studio. Imported
-            # lazily because social_studio imports this module.
+            # lazily because social_studio imports this module. Queued for its own
+            # comment thread (R2): a burst never fills the shared request threadpool.
             from .systems.ads_studio import social_studio
 
-            background_tasks.add_task(social_studio.handle_meta_webhook, payload)
+            background_tasks.add_task(social_studio.enqueue_meta_webhook, payload)
             # A comment says nothing about ad accounts: no discovery read.
             return {"received": True}
         account_ids: list[str] = []

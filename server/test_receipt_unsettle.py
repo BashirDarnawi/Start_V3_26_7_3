@@ -50,7 +50,9 @@ from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 client = TestClient(app, headers={"Origin": "http://testserver"})
 ADMIN_EMAIL = "unsettle-admin@tests.albayanhub.com"
 ADMIN_PASSWORD = "UnsettleAdmin123!Secure"
-DRIVER_ID = "unsettle_driver_shreif"
+DRIVER_ID = "unsettle_driver_shreif"  # unknown to the users table: /unsettle takes it as a legacy row
+# A generic create only assigns a new job to an active Delivery account (bug hunt r2).
+ACTIVE_DRIVER_ID = "unsettle_driver_active"
 
 
 def _ensure_admin() -> str:
@@ -85,10 +87,29 @@ def _ensure_admin() -> str:
         return uid
 
 
+def _ensure_active_driver() -> None:
+    pw = hash_password(ADMIN_PASSWORD, iterations=PBKDF2_ITERATIONS_DEFAULT)
+    now = now_ms()
+    with db_conn() as conn:
+        if conn.execute(text("SELECT 1 FROM users WHERE id=:id"), {"id": ACTIVE_DRIVER_ID}).first():
+            return
+        conn.execute(
+            text(
+                "INSERT INTO users (id,name,email,role,permissions_json,password_hash,"
+                "password_salt,password_algo,password_iterations,deleted,created_at,"
+                "created_by,last_modified) VALUES "
+                "(:id,'Unsettle Driver',:email,'Delivery',:perm,:h,:s,:a,:i,false,:now,NULL,:now)"
+            ),
+            {"id": ACTIVE_DRIVER_ID, "email": "unsettle-driver@tests.albayanhub.com", "perm": json_dumps({}),
+             "h": pw.hash_hex, "s": pw.salt_hex, "a": pw.algo, "i": pw.iterations, "now": now},
+        )
+
+
 @pytest.fixture(scope="module")
 def admin():
     init_db()
     _ensure_admin()
+    _ensure_active_driver()
     r = client.post(
         "/api/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
     )
@@ -153,7 +174,7 @@ def _pending_delivery_receipt(rid, cid, amount, admin, *, rate=5):
                 "status": "Not Paid",
                 "isPaid": False,
                 "deliveryStatus": "Needs Delivery",
-                "deliveryPersonId": DRIVER_ID,
+                "deliveryPersonId": ACTIVE_DRIVER_ID,
                 "statusDetail": {"notPaidCollection": "delivery"},
                 "deliveryPlaceName": "test place",
                 "quotedDeliveryFee": 5,

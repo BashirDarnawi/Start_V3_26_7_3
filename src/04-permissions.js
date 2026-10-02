@@ -417,7 +417,8 @@ async function refreshCurrentUserPermissions() {
   try {
     const currentId = String(state.currentUser.id || '');
     const requestIdentity = getAuthMeIdentity();
-    const beforeAccess = JSON.stringify({
+    // Key-order blind: the iPhone app delivers the login user's maps reordered.
+    const beforeAccess = Security.stableJson({
       role: String(state.currentUser.role || '').toLowerCase(),
       permissions: state.currentUser.permissions || {},
       subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
@@ -435,15 +436,14 @@ async function refreshCurrentUserPermissions() {
         permissions: (me.permissions && typeof me.permissions === 'object') ? me.permissions : {},
         subscriptions: Array.isArray(me.subscriptions) ? me.subscriptions : (state.currentUser.subscriptions || [])
       };
-      const afterAccess = JSON.stringify({
+      const afterAccess = Security.stableJson({
         role: String(state.currentUser.role || '').toLowerCase(),
         permissions: state.currentUser.permissions || {},
         subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
       });
       const changed = beforeAccess !== afterAccess;
-      // Also update in users array — UPSERT: if the record is missing (users
-      // list fetch failed or returned permission-less stubs), insert it so the
-      // periodic refresh can repair an empty state.users.
+      // UPSERT into state.users, so the periodic refresh repairs a missing or
+      // permission-less (stub) record.
       upsertCurrentUserIntoUsers();
       if (changed) console.log('[Permissions] Refreshed current user access');
       return changed;
@@ -457,10 +457,8 @@ async function refreshCurrentUserPermissions() {
   return false;
 }
 
-// Ensure state.users contains the current user's record WITH permissions.
-// state.currentUser always carries the full permission map from the server
-// login / /api/auth/me response; the users list for non-admins does not
-// (GET /api/users/public returns only {id,name,role}).
+// Keep the current user's record in state.users WITH permissions: login and
+// /api/auth/me carry the full map; GET /api/users/public only {id,name,role}.
 function upsertCurrentUserIntoUsers() {
   const cu = state.currentUser;
   if (!cu || !cu.id) return;

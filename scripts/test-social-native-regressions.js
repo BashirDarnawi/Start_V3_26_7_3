@@ -293,6 +293,51 @@ async function main() {
     assert.equal(await f.sandbox.syncNativeReconciliationReminders(), false);
     assert.equal(await f.sandbox.setNativeRemindersEnabled(true), false); assert.equal(calls, 0);
   });
+  // R2 ios-device-behaviour-3: iOS keeps a reminder tap that launched the app and hands it to the first
+  // listener, added by setupNativeServices() before init restores the session; the tap was dropped.
+  for (const [label, lock, logoutFirst, opens] of [
+    ['opens Reconciliation once the session is back', false, false, true],
+    ['opens it after Face ID', 'unlock', false, true],
+    ['stays closed while Face ID is cancelled', 'cancel', false, false],
+    ['is dropped by a logout in between', false, true, false]
+  ]) {
+    await test(`a reminder tapped while the iPhone app was closed ${label}`, async () => {
+      const f = loadBrowserSource();
+      const tap = { actionId: 'tap', notification: { id: 123456, extra: { albayanType: 'reconciliation', adId: 'ad_a' } } };
+      const nav = [];
+      let onTap = null;
+      const plugin = name => ({ addListener: async (event, handler) => {
+        if (name === 'LocalNotifications' && event === 'localNotificationActionPerformed') { onTap = handler; await handler(tap); }
+        return { remove() {} };
+      } });
+      f.sandbox.window.Capacitor = { Plugins: {
+        SecureStorage: { internalGetItem: async ({ prefixedKey }) => ({ data: lock && prefixedKey.endsWith('biometric_lock_enabled') ? 'true' : null }) },
+        BiometricAuthNative: { checkBiometry: async () => ({ isAvailable: true, deviceIsSecure: true }) },
+        Keyboard: plugin('Keyboard'), Network: plugin('Network'), App: plugin('App'), LocalNotifications: plugin('LocalNotifications'), Browser: plugin('Browser')
+      } };
+      f.sandbox.navigator.userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148';
+      f.run('Platform._cache = null');
+      f.sandbox.navigateToInternal = view => { nav.push(view); };
+      f.sandbox.authenticateNativeDevice = async () => lock === 'unlock';
+      f.state.currentUser = null;   // init has not restored the session yet
+      await f.sandbox.setupNativeServices();
+      assert.equal(f.run('isPackagedMobileApp()'), true);
+      assert.ok(onTap, 'the reminder listener is installed');
+      assert.deepEqual(nav, [], 'nothing moves during setup');
+      if (logoutFirst) f.sandbox.resetNativeAppLockSession();
+      f.state.currentUser = { id: 'emp1', role: 'Employee', permissions: { analytics: ['view'] } };
+      await f.sandbox.initializeNativeSessionProtection();
+      assert.deepEqual(nav, opens ? ['reconciliation'] : [], 'before: a cold-start tap never opened Reconciliation');
+      await f.sandbox.initializeNativeSessionProtection();
+      assert.equal(nav.length, opens ? 1 : 0, 'the tap opens Reconciliation once');
+      // Control: a tap on the running, signed-in app still goes straight there.
+      f.sandbox.window.__albayanInitSettled = true;
+      f.sandbox.unlockNativeApp = async () => true;
+      nav.length = 0;
+      await onTap(tap);
+      assert.deepEqual(nav, ['reconciliation']);
+    });
+  }
   console.log(`\n${passed} Social Studio/native regressions passed.`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

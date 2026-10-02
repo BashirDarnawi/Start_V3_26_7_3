@@ -2860,11 +2860,8 @@ async function openDeliveryReceiptWhatsAppShare(receiptId) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  // FB/IG/Messenger in-app browsers drop script-initiated _blank navigations
-  // inconsistently (and iOS never auto-launches an app from a JS navigation).
-  // The attempt above is harmless when the shell honors it — but do NOT tear
-  // down the dialog (it holds the working Copy fallback) and do NOT claim
-  // WhatsApp opened. Keep the preview open and tell the user the way out.
+  // FB/IG/Messenger in-app browsers drop script _blank navigations (iOS never opens an app
+  // from one): keep the dialog (its Copy fallback works), never claim WhatsApp opened.
   if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
     showNotification(
       isAr ? 'إن لم يفتح واتساب' : 'If WhatsApp did not open',
@@ -2992,8 +2989,8 @@ function _receiptFinalNoExists(serial, excludeId) {
 // ---- IMAGE COMPRESSION (shared by all photo uploads) ----
 // A 3-6MB camera photo stored as a base64 data URL inflates every save, sync
 // payload and export; max 1280px JPEG (~80%) keeps receipts readable at
-// 10-20x less. PNG stays PNG (transparency); on ANY failure the original
-// data URL is kept so a photo is never lost.
+// 10-20x less. PNG/WebP stay PNG only with a transparent pixel; on ANY
+// failure the original data URL is kept so a photo is never lost.
 const IMAGE_MAX_DIMENSION = 1280;
 const IMAGE_JPEG_QUALITY = 0.8;
 
@@ -3037,7 +3034,7 @@ async function compressImageToDataUrl(file) {
     if (!w || !h) return originalDataUrl;
     const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(w, h));
     // PNG and WebP may carry transparency — re-encode as PNG to keep it.
-    const keepAlpha = /image\/(png|webp)/.test(type);
+    let keepAlpha = /image\/(png|webp)/.test(type);
     // Small already and not worth re-encoding? Keep the original.
     if (scale === 1 && originalDataUrl.length < 300 * 1024) return originalDataUrl;
     const canvas = document.createElement('canvas');
@@ -3046,6 +3043,14 @@ async function compressImageToDataUrl(file) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return originalDataUrl;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    // ...only with a transparent (or unreadable) pixel: an opaque PNG, like an iPhone paste, is a JPEG.
+    if (keepAlpha) {
+      try {
+        const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        keepAlpha = false;
+        for (let i = 3; i < px.length && !keepAlpha; i += 4) keepAlpha = px[i] < 255;
+      } catch (_) { keepAlpha = true; }
+    }
     const out = keepAlpha
       ? canvas.toDataURL('image/png')
       : canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY);
@@ -3074,11 +3079,8 @@ function isSafeReceiptPhotoSource(value) {
   return /^(?:\/|\.\/|\.\.\/)[^\s"'<>`]+$/.test(source);
 }
 
-// Distinguish "valid image, just bigger than the 8M-char cap above" from a
-// truly unsupported format, so an oversized JPG gets the "too large" message
-// instead of being told it is not a JPG. Prefix-only regex: never run a
-// full-string pattern over an 8M+ character value. Keep the size threshold
-// aligned with isSafeReceiptPhotoSource.
+// An oversized valid image gets "too large", not "unsupported format". Prefix-only regex (never a
+// full pattern over 8M+ chars); the threshold matches isSafeReceiptPhotoSource.
 function isOversizedReceiptPhotoSource(value) {
   const source = String(value || '').trim();
   return source.length > 8 * 1024 * 1024
@@ -3479,10 +3481,8 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
     document.getElementById('delivery-receipt-image-empty')?.classList.add('hidden');
     updateReceiptDeliveryCompletionComputed();
   }).catch((err) => {
-    // compressImageToDataUrl only rejects when the FileReader itself fails
-    // (iCloud photo that cannot download, expired Android picker document,
-    // WebView memory pressure). The proof photo is REQUIRED, so silence here
-    // left the driver staring at a disabled submit with no explanation.
+    // Only a failed FileReader rejects (iCloud download, expired picker document, memory). The proof
+    // photo is REQUIRED: silence left the driver at a disabled submit with no reason.
     try { console.warn('[deliveryPhoto] Could not read the picked photo:', err?.message || err); } catch (_) {}
     showNotification(
       state.language === 'ar' ? 'خطأ' : 'Error',

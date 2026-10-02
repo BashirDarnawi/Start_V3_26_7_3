@@ -179,6 +179,32 @@ def test_logout_revokes_pending_handoff_but_keeps_other_device_session():
     assert _request("GET", "/api/auth/me", cookie=other_cookie).status_code == 200
 
 
+def test_wrong_current_password_is_refused_without_ending_the_session():
+    # Bug hunt r2 (R2-client-auth-sync-2): every client build reads a 401 as "no valid
+    # session" and signs the user out, wiping the device's cached data, although a
+    # mistyped current password leaves this session valid on the server.
+    user = _seed_user()
+    cookie = _cookie(_login(user))
+    wrong = {"currentPassword": "MistypedBefore123!", "newPassword": NEW_PASSWORD}
+    response = _request("POST", "/api/auth/password-change", cookie=cookie, body=wrong)
+    assert response.status_code == 403, response.text  # before the fix: 401
+    assert response.json()["detail"] == "Invalid current password"
+    me = _request("GET", "/api/auth/me", cookie=cookie)
+    assert me.status_code == 200 and me.json()["id"] == user["id"]
+    assert _credential_counts(user["id"])["sessions"] == 1
+    with db_conn() as conn:
+        failures = conn.execute(text("SELECT COUNT(*) FROM audit_logs WHERE user_id=:uid AND action='password_change_failed'"),
+                                {"uid": user["id"]}).scalar()
+    assert failures == 1  # the possible-session-theft trail is kept
+    # The password did not change, and the five-tries-in-fifteen-minutes limit still holds.
+    assert _login(user).status_code == 200
+    assert _login(user, NEW_PASSWORD).status_code == 401
+    for _ in range(4):
+        assert _request("POST", "/api/auth/password-change", cookie=cookie, body=wrong).status_code == 403
+    assert _request("POST", "/api/auth/password-change", cookie=cookie, body=wrong).status_code == 429
+    assert _request("GET", "/api/auth/me", cookie=cookie).status_code == 200
+
+
 @pytest.mark.parametrize("iterations", [600_000, 120_000], ids=["current-hash", "legacy-hash"])
 def test_reset_after_password_verification_prevents_session_creation(monkeypatch, iterations):
     user = _seed_user(iterations=iterations)

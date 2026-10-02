@@ -234,6 +234,26 @@ def test_a_running_meta_ad_blocks_the_close_until_a_force_reason(admin):
         _delete(("ads", running), ("ads", stopped), ("financialClosures", f"financial-close-{period}"))
 
 
+def test_an_open_delivery_blocks_the_close_until_a_force_reason(admin):
+    # Before: "No closing problems found", the close froze the job and the driver got 423 until an unlock.
+    period = "2010-11"
+    job = f"r4ops_delivery_{TAG}"
+    _insert("receipts", job, {"recordType": "receipt", "customerId": "c1", "date": "2010-11-14", "status": "Paid", "isPaid": True,
+                              "amountUSD": 100, "amountLocal": 500, "exchangeRate": 5, "deliveryStatus": "In Progress"})
+    try:
+        preview = client.get(f"/api/admin/operations/financial-periods/{period}/preview", cookies=admin["cookies"])
+        assert preview.status_code == 200, preview.text
+        assert {b["code"]: b["count"] for b in preview.json()["blockers"]} == {"deliveries_open": 1}, preview.json()["blockers"]
+        refused = client.post("/api/admin/operations/financial-periods/close", json={"period": period}, cookies=admin["cookies"])
+        assert refused.status_code == 409, refused.text
+        forced = client.post("/api/admin/operations/financial-periods/close",
+                             json={"period": period, "forceReason": "driver finishes the run after the close"}, cookies=admin["cookies"])
+        assert forced.status_code == 200, forced.text
+        assert forced.json()["status"] == "closed"
+    finally:
+        _delete(("receipts", job), ("financialClosures", f"financial-close-{period}"))
+
+
 def test_unlocking_a_month_wakes_its_parked_meta_ads(admin):
     period = "2012-07"
     parked, other = f"r4ops_parked_{TAG}", f"r4ops_other_{TAG}"

@@ -332,12 +332,12 @@ async function apiJson(path, options = {}, timeout = {}) {
       console.warn(`[apiJson] ${resp.status} ${options.method || 'GET'} ${path} rid=${rid} ${String(text || '').slice(0, 160).replace(/\s+/g, ' ')}`);
     } catch (_) {}
     // A definitive 401 during an authenticated request means cached business
-    // data must not remain visible indefinitely. Login/setup failures and the
-    // user's own logout request are intentionally excluded.
+    // data must not remain visible indefinitely. Login/setup failures, the user's
+    // own logout and a mistyped current password (older servers) are excluded.
     if (
       resp.status === 401 &&
       state.currentUser &&
-      !['/api/auth/login', '/api/auth/setup-admin', '/api/auth/logout'].includes(path) &&
+      !['/api/auth/login', '/api/auth/setup-admin', '/api/auth/logout', '/api/auth/password-change'].includes(path) &&
       typeof handleServerAuthExpired === 'function' &&
       !serverSessionIdentityChanged(requestSessionIdentity)
     ) {
@@ -2360,11 +2360,9 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   return entity;
 }
 
-// Full-record update used by the delete-cascade cleanup (15-modals.js). This
-// name was referenced there but never defined, so in server mode deleting a
-// receipt that funded an ad crashed with a ReferenceError HALF-WAY through the
-// cleanup — the receipt survived while the ad lost its funding locally.
-// Delegates to apiPatchEntity, which brings retry + timeout handling.
+// Full-record update for the delete-cascade cleanup (15-modals.js). Without it,
+// deleting a receipt that funded an ad crashed half-way (ReferenceError): the
+// receipt survived, the ad lost its funding. apiPatchEntity adds retry + timeout.
 async function apiUpdateEntity(collection, id, record) {
   return await apiPatchEntity(collection, id, record);
 }

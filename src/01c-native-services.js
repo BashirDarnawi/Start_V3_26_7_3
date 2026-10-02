@@ -22,6 +22,8 @@ let _nativeReminderWork = Promise.resolve();
 let _nativeReminderSettingsWork = Promise.resolve();
 // A disable wins at once, even while secure storage waits or fails; only a saved re-enable lifts it.
 let _nativeReminderSchedulingSuppressed = false;
+// A reminder tap that launched the app arrives before init restores the session: init opens it.
+let _nativePendingReconciliationOpen = false;
 let _nativePrefs = {
   ready: false,
   biometricEnabled: false,
@@ -170,7 +172,9 @@ async function readNativeClipboardImage() {
   try {
     const result = await clipboard.read();
     if (!String(result?.type || '').toLowerCase().startsWith('image/')) return null;
-    return _nativeDataUrlToFile(result.value, 'clipboard-photo');
+    const file = _nativeDataUrlToFile(result.value, 'clipboard-photo');
+    // iOS pastes a full-size PNG: shrink it like an upload.
+    try { return (file && _nativeDataUrlToFile(await compressImageToDataUrl(file), 'clipboard-photo')) || file; } catch (_) { return file; }
   } catch (_) { return null; }
 }
 
@@ -412,9 +416,8 @@ async function getNativeBiometricInfo(refresh = false) {
   } catch (_) { return null; }
 }
 
-// iOS shows the Face ID / passcode sheet out of process: its willResignActive and
-// didBecomeActive reach appStateChange. While this flag is set they are the sheet's own,
-// not a background / return (a cancelled prompt re-opened forever; slow unlocks prompted twice).
+// iOS: the Face ID sheet's resign/become-active reach appStateChange; while this is set they are
+// not a background/return (a cancelled prompt re-opened forever; slow unlocks prompted twice).
 let _nativePromptOpen = false;
 
 async function authenticateNativeDevice(reason = '') {
@@ -477,10 +480,9 @@ function removeNativeAppLock() {
   document.body.classList.remove('native-app-locked');
 }
 
-// After a sign-out (manual, forced by a 401, or emergency): a login form needs
-// no lock, and a pending "authentication required" must not outlive the user.
+// After any sign-out: a login form needs no lock, and no challenge (or tap) outlives the user.
 function resetNativeAppLockSession() {
-  _nativeAuthenticationRequired = false;
+  _nativeAuthenticationRequired = _nativePendingReconciliationOpen = false;
   removeNativeAppLock();
 }
 
@@ -532,7 +534,7 @@ async function setNativeBiometricLockEnabled(enabled) {
     _nativeAuthenticationRequired = false;
     removeNativeAppLock();
   }
-  if (state.currentView === 'settings') render();
+  if (['settings', 'more'].includes(state.currentView)) render();
   showNotification(
     state.language === 'ar' ? 'تم تحديث حماية الجهاز' : 'Device protection updated',
     next
@@ -592,8 +594,7 @@ function resetNativeReminderSession() {
   _nativeReminderGeneration++;
   clearTimeout(_nativeReminderTimer);
   _nativeReminderTimer = null;
-  // Serialize cancellation after any OS schedule call already in progress;
-  // a late native response must not reintroduce the previous user's reminders.
+  // Queued after any OS schedule in flight: a late reply must not restore the old user's reminders.
   return _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
 }
 
@@ -656,15 +657,13 @@ function queueNativeReminderSync() {
 }
 
 function setNativeRemindersEnabled(enabled) {
-  // Invalidate immediately, even when an OS permission/storage operation from
-  // an earlier toggle is still pending. Persist preference writes in order.
+  // Invalidate now, even while an earlier toggle's OS call is pending; preference writes stay in order.
   _nativeReminderGeneration++;
   clearTimeout(_nativeReminderTimer);
   _nativeReminderTimer = null;
   if (enabled !== true) {
     _nativeReminderSchedulingSuppressed = true;
-    // Cancellation must not wait behind secure storage. The OS work queue
-    // still orders it after any schedule already being installed.
+    // Cancel without waiting for secure storage (still after any schedule in flight).
     if (isPackagedMobileApp()) _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
   }
   const context = _captureNativeReminderContext();
@@ -705,7 +704,7 @@ async function _setNativeRemindersEnabledOnce(enabled, context) {
         : (state.language === 'ar' ? 'لم يتغير الإعداد المحفوظ. حاول مرة أخرى.' : 'The saved setting has not changed. Please try again.'),
       'warning'
     );
-    if (state.currentView === 'settings') render();
+    if (['settings', 'more'].includes(state.currentView)) render();
     return false;
   }
   _nativePrefs.remindersEnabled = next;
@@ -715,7 +714,7 @@ async function _setNativeRemindersEnabledOnce(enabled, context) {
   }
   else await _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
   if (!_nativeReminderContextIsCurrent(context)) return false;
-  if (state.currentView === 'settings') render();
+  if (['settings', 'more'].includes(state.currentView)) render();
   return true;
 }
 
@@ -728,15 +727,18 @@ async function syncNativeSystemBarsTheme() {
 
 async function initializeNativeSessionProtection() {
   await setupNativeServices();
+  let unlocked = true;
   if (!isPackagedMobileApp() || !state?.currentUser || !_nativePrefs.biometricEnabled) {
     _nativeAuthenticationRequired = false;
     removeNativeAppLock();
-    queueNativeReminderSync();
-    return true;
+  } else {
+    renderNativeAppLock();
+    unlocked = await unlockNativeApp();
   }
-  renderNativeAppLock();
-  const unlocked = await unlockNativeApp();
   queueNativeReminderSync();
+  const open = _nativePendingReconciliationOpen && unlocked && state?.currentUser;
+  _nativePendingReconciliationOpen = false;
+  if (open) try { navigateToInternal('reconciliation'); } catch (_) {}
   return unlocked;
 }
 
@@ -749,8 +751,7 @@ async function setupNativeServices() {
       return;
     }
 
-    // Four independent native reads: run them together (each bridge call costs
-    // a few ms on a phone, and the login page waits for this block).
+    // Independent native reads run together: the login page waits for this block.
     const [biometricEnabled, remindersEnabled] = await Promise.all([
       nativeSecureGet('biometric_lock_enabled'),
       nativeSecureGet('reconciliation_reminders_enabled'),
@@ -797,8 +798,7 @@ async function setupNativeServices() {
       }
       queueNativeReminderSync();
     });
-    // iOS: the sheet's own resign is ignored above, so a real background behind
-    // an open sheet is recorded here ('pause' never fires for the sheet itself).
+    // iOS: a real background behind an open sheet is recorded here ('pause' never fires for the sheet).
     if (Platform.isIOS) await _addNativeListener(app, 'pause', () => {
       _nativeBackgroundedAt = Date.now();
       _nativeWentBackground = true;
@@ -814,14 +814,14 @@ async function setupNativeServices() {
     const notifications = getCapacitorPlugin('LocalNotifications');
     await _addNativeListener(notifications, 'localNotificationActionPerformed', async action => {
       if (action?.notification?.extra?.albayanType !== 'reconciliation') return;
+      if (window.__albayanInitSettled !== true || !state?.currentUser) { _nativePendingReconciliationOpen = true; return; }
       if (_nativePrefs.biometricEnabled && state?.currentUser) await unlockNativeApp();
       if (state?.currentUser && typeof navigateToInternal === 'function') navigateToInternal('reconciliation');
     });
 
     const browser = getCapacitorPlugin('Browser');
     await _addNativeListener(browser, 'browserFinished', () => {
-      // Keep the pending PKCE request: the external login may still return
-      // through a deep link after the browser view finishes.
+      // Keep the PKCE request: the login may still return through a deep link.
       try { if (typeof render === 'function') render(); } catch (_) {}
     });
     await syncNativeSystemBarsTheme();

@@ -11,11 +11,8 @@ const _serverLiveSync = {
   // Signature of the last delivery-role payload, so identical polls don't
   // force a full re-render every 3s (which snapped dropdowns shut on phones).
   lastDeliverySig: null,
-  // Highest _lastModified ever seen in an ACTUAL server response. The delta
-  // cursor is seeded/re-seeded from this, never from client-written _lastModified
-  // values — otherwise a device whose clock runs fast would seed the cursor
-  // minutes ahead of server time and silently skip everyone else's updates
-  // (the server's updated_since window only looks back 15s).
+  // Highest _lastModified seen in a real server response; seeds the delta cursor.
+  // A client stamp from a fast clock would skip others' updates (15s look-back).
   serverWatermark: 0,
   fullLoadCursorReady: false,
   // True from the boot's first render until its first data load settles (17-init): the rows may
@@ -25,24 +22,17 @@ const _serverLiveSync = {
   lastCompatibilityCheckAt: 0,
   collectionCursors: Object.create(null),
   serviceEntitlements: null,
-  // Authentication identity and poller lifecycle are deliberately separate.
-  // sessionEpoch changes only when the authenticated session changes; it is
-  // part of getServerSessionIdentity(), so late full-load/cache responses are
-  // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
-  // late tick is discarded without invalidating an unrelated full load.
+  // Kept apart: sessionEpoch (in getServerSessionIdentity) changes only with the
+  // session and rejects late loads; pollerEpoch changes on each stop/restart and
+  // drops a late tick without voiding an unrelated full load.
   sessionEpoch: 0,
   pollerEpoch: 0,
-  // Failure backoff: after consecutive tick failures, polls are skipped until
-  // nextAllowedAt (6s/12s/24s/48s/60s at 3s base). An unreachable server must
-  // not be hammered every 3s from a phone (battery + cell radio); the
-  // visibilitychange/online handlers reset the backoff for an immediate retry.
+  // Failure backoff (6s..60s at a 3s base) spares a phone's battery and radio;
+  // visibilitychange/online reset it for an immediate retry.
   failStreak: 0,
   nextAllowedAt: 0,
-  // Collections already purged after a per-collection 403 (permission boundary).
-  // A revoked collection keeps returning 403 every 3s until the current user's
-  // permissions refresh (every usersSyncIntervalMs). Tracking already-purged
-  // collections here stops an identical 403 from re-clearing state + writing
-  // IndexedDB + forcing a full re-render on every tick (battery/jank storm).
+  // Collections purged after a 403: a revoked one answers 403 until permissions
+  // refresh, and must not re-purge, re-write IndexedDB and re-render every tick.
   purgedForbidden: new Set()
 };
 
@@ -290,12 +280,9 @@ function _deltaRecordVersion(record) {
   return Number.isFinite(version) ? version : null;
 }
 
-// The server deliberately overlaps each delta window so an update cannot be
-// missed at a cursor boundary. Most records in a poll are therefore exact
-// replays of records already in memory. Replace an existing object only for a
-// newer server revision (or the equal-revision deletion tie handled below);
-// preserving object identity for normal equal/stale replays also prevents a
-// needless whole-view render every 3s.
+// Delta windows overlap on purpose, so most polled rows replay what is in memory.
+// Replace a row only for a newer revision (or the equal-revision delete tie below);
+// keeping its identity otherwise avoids a whole-view render every 3s.
 function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false) {
   const incomingVersion = _deltaRecordVersion(incoming);
   const currentVersion = _deltaRecordVersion(current);
@@ -332,10 +319,8 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
   const arr = state[collectionName];
 
-  // PERFORMANCE: build id->index ONCE. The old code did arr.findIndex per
-  // incoming record (O(delta × collection)) plus an O(n) arr.unshift per new
-  // record, so a large catch-up delta (tab hidden overnight / cursor frozen on
-  // failures) froze the UI for hundreds of ms. This is O(delta + collection).
+  // PERFORMANCE: one id->index map, O(delta + collection); a findIndex per row
+  // froze the UI on a large catch-up delta.
   const byId = new Map();
   for (let i = 0; i < arr.length; i++) {
     const x = arr[i];
@@ -453,11 +438,9 @@ async function refreshServerDataCompatibility() {
   return { ok: true, refreshed: true };
 }
 
-// Customer page spending and the delivery WhatsApp preview are body-mounted
-// dialogs rather than children of #app. A normal view render cannot update or
-// remove them, so any authoritative state replacement must close them before
-// stale financial/contact data can remain visible. Never restore focus here:
-// the original card/button may already have been replaced by sync or logout.
+// Customer page spending and the delivery WhatsApp preview are body-mounted, so
+// a render cannot refresh them: close them on any authoritative state change.
+// Never restore focus here (sync or logout may have replaced that button).
 function _closeCustomerPagesDialogForStateChange() {
   let closed = false;
   const shareDialog = document.getElementById('delivery-whatsapp-share-dialog');
@@ -480,14 +463,28 @@ function _closeCustomerPagesDialogForStateChange() {
   return true;
 }
 
-// A scope-narrowing response contains no tombstones for newly hidden rows.
-// Every role transition therefore needs the same purge before a scoped reload,
-// including Delivery -> Employee (whose next tick switches sync strategies).
+// Lost access (D6): a role change, any removed action or subscription, or any
+// scope change. Set-based, so key order is never a change. A pure grant keeps
+// the open form, its photos and the delivery drafts.
+function _accessNarrowed(before, after) {
+  if (String(before?.role || '').toLowerCase() !== String(after?.role || '').toLowerCase()) return true;
+  const lower = list => (Array.isArray(list) ? list : []).map(item => String(item).toLowerCase());
+  for (const module of Object.keys(before?.permissions || {})) {
+    const kept = new Set(lower(after?.permissions?.[module]));
+    if (lower(before.permissions[module]).some(action => !kept.has(action))) return true;
+  }
+  const subs = new Set(lower(after?.subscriptions));
+  if (lower(before?.subscriptions).some(sub => !subs.has(sub))) return true;
+  return getServerVisibilityScopeChanges(before, after).length > 0;
+}
+
+// A scope-narrowing response has no tombstones for newly hidden rows, so every
+// role change purges before a scoped reload (Delivery -> Employee too).
 async function reloadServerDataForAccessChange(accessBefore, isAborted) {
   const scopeChanges = getServerVisibilityScopeChanges(accessBefore, state.currentUser);
   if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
   _serverLiveSync.lastDeliverySig = null;
-  closeSensitiveAuthenticatedUi();
+  if (_accessNarrowed(accessBefore, state.currentUser)) closeSensitiveAuthenticatedUi();
   _authMeRequestGeneration += 1;
   _sessionRequest = null;
   cancelPendingRequests();
@@ -688,10 +685,8 @@ async function serverLiveSyncOnce() {
   if (!(_serverLiveSync.purgedForbidden instanceof Set)) _serverLiveSync.purgedForbidden = new Set();
   // Only act on collections NOT already purged (see purgedForbidden above).
   const newlyForbidden = forbiddenCollections.filter(name => !_serverLiveSync.purgedForbidden.has(name));
-  // ROOT CAUSE: the first time a previously-authorized collection returns 403,
-  // collapse the usersSyncInterval wait so refreshCurrentUserPermissions runs
-  // this very tick (below) — it drops the collection from the authorized list,
-  // so it is never requested again and the churn ends immediately.
+  // ROOT CAUSE: a first 403 refreshes permissions this very tick (below), which
+  // drops the collection from the authorized list and ends the churn.
   if (newlyForbidden.length > 0) _serverLiveSync.lastUsersSyncAt = 0;
   const customerPageForbidden = newlyForbidden.some(name =>
     name === 'ads' || name === 'receipts' || name === 'customers' || name === 'pages' || name === 'exchangeRateHistory'
@@ -908,11 +903,8 @@ let _syncIndicatorShowTimer = null;
 // Is a badge actually on screen? A healthy tick must leave nothing behind,
 // and "Synced" may only appear to close out a badge the user already saw.
 let _syncIndicatorVisible = false;
-// The poll runs every 3s. Painting "Syncing…" then "Synced" on EVERY tick
-// left a pill flashing in the corner forever, which reads as a fault — the
-// behavior the owner reported as "sync failed" even while syncing was fine.
-// Routine ticks are now silent: a badge appears only for a genuinely slow
-// sync, a real failure, or a sync the user asked for (immediate: true).
+// Routine 3s ticks stay silent (a pill on every tick read as "sync failed"): a
+// badge shows only for a slow sync, a failure, or a user's sync (immediate).
 const SYNC_BADGE_SLOW_MS = 1200;
 
 function updateSyncIndicator(status, { immediate = false } = {}) {
@@ -990,8 +982,18 @@ function _paintSyncIndicator(status) {
   }
 }
 
+// Sign-out: no badge, and no timer that would paint one, outlives the session.
+function clearSyncIndicator() {
+  clearTimeout(_syncIndicatorShowTimer);
+  clearTimeout(_syncIndicatorHideTimer);
+  _syncIndicatorShowTimer = _syncIndicatorHideTimer = null;
+  document.getElementById('sync-status-indicator')?.remove();
+  _syncIndicatorVisible = false;
+}
+
 // Manual sync function for users
 async function manualSyncData() {
+  if (!state.currentUser) return;  // a badge tapped after sign-out
   if (!isServerModeEnabled()) {
     showNotification(state.language === 'ar' ? 'وضع عدم الاتصال' : 'Offline Mode', state.language === 'ar' ? 'غير متصل بالسيرفر' : 'Not connected to server', 'info');
     return;
@@ -1078,13 +1080,9 @@ function startServerLiveSync() {
   // Run one immediately, then poll.
   serverLiveSyncTick().catch(() => {});
   _serverLiveSync.timer = setInterval(() => {
-    // BATTERY/SERVER SAVER: skip polls while the tab/app is hidden. The
-    // visibilitychange handler below fires an immediate catch-up sync the
-    // moment the app becomes visible again, so no update is ever missed.
+    // BATTERY/SERVER SAVER: no polls while hidden; visibilitychange catches up.
     if (document.visibilityState === 'hidden') return;
-    // Definitely offline, or backing off after repeated failures: skip. The
-    // 'online'/'visibilitychange' handlers below reset the backoff and fire
-    // an immediate catch-up tick, so recovery is never delayed by this.
+    // Offline or backing off: skip; 'online'/'visibilitychange' reset it and catch up.
     if (navigator.onLine === false) return;
     const wait = _serverLiveSync.nextAllowedAt - Date.now();
     if (wait > 0 && wait <= 60000) return; // past the 60 s cap only a clock step: poll now
@@ -1381,11 +1379,9 @@ async function _activateServerSession(user, loginGeneration) {
       return;
 }
 
-// SYSTEM-BROWSER APP LOGIN (Phase 2), native side: exchange the one-time
-// deep-link code plus the device-held PKCE verifier for a session, then run
-// the exact same post-auth pipeline as a password login. Called only from
-// _processAppLoginCallback (09-api-auth.js), which owns the pending-request
-// bookkeeping and the waiting/busy UI.
+// SYSTEM-BROWSER APP LOGIN (Phase 2), native side: trade the one-time code and
+// PKCE verifier for a session, then run the password login's post-auth steps.
+// Only _processAppLoginCallback (09-api-auth.js) calls it; it owns the busy UI.
 async function completeAppBrowserLogin(code, verifier) {
   if (_logoutInFlight || _serverAuthExpiryInFlight) {
     showNotification(
@@ -1721,6 +1717,7 @@ function closeSensitiveAuthenticatedUi() {
 
 function resetAuthenticatedServerCaches() {
   closeSensitiveAuthenticatedUi();
+  clearSyncIndicator();
   _authMeRequestGeneration += 1;
   _sessionRequest = null;
   _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' };
@@ -1793,6 +1790,13 @@ async function wipeAuthenticatedServerDataFromClient() {
   await Promise.allSettled(writes);
 }
 
+// Sign-out drops the old account's address (?customer=&receipt=, a pending dialog
+// link) so the next sign-in cannot re-apply it; '/' becomes that user's landing.
+function _resetSignedOutAddress() {
+  _bootModalParams = null;
+  try { window.history.replaceState({}, '', IS_STUDIO_SHELL ? window.location.pathname : '/'); } catch (_) {}
+}
+
 function emergencyFinishClientSignOut(serverMode, expired) {
   closeSensitiveAuthenticatedUi();
   try { stopServerLiveSync(); } catch (_) {}
@@ -1811,6 +1815,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
   if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
   if (serverMode) activateAnonymousServerCollectionStorage();
   state.currentView = 'analytics';
+  _resetSignedOutAddress();
   saveState();
   showNotification(
     state.language === 'ar' ? (expired ? 'انتهت الجلسة' : 'تم تسجيل الخروج') : (expired ? 'Session Expired' : 'Logged Out'),
@@ -1855,6 +1860,7 @@ async function _handleLogoutOnce() {
     if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
     if (serverMode) activateAnonymousServerCollectionStorage();
     state.currentView = 'analytics';
+    _resetSignedOutAddress();
     saveState();
     if (serverMode && !serverSignedOut) {
       showNotification(state.language === 'ar' ? 'تم تسجيل الخروج من هذا الجهاز' : 'Signed out on this device',
@@ -1907,6 +1913,7 @@ function handleServerAuthExpired(requestIdentity, done) {  // done: [title, text
       if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
       activateAnonymousServerCollectionStorage();
       state.currentView = 'analytics';
+      _resetSignedOutAddress();
       saveState();
       showNotification(
         done ? done[0] : state.language === 'ar' ? 'انتهت الجلسة' : 'Session Expired',

@@ -72,6 +72,32 @@ def test_month_snapshot_uses_the_same_money_rules_as_the_analytics_screen(monkey
     assert blockers == {"ads_need_setup": 1, "unpaid_receipts": 1, "ads_still_running": 2}
 
 
+def test_month_snapshot_blocks_open_deliveries_and_cash_still_with_drivers(monkeypatch):
+    # Closing freezes these rows (423): the driver could not finish or cancel, the office could not record the handover.
+    def blockers(*receipts, ads=()):
+        snapshot = _snapshot_with(monkeypatch, receipts=receipts, ads=ads)
+        return {b["code"]: b["count"] for b in snapshot["blockers"]}, snapshot["counts"]
+    paid = {"date": "2026-09-10", "status": "Paid", "isPaid": True, "amountUSD": 100, "amountLocal": 500}
+    found, counts = blockers({**paid, "id": "d1", "deliveryStatus": "In Progress"})  # paid at the office while the driver is out
+    assert found == {"deliveries_open": 1} and counts["deliveriesOpen"] == 1, found
+    delivered = {**paid, "id": "d2", "deliveryStatus": "Delivered", "amountCollectedFromCustomer": 500}
+    found, counts = blockers(delivered)
+    assert found == {"driver_cash_not_handed_over": 1} and counts["driverCashNotHandedOver"] == 1, found
+    # The handover reads like the delivery board: isReceivedInOffice first when it is a bool, never OR'd with officeHandover.
+    assert blockers({**delivered, "isReceivedInOffice": False, "officeHandover": True})[0] == {"driver_cash_not_handed_over": 1}
+    assert blockers({**delivered, "isReceivedInOffice": True})[0] == {}
+    assert blockers({**delivered, "officeHandover": True})[0] == {}
+    # Collected cash reads like the board too: 0, null and "" are nothing collected; a missing figure falls back to amountLocal.
+    for nothing in (0, None, ""):
+        assert blockers({**delivered, "amountCollectedFromCustomer": nothing})[0] == {}, nothing
+    assert blockers({k: v for k, v in delivered.items() if k != "amountCollectedFromCustomer"})[0] == {"driver_cash_not_handed_over": 1}
+    # The month's ads count too; a canceled run or a canceled receipt does not.
+    ad = {"id": "a1", "startDate": "2026-09-02", "status": "Completed", "paymentStatus": "paid", "customerId": "c", "amountUSD": 50,
+          "spentUSD": 50, "deliveryStatus": " Needs Delivery "}
+    assert blockers(ads=[ad])[0] == {"deliveries_open": 1}
+    assert blockers({**paid, "id": "d3", "deliveryStatus": "Canceled"}, {**paid, "id": "d4", "status": "Canceled", "deliveryStatus": "In Progress"})[0] == {}
+
+
 def test_record_date_uses_the_business_day_in_libya(monkeypatch):
     monkeypatch.delenv("ALBAYAN_BUSINESS_TIMEZONE", raising=False)
     assert operations._period_for_record("receipts", {"createdAt": "2026-03-31T22:30:00Z"}) == "2026-04"

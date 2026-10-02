@@ -12,10 +12,9 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
-// PURE-JS CRYPTO FALLBACK: crypto.subtle exists only in secure contexts
-// (https:// or localhost); on a plain-HTTP LAN origin it is undefined on iOS
-// Safari and Android Chrome. These SHA-256 / PBKDF2-HMAC-SHA256 routines give
-// byte-identical output to Web Crypto and run only when crypto.subtle is absent.
+// PURE-JS CRYPTO FALLBACK: crypto.subtle is missing outside secure contexts (a
+// plain-HTTP LAN origin on iOS Safari / Android Chrome). These SHA-256 and
+// PBKDF2-HMAC-SHA256 routines match Web Crypto exactly and run only then.
 
 // New hashes created on the pure-JS path use fewer iterations (still recorded
 // in the stored `iterations` field, so they verify anywhere) because 600k
@@ -256,6 +255,26 @@ const Security = {
     return sanitized;
   },
 
+  // JSON with sorted keys (arrays keep order, undefined is skipped): equal data
+  // compares equal in any key order, as the iPhone app reorders native replies.
+  stableJson: (value) => {
+    const seen = new WeakSet();  // the current path only: a cycle becomes null
+    const normalize = (v) => {
+      if (v === null || typeof v !== 'object') return v;
+      if (seen.has(v)) return null;
+      seen.add(v);
+      let out;
+      if (Array.isArray(v)) out = v.map(normalize);
+      else {
+        out = {};
+        for (const k of Object.keys(v).sort()) if (v[k] !== undefined) out[k] = normalize(v[k]);
+      }
+      seen.delete(v);
+      return out;
+    };
+    return JSON.stringify(normalize(value));
+  },
+
   // Internal: bytes <-> hex helpers
   _bytesToHex: (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''),
   _hexToBytes: (hex) => {
@@ -390,10 +409,8 @@ const Security = {
     return `${prefix}_${Date.now()}_${random.substring(0, 12)}`;
   },
 
-  // Record identifiers are used in URLs, data-* attributes and (for legacy
-  // screens) inline handlers. Keep them deliberately boring so an imported or
-  // server-provided id can never break out of one of those contexts. This also
-  // matches the backend's 80-character id limit.
+  // Ids go into URLs, data-* attributes and legacy inline handlers: keep them
+  // boring so no imported/server id can break out (the backend's 80-char limit).
   isValidRecordId: (value) => {
     const id = String(value == null ? '' : value).trim();
     return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id);
@@ -406,11 +423,8 @@ const Security = {
     if (depth > 12 || value === null || value === undefined) return { valid: true };
     if (Array.isArray(value)) {
       for (let i = 0; i < value.length; i++) {
-        // A top-level array is a collection of records, so each direct child's
-        // `id` is a record id. Nested arrays are data inside a record (for
-        // example passkeys[].id is an opaque WebAuthn credential and can be
-        // much longer than 80 characters), so their generic `id` fields must
-        // not be treated as entity identifiers.
+        // Only a top-level array holds records with record ids. Nested arrays are
+        // record data (passkeys[].id is a long opaque WebAuthn credential).
         const childOwnId = depth === 0 && validateOwnId;
         const result = Security.validateRecordIdentifiers(value[i], `${path}[${i}]`, depth + 1, childOwnId);
         if (!result.valid) return result;
@@ -674,11 +688,9 @@ const DataIsolation = {
 // SESSION MANAGEMENT - Secure session handling
 // ==========================================
 
-// iOS Safari with "Block All Cookies" (and Chrome/Android with cookies
-// blocked for the site) makes ANY window.sessionStorage access throw a
-// SecurityError. Local-mode login calls createSession AFTER the password is
-// already verified, so an unguarded throw made login impossible with a
-// misleading generic error. Fall back to a page-lifetime in-memory session.
+// Blocked cookies (iOS "Block All Cookies", Chrome per-site) make any
+// sessionStorage access throw, which made local login impossible after a
+// verified password. Fall back to a page-lifetime in-memory session.
 let _memorySession = null;
 
 const SessionManager = {

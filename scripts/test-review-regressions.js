@@ -1713,6 +1713,35 @@ async function main() {
     assert.ok(/\+7\.00/.test(rows[2]) && rows[2].includes('text-emerald-600'), 'the admin\'s own top-up keeps its + sign');
     assert.ok(!rows.some(row => />(credit|campaign_payment)</.test(row)), 'a raw type code is the title');
   });
+  await test('R2 meta-ads-4: a lean server ad row shows Albayan\'s archived Meta creative through its route, never only the expiring signed link', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    const signed = 'https://scontent.xx.fbcdn.net/v/t45.1600-4/123_n.jpg?oh=x&oe=66AA0000';
+    // Exactly what GET /api/collections/ads?include_media=false returns once the photo count is 0: no inline copy, no _mediaOmitted.
+    const lean = { id: 'ad 7', recordType: 'ad', metaAdId: '120000000000777', metaThumbnailUrl: signed, metaThumbnailArchivedFrom: signed,
+      _lastModified: 1790894613404, _photoCount: 0 };
+    const route = '/api/collections/ads/ad%207/meta-thumbnail?v=1790894613404';
+    state.serverMode = true;
+    assert.equal(sandbox.metaAdThumbnailSrc(lean), route, 'before: the signed fbcdn link, which expires');
+    assert.equal(sandbox.metaAdThumbnailSrc({ ...lean, metaThumbnailData: 'data:image/jpeg;base64,QUJD' }), 'data:image/jpeg;base64,QUJD');
+    assert.equal(sandbox.metaAdThumbnailSrc({ ...lean, metaThumbnailArchivedFrom: '' }), signed, 'nothing archived yet: the signed link');
+    const tile = String(sandbox.renderMetaAdThumbnail(lean, false));
+    assert.ok(tile.includes(`src="${route}"`) && !tile.includes('referrerpolicy') && tile.includes('onerror="metaAdsThumbnailError(this)"'), tile);
+    const fresh = String(sandbox.renderMetaAdThumbnail({ ...lean, metaThumbnailArchivedFrom: '' }, false));
+    assert.ok(fresh.includes(`src="${plainEscape(signed)}"`) && fresh.includes('referrerpolicy="no-referrer"') && !fresh.includes('crossorigin'), fresh);
+    // The packaged app: the <img> goes through the session interceptor with credentials, like an uploaded photo,
+    // while the manager shell's safety check still sees a plain https link (an iPhone origin is capacitor://).
+    state.serverBaseUrl = 'https://albayanhub.com';
+    run('Platform.detect()').isCapacitor = true;
+    sandbox.window.Capacitor = { getServerUrl: () => 'capacitor://localhost' };
+    const packaged = String(sandbox.renderMetaAdThumbnail(lean, false));
+    assert.ok(packaged.includes(`src="capacitor://localhost/_capacitor_http_interceptor_?u=${encodeURIComponent(`https://albayanhub.com${route}`)}"`)
+      && packaged.includes('crossorigin="use-credentials"'), packaged);
+    assert.equal(sandbox.isSafeReceiptPhotoSource(sandbox.metaAdThumbnailSrc(lean)), true, 'the manager shell would drop the tile');
+    // Local mode never asks a server.
+    state.serverMode = false;
+    assert.equal(sandbox.metaAdThumbnailSrc(lean), signed);
+  });
   await test('r5 MGR n=16: Meta money on ad cards is 1,250.00 in Arabic too, never the ar-LY 1.250,00', async () => {
     const { sandbox, state } = loadBrowserSource();
     state.language = 'ar';
@@ -1747,6 +1776,23 @@ async function main() {
     }
     assert.ok(html.includes('فعّل النسخ الاحتياطي اليومي المشفّر'));
     state.language = 'en';
+  });
+  await test('R2 clothes-operations-1: the month check names open deliveries and cash still with drivers, in Arabic too', async () => {
+    const { sandbox, state } = controlCenterFixture();
+    sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
+      { code: 'deliveries_open', count: 2, message: 'Delivery jobs from this month are still open' },
+      { code: 'driver_cash_not_handed_over', count: 1, message: "Drivers still hold cash collected for this month's deliveries" }] });
+    let alerted = '';
+    sandbox.window.alert = text => { alerted = text; };
+    sandbox.document.getElementById = id => (id === 'control-center-period' ? { value: '2026-08' } : null);
+    state.language = 'ar';
+    await sandbox.previewControlCenterMonth();
+    assert.ok(alerted.includes('مهام توصيل من هذا الشهر لا تزال مفتوحة (2)') && alerted.includes('(1)') && !/[A-Za-z]{3,}/.test(alerted),
+      `before: the server's English - ${alerted}`);
+    state.language = 'en';
+    await sandbox.previewControlCenterMonth();
+    assert.ok(alerted.includes('Delivery jobs from this month are still open (2)')
+      && alerted.includes("Drivers still hold cash collected for this month's deliveries (1)"), alerted);
   });
   await test('r5 MGR n=11 follow-up: the driver job list and the collected-payment chips show 107.25 LYD, not a rounded 107', async () => {
     const { sandbox, state, run } = loadBrowserSource();
@@ -3152,7 +3198,7 @@ async function main() {
       server = { ...server, ...JSON.parse(JSON.stringify(updates)), _lastModified: server._lastModified + 1 };
       return { data: JSON.parse(JSON.stringify(server)) };
     };
-    await Promise.all([1, 2, 3].map(() => sandbox.adjustClothesVariantQty('p1', 0, 1)));
+    await Promise.all([1, 2, 3].map(() => sandbox.adjustClothesVariantQty('p1', 'Red', 'M', 1)));
     await settle();
     return { sent, server, local: state.clothesProducts[0] };
   }
@@ -3188,9 +3234,9 @@ async function main() {
       sandbox.updateClothesProductsFiltered = () => {};
       sandbox.apiGetEntity = async () => { throw new TypeError('Failed to fetch'); };
       sandbox.apiPatchEntity = async (collection, id, updates) => { sent.push(updates.variants[0].qty); throw new TypeError('Failed to fetch'); };
-      const tap1 = sandbox.adjustClothesVariantQty('p1', 0, 1);
+      const tap1 = sandbox.adjustClothesVariantQty('p1', 'Red', 'M', 1);
       state.clothesProducts[0] = product(3, 101);
-      const tap2 = sandbox.adjustClothesVariantQty('p1', 0, 1);
+      const tap2 = sandbox.adjustClothesVariantQty('p1', 'Red', 'M', 1);
       await Promise.all([tap1, tap2]);
       await settle();
       assert.deepEqual(sent, [6]);
@@ -3205,6 +3251,59 @@ async function main() {
     assert.equal(ok.local.variants[0].qty, 8);
   });
 
+  await test('R2 clothes-operations-2: a colour/size picked in an open order or shipment form, and a stock +/- tap, keep that exact colour and size after another device removes a row', async () => {
+    const { sandbox, state, run, notes } = clothesFixture();
+    run('Security').escapeHtml = plainEscape;
+    const shirt = variants => ({ id: 'p1', name: 'Shirt', createdBy: 'admin', costUSD: 3, priceLYD: 20, _lastModified: 100, variants });
+    const fullList = () => shirt([{ color: 'Red', size: 'S', qty: 0 }, { color: 'Red', size: 'M', qty: 5 }, { color: 'Blue', size: 'M', qty: 5 }]);
+    const afterRemoval = () => shirt([{ color: 'Red', size: 'M', qty: 5 }, { color: 'Blue', size: 'M', qty: 5 }]);
+    const unescapeAttr = s => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    const wraps = { 'clothes-order-lines': { innerHTML: '' }, 'clothes-ship-lines': { innerHTML: '' } };
+    sandbox.document.getElementById = id => wraps[id] || null;
+    // The value the browser hands the handler for the option whose text starts with label.
+    const optionValue = (wrapId, label) => {
+      const m = new RegExp(`<option value="([^"]*)"[^>]*>${label}`).exec(wraps[wrapId].innerHTML);
+      assert.ok(m, `no "${label}" option in ${wraps[wrapId].innerHTML}`);
+      return unescapeAttr(m[1]);
+    };
+    const picked = name => run(`${name}.map(line => line.color + '/' + line.size).join()`);
+    state.clothesProducts = [fullList()];
+    run("_clothesTempOrderLines = [{ productId: 'p1', color: '', size: '', qty: 1, priceLYD: '20' }]");
+    run("_clothesTempShipLines = [{ productId: 'p1', color: '', size: '', qty: 10, unitCostUSD: '3' }]");
+    sandbox.refreshClothesOrderLines();
+    sandbox.refreshClothesShipLines();
+    const onScreen = { orderRedM: optionValue('clothes-order-lines', 'Red · M'), orderRedS: optionValue('clothes-order-lines', 'Red · S'),
+      shipRedM: optionValue('clothes-ship-lines', 'Red · M') };
+    // Live sync from another device removes the unused Red/S row while both forms are still open.
+    state.clothesProducts = [afterRemoval()];
+    sandbox.onClothesOrderLineVariantPick(0, onScreen.orderRedM);
+    sandbox.onClothesShipLineVariantPick(0, onScreen.shipRedM);
+    assert.equal(picked('_clothesTempOrderLines'), 'Red/M', 'before: the order line became Blue/M');
+    assert.equal(picked('_clothesTempShipLines'), 'Red/M', 'before: the shipment line became Blue/M');
+    assert.equal(notes.length, 0, JSON.stringify(notes));
+    // The removed row is cleared with a notice, never swapped for the row now in its place.
+    sandbox.onClothesOrderLineVariantPick(0, onScreen.orderRedS);
+    assert.equal(picked('_clothesTempOrderLines'), '/', 'before: Red/S picked Red/M');
+    assert.equal(notes.length, 1, JSON.stringify(notes));
+    assert.equal(notes[0].type, 'warning');
+    // A colour with quotes, a bar and a percent sign survives the option value.
+    state.clothesProducts = [shirt([{ color: 'Rose | "Night" & 50%', size: "Men's L", qty: 2 }])];
+    sandbox.refreshClothesOrderLines();
+    sandbox.onClothesOrderLineVariantPick(0, optionValue('clothes-order-lines', 'Rose'));
+    assert.equal(picked('_clothesTempOrderLines'), `Rose | "Night" & 50%/Men's L`);
+    // A stock "+" tap on the Red · M chip drawn before the removal changes Red/M only.
+    state.clothesProducts = [fullList()];
+    const card = String(sandbox.renderClothesProductCard(state.clothesProducts[0]));
+    const plus = /<button([^>]*)>\+<\/button>/.exec(card.slice(card.indexOf('<span>Red · M</span>')))[1];
+    const dataset = {};
+    for (const m of plus.matchAll(/data-([a-z]+)="([^"]*)"/g)) dataset[m[1]] = unescapeAttr(m[2]);
+    const tap = run(`(function () { return ${unescapeAttr(/onclick="([^"]*)"/.exec(plus)[1])}; })`);
+    state.clothesProducts = [afterRemoval()];
+    sandbox.updateClothesProductsFiltered = () => {};
+    await tap.call({ dataset });
+    await settle();
+    assert.deepEqual(state.clothesProducts[0].variants.map(v => `${v.color}/${v.size}=${v.qty}`), ['Red/M=6', 'Blue/M=5'], 'before: Blue/M went up');
+  });
   await test('r7 K n=21: a "partial" payment of the whole order total is shown and stored as Paid', async () => {
     for (const serverMode of [true, false]) {
       const { sandbox, state, notes } = clothesFixture();
@@ -3478,7 +3577,7 @@ async function main() {
     {
       const { sandbox, state, notes } = clothesArabic();
       sandbox.apiPatchEntity = refuse('An active clothes_system subscription is required', 403);
-      await sandbox.adjustClothesVariantQty('p1', 0, 1);
+      await sandbox.adjustClothesVariantQty('p1', 'Blck', 'M', 1);
       await settle();
       const note = notes.at(-1);
       assert.ok(/اشتراك نظام الملابس/.test(note.message) && r9NoEnglish(note.message), `before: raw English - ${note.message}`);
@@ -4064,6 +4163,199 @@ async function main() {
         assert.ok(cleared.includes('appData') && cleared.includes('backups'), cleared.join());
       }
     }
+  });
+
+  // R2 client-ui-core-1: the "This phone" card (Face ID lock, reminders) lived only on the admin-only Settings page.
+  await test('R2 client-ui-core-1: in the phone app every role gets the Face ID lock on More; reminders only for ads or reconciliation users; web unchanged', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const templates = run('PERMISSION_TEMPLATES');
+    const page = (role, permissions, view = 'more') => {
+      state.currentUser = { id: `u_${role}`, name: 'Staff', role, permissions: JSON.parse(JSON.stringify(permissions)) };
+      state.users = [state.currentUser];
+      state.currentView = view;
+      return String(run(view === 'more' ? 'renderMoreView()' : 'renderSettingsView()'));
+    };
+    const lock = 'setNativeBiometricLockEnabled(', reminders = 'setNativeRemindersEnabled(';
+    let html = page('Employee', templates.manager.permissions);
+    assert.ok(!html.includes(lock) && !html.includes(reminders), 'a browser More page has no phone card');
+    html = page('Admin', {}, 'settings');
+    assert.ok(!html.includes(lock) && !html.includes(reminders));
+    sandbox.isPackagedMobileApp = () => true;
+    html = page('Employee', templates.manager.permissions);
+    assert.ok(html.includes(lock) && html.includes(reminders), 'before: no non-admin could reach either switch');
+    assert.ok(page('Delivery', templates.deliveryDriver.permissions).includes(lock));
+    html = page('Employee', { customers: ['view'], receipts: ['view'] });
+    assert.ok(html.includes(lock) && !html.includes(reminders), 'no ads or reconciliation: no reminders switch');
+    html = page('Admin', {}, 'settings');
+    assert.ok(html.includes(lock) && html.includes(reminders) && html.includes('data-native-device-settings'));
+    // Both switches redraw the More page they sit on.
+    page('Employee', templates.manager.permissions);
+    let renders = 0;
+    sandbox.render = () => { renders += 1; };
+    sandbox.nativeSecureSet = async () => true;
+    sandbox.getCapacitorPlugin = name => (name === 'LocalNotifications' ? { getPending: async () => ({ notifications: [] }), cancel: async () => {} } : null);
+    assert.equal(await sandbox.setNativeBiometricLockEnabled(false), true);
+    assert.equal(await sandbox.setNativeRemindersEnabled(false), true);
+    assert.equal(renders, 2, 'before: only the Settings page re-rendered');
+  });
+
+  await test('R2 client-ui-core-2: a receipt tapped under Home > Recent activity opens even when Collect a debt left the Unpaid filter on', () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");
+    sandbox.URLSearchParams = URLSearchParams;
+    const createdAt = new Date().toISOString();
+    state.receipts = [
+      { id: 'r_paid', customerId: 'c1', amountUSD: 10, amountLocal: 50, exchangeRate: 5, status: 'Paid', isPaid: true, createdAt, createdBy: 'admin' },
+      { id: 'r_debt', customerId: 'c1', amountUSD: 20, amountLocal: 100, exchangeRate: 5, status: 'Not Paid', isPaid: false, createdAt, createdBy: 'admin' }
+    ];
+    state.currentView = 'analytics';
+    state.receiptStatusFilter = 'not_paid';   // as Collect a debt leaves it
+    state.receiptCustomerFilter = 'c1';
+    run("openReceiptFromHome('r_paid')");
+    assert.equal(state.currentView, 'receipts');
+    assert.equal(state.receiptStatusFilter, 'all', 'before: the Unpaid filter stayed on');
+    assert.equal(state.receiptRecordFilter, 'r_paid');
+    const html = String(run('renderView()'));
+    assert.ok(html.includes('data-receipt-id="r_paid"') && !html.includes('No receipts match your filters'));
+  });
+
+  await test('R2 client-ui-core-3: Complete on a Meta ad whose page has no customer shows a title, the whole instruction and a warning, then opens the page', () => {
+    for (const language of ['en', 'ar']) {
+      const { sandbox, state } = loadBrowserSource();
+      state.language = language;
+      state.pages = [{ id: 'p_meta', name: 'Imported page', customerIds: [] }];
+      state.ads = [{ id: 'a_meta', pageId: 'p_meta', metaAdId: '1200', needsSetup: true }];
+      const calls = [], opened = [];
+      sandbox.showNotification = (...args) => { calls.push(args); };
+      sandbox.editPage = id => { opened.push(id); };
+      sandbox.editAd = () => { throw new Error('the ad editor must wait for the customer'); };
+      sandbox.completeMetaImportedAd('a_meta');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].length, 3, 'before: (instruction, "warning"), so the body read "warning"');
+      const [title, message, type] = calls[0];
+      assert.equal(type, 'warning');
+      assert.equal(title, language === 'ar' ? 'اربط الصفحة بعميل أولاً' : 'Assign the page to a customer first');
+      assert.equal(message, language === 'ar'
+        ? 'اربط صفحة Meta بعميل أولاً، ثم أكمل الدفع والوصل في الإعلان.'
+        : 'First assign the imported Meta page to a customer, then complete payment and receipt details in the ad.');
+      assert.deepEqual(opened, ['p_meta']);
+    }
+  });
+
+  await test('R2 client-ui-core-4: the sidebar theme button shows the new theme right after toggleTheme() or shellSetTheme()', () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    // The real render(): load-browser-source stubs it, and this needs the shell outside the view container.
+    const viewsSrc = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+    for (const name of ['render', 'forceFullRender']) {
+      const at = viewsSrc.indexOf(`\nfunction ${name}() {`) + 1;
+      run(viewsSrc.slice(at, viewsSrc.indexOf('\n}\n', at) + 2));
+    }
+    const view = { innerHTML: '', querySelectorAll: () => [] };
+    const app = { innerHTML: '', style: { setProperty() {} }, classList: { add() {}, remove() {} },
+      querySelector: sel => (sel === '#workspace-view-content' && app.innerHTML.includes('id="workspace-view-content"') ? view : null) };
+    sandbox.document.getElementById = id => (id === 'app' ? app : null);
+    sandbox.document.documentElement.classList = fakeClassList();
+    sandbox.document.documentElement.style.setProperty = () => {};
+    const button = () => {
+      const html = (app.innerHTML.match(/<button onclick="toggleTheme\(\)"[\s\S]*?<\/button>/) || [''])[0];
+      return [(html.match(/data-lucide="([^"]+)"/) || [])[1], (html.match(/<span>([^<]*)<\/span>/) || [])[1]];
+    };
+    state.theme = 'light';
+    state.currentView = 'customers';
+    run('render()');
+    assert.deepEqual(button(), ['sun', 'Light']);
+    run('toggleTheme()');
+    assert.deepEqual(button(), ['moon', run("shellThemeLabel('dark', false)")], 'before: still Light / sun');
+    run('toggleTheme()');
+    assert.deepEqual(button(), ['monitor', 'System']);
+    run("shellSetTheme('dark')");
+    assert.deepEqual(button(), ['moon', 'Dark']);
+  });
+
+  await test('R2 client-ui-core-5: Audit Logs in Arabic shows Arabic action and category tags and action options; values and filtering keep the raw ids', () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");
+    sandbox.refreshServerAuditLogs = () => {};
+    const date = new Date().toISOString();
+    state.logs = [
+      { id: 'l1', action: 'login', category: 'auth', severity: 'info', userId: 'admin', date, description: 'Signed in' },
+      { id: 'l2', action: 'delete', category: 'data', severity: 'warning', userId: 'admin', date, description: 'Deleted a customer' },
+      { id: 'l3', action: 'create', category: 'data', severity: 'info', userId: 'admin', date, description: 'Created a receipt' }
+    ];
+    const audit = () => {
+      const html = String(run('renderAuditView()'));
+      const tags = [...html.matchAll(/<span class="management-(?:action|category)-tag">([^<]*)<\/span>/g)].map(m => m[1]);
+      const select = (html.match(/<select aria-label="(?:الإجراء|Action)"[\s\S]*?<\/select>/) || [''])[0];
+      const options = [...select.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)<\/option>/g)].map(m => [m[1], m[2]]).slice(1);
+      return { html, tags, options };
+    };
+    state.language = 'ar';
+    let { tags, options } = audit();
+    for (const label of ['تسجيل دخول', 'حذف', 'إنشاء', 'مصادقة', 'بيانات']) assert.ok(tags.includes(label), `${label} missing from ${tags}`);
+    assert.ok(!tags.some(tag => ['login', 'delete', 'create', 'auth', 'data'].includes(tag)), `raw English tags: ${tags}`);
+    assert.deepEqual(options.map(o => o[0]).sort(), ['create', 'delete', 'login'], 'option values stay the raw ids');
+    assert.deepEqual(options.map(o => o[1]).sort(), ['إنشاء', 'تسجيل دخول', 'حذف'].sort());
+    state.auditActionFilter = 'login';
+    ({ tags } = audit());
+    assert.deepEqual(tags, ['تسجيل دخول', 'مصادقة'], 'filtering by the raw id still finds the login row only');
+    state.language = 'en';
+    state.auditActionFilter = 'all';
+    ({ tags } = audit());
+    assert.ok(tags.includes('login') && tags.includes('auth'), 'English keeps the stored ids');
+    // The Settings account card names the role in Arabic, like the More page and the sidebar.
+    state.language = 'ar';
+    const card = String(run('renderSettingsAppearanceCard()'));
+    assert.ok(card.includes(run("shellRoleLabel('Admin', true)")) && !card.includes('>Admin'), 'before: the role read "Admin"');
+  });
+
+  await test('R2 ios-device-behaviour-2: an opaque PNG (every iPhone paste) is stored as a JPEG; transparency or unreadable pixels stay PNG; Paste photo hands over a JPEG', async () => {
+    const { sandbox } = loadBrowserSource();
+    let pixels = null;
+    const encoded = [];
+    const ctx = { drawImage() {}, getImageData: () => { if (!pixels) throw new Error('tainted canvas'); return { data: pixels }; } };
+    const canvas = { width: 0, height: 0, getContext: () => ctx,
+      toDataURL: type => { encoded.push(type); return type === 'image/png' ? 'data:image/png;base64,iVBORw0K' : 'data:image/jpeg;base64,/9j/4AAQ'; } };
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => (tag === 'canvas' ? canvas : makeElement(tag));
+    sandbox.Image = function FakeImage() {
+      let src = '';
+      Object.defineProperty(this, 'src', { get: () => src, set: value => {
+        src = value; this.naturalWidth = 4032; this.naturalHeight = 3024;
+        Promise.resolve().then(() => this.onload());
+      } });
+    };
+    // Blob/File/FileReader for the bytes _nativeDataUrlToFile builds (sandbox typed arrays: ArrayBuffer.isView).
+    const bytes = blob => Buffer.concat((blob.parts || []).map(part => (ArrayBuffer.isView(part) ? Buffer.from(part.buffer, part.byteOffset, part.byteLength) : bytes(part))));
+    sandbox.Blob = function FakeBlob(parts, options = {}) { this.parts = parts; this.type = options.type || ''; this.size = bytes(this).length; };
+    sandbox.File = function FakeFile(parts, name, options = {}) { sandbox.Blob.call(this, parts, options); this.name = name; };
+    sandbox.FileReader = function FakeReader() {
+      this.readAsDataURL = blob => Promise.resolve().then(() => this.onload({ target: { result: `data:${blob.type};base64,${bytes(blob).toString('base64')}` } }));
+    };
+    sandbox.atob = text => Buffer.from(text, 'base64').toString('binary');
+    const fullSizePng = new sandbox.File([new Uint8Array(Buffer.alloc(600 * 1024, 7))], 'paste.png', { type: 'image/png' });
+    const opaque = new Uint8ClampedArray(64).fill(255);
+    const seeThrough = new Uint8ClampedArray(64).fill(255);
+    seeThrough[43] = 254;
+    for (const [data, expected] of [[opaque, 'image/jpeg'], [seeThrough, 'image/png'], [null, 'image/png']]) {
+      pixels = data;
+      encoded.length = 0;
+      const out = await sandbox.compressImageToDataUrl(fullSizePng);
+      assert.deepEqual(encoded, [expected], 'before: every PNG was encoded as image/png');
+      assert.ok(out.startsWith(`data:${expected};base64,`), out.slice(0, 40));
+    }
+    assert.equal(canvas.width, 1280);
+    // The packaged app's Paste photo: the Clipboard plugin returns the full-size PNG as a data URL.
+    pixels = opaque;
+    sandbox.isPackagedMobileApp = () => true;
+    sandbox.window.Capacitor = { Plugins: { Clipboard: { read: async () => ({ type: 'image/png', value: `data:image/png;base64,${Buffer.alloc(600 * 1024, 7).toString('base64')}` }) } } };
+    const pasted = await sandbox.readNativeClipboardImage();
+    assert.equal(pasted.type, 'image/jpeg', 'before: the full-size PNG went straight to the form');
+    assert.equal(pasted.name, 'clipboard-photo.jpg');
+    // A compression failure still hands over the original photo.
+    sandbox.compressImageToDataUrl = async () => { throw new Error('decode failed'); };
+    assert.equal((await sandbox.readNativeClipboardImage()).type, 'image/png');
   });
 
   console.log(`\n${passed} review behavior regressions passed.`);

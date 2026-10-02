@@ -418,11 +418,16 @@ def test_ig_comments_not_arriving_heuristic(actors, meta):
     counts["n"] = 9
     again = studio.check_page_health(_entity(ig["id"]), now=t0 + timedelta(hours=50))
     assert again["reason"] == "" and again["igCommentTotal"] == 9 and _entity(ig["id"])["data"]["igCommentCounts"]["total"] == 9
-    # Polling reads Instagram itself: the heuristic is off, no media read.
+    # Polling reads Instagram itself: the heuristic is off (even with its signs there: the count grew a
+    # day after the snapshot, no event since) and the snapshot stays; the one media read only checks the
+    # account's access (bug-hunt round 2: before, the check made no Meta call in poll mode).
     _arm({**ALL_ON, "igPublicReply": "poll"})
+    counts["n"] = 12
     reads = len(meta.reads("/media"))
     polled = studio.check_page_health(_entity(ig["id"]), now=t0 + timedelta(hours=75))
-    assert polled["igCommentTotal"] is None and len(meta.reads("/media")) == reads and polled["webhook"] == ""
+    assert polled["igCommentTotal"] == 12 and len(meta.reads("/media")) == reads + 1 and polled["webhook"] == ""
+    assert polled["reason"] == "" and _entity(ig["id"])["data"]["healthState"] == "ok"
+    assert _entity(ig["id"])["data"]["igCommentCounts"] == {"total": 9, "at": studio._iso_at(t0 + timedelta(hours=50))}
 
 
 # ---------------------------------------------------------------------------
@@ -487,13 +492,15 @@ def test_page_check_clears_a_standing_reason_only_after_a_read_proved_it_wrong(a
     assert (passed["checked"], passed["attention"]) == (1, 1) and meta.calls == []
     assert _entity(page["id"])["data"]["healthReason"] == "page_role_lost" and len(_alerts("page_health_drop")) == 1
     assert _listed(a, page["id"])["health"]["fix"]["en"] == "Give Albayan access to the page again in Meta Business Suite"
-    # An Instagram account read by polling: no media read either, the reason stays.
+    # An Instagram account read by polling: its media read is the access check (bug-hunt round 2: before,
+    # no Meta call); Meta still refuses it for a permission, so the reason stays.
     _arm({**ALL_ON, "igPublicReply": "poll"})
     meta.routes[("POST", f"{IG_PAGE_FB}/subscribed_apps")] = {"success": True}
     ig = _link(actors, "a", IG_PAGE_FB, platform="ig", ig_user_id=IG_USER)
     studio._set_page_health(ig["id"], "attention", "permission_missing")
+    meta.routes[("GET", f"{IG_USER}/media")] = meta_ads.MetaAdsError("authorization", "(#200) Permissions error", provider_code="200")
     reads = len(meta.calls)
-    assert studio.check_page_health(_entity(ig["id"]))["reason"] == "permission_missing" and len(meta.calls) == reads
+    assert studio.check_page_health(_entity(ig["id"]))["reason"] == "permission_missing" and len(meta.calls) == reads + 1
     # A standing webhook_not_subscribed survives a backfill Meta refused temporarily (nothing was proved)...
     _arm(ALL_ON)
     studio._set_page_health(page["id"], "attention", "webhook_not_subscribed")

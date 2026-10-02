@@ -3980,7 +3980,7 @@ async function handleModalSubmit() {
         // Track receipt allocations changes
         const oldAllocations = oldAd.receiptAllocations || [];
         const newAllocations = allocations || [];
-        if (JSON.stringify(oldAllocations) !== JSON.stringify(newAllocations)) {
+        if (Security.stableJson(oldAllocations) !== Security.stableJson(newAllocations)) {  // key order is not a change
           changes.push({
             field: 'Receipt Funding',
             from: `${oldAllocations.length} allocation(s) • $${oldAllocations.reduce((s, a) => s + parseFloat(a.amountUSD || 0), 0).toFixed(2)}`,
@@ -3999,9 +3999,8 @@ async function handleModalSubmit() {
           });
         }
         
-        // Work on a detached history copy. The live record changes only after
-        // the save succeeds, so a rejected/conflicted edit cannot create a
-        // false history row or duplicate it on retry.
+        // A detached history copy: the live record changes only after the save,
+        // so a refused edit adds no false row and a retry no duplicate.
         Object.assign(adUpdates, buildAdEditHistoryUpdates(oldAd, changes));
         
         if (isServerModeEnabled()) {

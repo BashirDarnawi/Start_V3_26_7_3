@@ -1221,26 +1221,6 @@ function importData() {
       await Promise.all(runners);
     };
 
-    // Stable stringify for deterministic verification (sort object keys recursively)
-    const stableStringify = (value) => {
-      const seen = new WeakSet();
-      const normalize = (v) => {
-        if (v === null || v === undefined) return v;
-        if (typeof v !== 'object') return v;
-        if (seen.has(v)) return null;
-        seen.add(v);
-        if (Array.isArray(v)) return v.map(normalize);
-        const out = {};
-        for (const k of Object.keys(v).sort()) {
-          const vv = v[k];
-          if (vv === undefined) continue;
-          out[k] = normalize(vv);
-        }
-        return out;
-      };
-      return JSON.stringify(normalize(value));
-    };
-
     // Strict backup shape checks shared by the transactional and the legacy
     // import paths (backup must contain explicit unique IDs — we do NOT
     // generate IDs; that would break relationships).
@@ -1306,8 +1286,9 @@ function importData() {
         const b = backupById.get(id);
         const s = serverById.get(id);
         if (!b || !s) continue;
-        const bStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(b)));
-        const sStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(s)));
+        // Security.stableJson sorts keys, so only real differences count.
+        const bStr = Security.stableJson(stripVolatileMeta(Security.sanitizeObject(b)));
+        const sStr = Security.stableJson(stripVolatileMeta(Security.sanitizeObject(s)));
         if (bStr !== sStr) mismatched.push(id);
       }
       if (mismatched.length) {

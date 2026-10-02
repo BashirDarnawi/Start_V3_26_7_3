@@ -2,12 +2,6 @@
 // VIEW RENDERING FUNCTIONS  
 // ==========================================
 
-// All views and modals continue here...
-// Due to file size, creating comprehensive vanilla_v1/COMPLETE_SCRIPT_CONTINUATION.txt
-// with all remaining code that should be appended here.
-
-// For now, here's a minimal working version:
-
 // Track last rendered view to avoid unnecessary full re-renders
 let _lastRenderedView = null;
 let _lastRenderedUserId = null;
@@ -24,11 +18,8 @@ function _selectDefaultValue(sel) {
   }
   return sel.options.length ? sel.options[0].value : '';
 }
-// The exact HTML last written into the view container. A background live-sync tick
-// calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
-// what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
-// entry animation, no scroll/focus disturbance ("plink"/shake). renderView() is
-// deterministic for a given state, so equal strings mean nothing visible changed.
+// The HTML last written into the view container: a live-sync render() whose view HTML is
+// identical skips the DOM swap (no icon flash, re-played animation or scroll/focus jump).
 let _lastViewHTML = null;
 
 // Force a full re-render (bypasses partial update optimization)
@@ -138,12 +129,8 @@ function render() {
       }
     }
 
-    // Save scroll and lock layout only when a DOM write will actually happen.
-    // While the overlay body scroll lock (01b-mobile-runtime.js) is active,
-    // body is position:fixed and window.scrollY reads 0 — sample the locked
-    // position instead, otherwise a render fired between closeModal() and the
-    // observer's unlock (every modal save on a phone) restores the list to
-    // the top.
+    // Save scroll and lock layout only before a real DOM write. Under the overlay scroll lock
+    // (01b) scrollY reads 0: use the locked position, or a phone modal save jumps to the top.
     const resetScroll = _resetScrollOnNextRender;
     _resetScrollOnNextRender = false;
     const _lockedScroll = (typeof _scrollLockActive !== 'undefined' && _scrollLockActive);
@@ -1092,10 +1079,8 @@ function renderLogin() {
 
 let _postLoginRoutePromise = null;
 
-// A direct link (for example /ads-studio) is still in the address bar while
-// the login screen is open. The login flow deliberately chooses a safe landing
-// page first, so re-apply that direct link only after authentication and only
-// when the authenticated user is allowed to open it.
+// A direct link (e.g. /ads-studio) waits in the address bar during login. The
+// login lands somewhere safe first; re-apply the link only if this user may open it.
 function getAllowedPostLoginView(user, requestedView) {
   const view = String(requestedView || '');
   if (!user || !Object.prototype.hasOwnProperty.call(VIEW_TO_PATH, view)) return null;
@@ -1111,13 +1096,14 @@ function restoreRequestedViewAfterLogin(requestedView) {
   if (targetView) {
     restoreViewStateFromUrl(targetView);
     // The address is normally already at the requested path. Passing true is
-    // safe because updateUrlForView replaces the matching history entry rather
-    // than pushing a duplicate.
+    // safe: updateUrlForView replaces the matching entry, never a duplicate.
     navigateToInternal(targetView, true);
+    // A dialog link opened while signed out opens now (its opener re-checks access).
+    if (_bootModalParams) restoreModalFromUrl();
     return true;
   }
-  // Root, unknown and unauthorized links must reflect the safe landing chosen
-  // by the login flow instead of leaving a misleading/stale address in the bar.
+  _bootModalParams = null;
+  // Root, unknown and unauthorized links show the safe landing, not a stale address.
   updateUrlForView(state.currentView, true);
   return false;
 }
@@ -1127,8 +1113,7 @@ function loginFromCurrentRoute(email, password, rememberMe) {
   const loginPromise = handleLogin(email, password, rememberMe === true);
   if (!loginPromise || typeof loginPromise.then !== 'function') return loginPromise;
 
-  // Both click and submit can fire for the same form action. handleLogin()
-  // intentionally returns the same in-flight promise; attach one redirect only.
+  // Click and submit can both fire; handleLogin() returns one shared promise, so attach one redirect.
   if (_postLoginRoutePromise === loginPromise) return loginPromise;
   _postLoginRoutePromise = loginPromise;
   const clearPendingRoute = () => {
@@ -1216,8 +1201,7 @@ function attachLoginHandlers() {
     } catch (_) {}
     // #endregion
 
-    // A chosen saved account already filled the email — put the caret straight
-    // into the password box so sign-in is one field away.
+    // A chosen saved account filled the email: start in the password box.
     if (_loginPrefillEmail) {
       const passwordField = document.getElementById('login-password');
       if (passwordField) {
@@ -2536,11 +2520,8 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
   }).join('');
 }
 
-// PAGINATION ("Load more") for the customers grid — mirrors the receipts grid.
-// Rendering every customer card at once (each card has two financial grids and
-// several icons) freezes the view past a few hundred customers; render the first
-// CUSTOMERS_PAGE_SIZE and reveal more on demand. The limit resets automatically
-// whenever the search/sort/financial-filter changes (fingerprint check below).
+// "Load more" for the customers grid (like receipts): all cards at once froze the view past a few
+// hundred customers. The limit resets when search/sort/financial filter change (fingerprint).
 const CUSTOMERS_PAGE_SIZE = 50;
 let _customersShowLimit = CUSTOMERS_PAGE_SIZE;
 let _customersFilterFingerprint = '';
@@ -2720,11 +2701,8 @@ function renderCustomersView() {
   `;
 }
 
-// PAGINATION ("Load more") for the receipts grid. Rendering every receipt
-// card at once makes the view slow past a few hundred receipts; we render
-// the first RECEIPTS_PAGE_SIZE and reveal more on demand. The limit resets
-// automatically whenever the search/filters/sort change (fingerprint check
-// inside renderReceiptsView), so filtering always starts from page one.
+// "Load more" for the receipts grid: all cards at once is slow past a few hundred receipts. The
+// limit resets when search/filters/sort change (fingerprint in renderReceiptsView).
 const RECEIPTS_PAGE_SIZE = 50;
 let _receiptsShowLimit = RECEIPTS_PAGE_SIZE;
 let _receiptsFilterFingerprint = '';
@@ -2777,11 +2755,8 @@ function renderReceiptsView() {
     if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
     const customer = customersById.get(receiptCustomerId);
 
-    // Search filter. Fold ONLY while a query exists: foldSearchText (NFKC +
-    // 6 regex passes) on four fields per receipt per render was measurable
-    // jank on phones for the common no-search repaint. Falls back to any
-    // denormalized name stamped on the receipt so name search still works
-    // for a role that can see receipts but not load customers.
+    // Fold only while a query exists (four fields per receipt per render was phone jank); the
+    // receipt's own customerName keeps name search for a role that cannot load customers.
     if (receiptSearchTerm) {
       const customerName = foldSearchText(customer?.name || receipt.customerName || '');
       const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
@@ -3482,11 +3457,8 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       });
   const hasPageFilters = !!pageSearch || pageOwnerFilter !== 'all';
-  // Reset the reveal limit whenever the SEARCH changes, so a new search starts
-  // at its top matches instead of inheriting a huge previous limit. Keyed on
-  // the search only: including the result count meant a background Meta sync
-  // adding or removing one page silently threw the user back to the first 50
-  // rows after they had pressed "Load more" several times.
+  // Reset the reveal limit when the SEARCH changes (only then: keying on the result count let a
+  // background Meta sync throw the user back to the first 50 rows after "Load more").
   const pagesFilterFingerprint = JSON.stringify([pageSearch, pageOwnerFilter]);
   if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
     _pagesFilterFingerprint = pagesFilterFingerprint;
@@ -3676,8 +3648,10 @@ function completeMetaImportedAd(adId) {
   if (!ad) return;
   const page = (state.pages || []).find(item => String(item.id) === String(ad.pageId));
   if (page && getPageCustomerIds(page).length === 0) {
+    const isAr = state.language === 'ar';
     showNotification(
-      state.language === 'ar'
+      isAr ? 'اربط الصفحة بعميل أولاً' : 'Assign the page to a customer first',
+      isAr
         ? 'اربط صفحة Meta بعميل أولاً، ثم أكمل الدفع والوصل في الإعلان.'
         : 'First assign the imported Meta page to a customer, then complete payment and receipt details in the ad.',
       'warning'
@@ -5169,6 +5143,7 @@ function setDeliveryDashboardFilter(status) {
 
 // Manual refresh button for delivery dashboard - forces immediate sync from server
 async function refreshDeliveryDashboard() {
+  if (!state.currentUser) return;  // never a sync badge on the login screen
   if (!isServerModeEnabled()) {
     render();
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة' : 'Dashboard refreshed', 'success');
@@ -5202,6 +5177,7 @@ async function refreshDeliveryDashboard() {
     updateSyncIndicator('synced', { immediate: true });
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة بأحدث البيانات' : 'Dashboard updated with latest data', 'success');
   } catch (e) {
+    if (!state.currentUser || e?.code === 'SERVER_SESSION_CHANGED') return;  // signed out meanwhile
     console.error('Failed to refresh delivery dashboard:', e);
     updateSyncIndicator('error');
     showNotification(state.language === 'ar' ? 'فشل التحديث' : 'Refresh Failed', state.language === 'ar' ? 'تعذّر جلب أحدث البيانات. يرجى المحاولة مجدداً.' : 'Could not fetch latest data. Please try again.', 'error');
@@ -5938,11 +5914,8 @@ function renderAuditView() {
     // User filter
     if (state.auditUserFilter !== 'all' && log.userId !== state.auditUserFilter) return false;
     
-    // Date range filter. `new Date('2026-07-12')` parses as UTC midnight, which
-    // is a different LOCAL day on any non-UTC device, so both boundaries used
-    // to hide or include the wrong entries. Build each boundary from the Y/M/D
-    // components as a LOCAL time so a whole calendar day is matched exactly,
-    // regardless of the device's timezone.
+    // Date range: new Date('2026-07-12') is UTC midnight (another local day off UTC), so each
+    // boundary is built as LOCAL Y/M/D time to match whole calendar days in any timezone.
     const _localDayStart = (ymd) => {
       const [y, m, d] = String(ymd).split('-').map(Number);
       return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
@@ -6002,6 +5975,9 @@ function renderAuditView() {
     'financial': 'dollar-sign',
     'general': 'file-text'
   };
+  // Arabic display text only; values, filters and unknown ids stay raw.
+  const auditAr = { create: 'إنشاء', update: 'تعديل', delete: 'حذف', login: 'تسجيل دخول', logout: 'تسجيل خروج', restore: 'استعادة', cleanup: 'تنظيف', password_change: 'تغيير كلمة المرور', password_reset: 'إعادة تعيين كلمة المرور', password_reset_request: 'طلب إعادة تعيين كلمة المرور', password_change_failed: 'فشل تغيير كلمة المرور', password_change_blocked: 'حظر تغيير كلمة المرور', setup_admin: 'إعداد المدير', wallet_release: 'تحرير المحفظة', sync: 'مزامنة', automatic_sync: 'مزامنة تلقائية', link: 'ربط', auth: 'مصادقة', data: 'بيانات', financial: 'مالي', general: 'عام' };
+  const auditLabel = id => { const label = isAr && auditAr[String(id).toLowerCase()]; return typeof label === 'string' ? label : id; };
   
   return `
     <div class="management-workspace audit-workspace" dir="${isAr ? 'rtl' : 'ltr'}">
@@ -6074,7 +6050,7 @@ function renderAuditView() {
           <div class="audit-filter-controls workspace-filter-grid">
             <select aria-label="${isAr ? 'الإجراء' : 'Action'}" onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
-              ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
+              ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(auditLabel(a))}</option>`).join('')}
             </select>
 
             <select aria-label="${isAr ? 'الفئة' : 'Category'}" onchange="updateAuditFilter('category', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditCategoryFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
@@ -6134,7 +6110,7 @@ function renderAuditView() {
                     <li class="management-timeline-item">
                       <span class="management-timeline-marker" aria-hidden="true"><i data-lucide="${categoryIcons[category] || 'file-text'}" class="h-4 w-4"></i></span>
                       <article class="management-card management-activity-card">
-                        <div class="management-activity-top"><div class="management-activity-tags"><span class="management-action-tag">${Security.escapeHtml(log.action || '')}</span><span class="management-category-tag">${Security.escapeHtml(category)}</span><span class="management-severity-tag ${severityColors[severity] || severityColors.info}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span></div><time datetime="${Security.escapeHtml(String(log.date || ''))}">${new Date(log.date).toLocaleDateString(appDateLocale())}<span>${new Date(log.date).toLocaleTimeString(appDateLocale())}</span></time></div>
+                        <div class="management-activity-top"><div class="management-activity-tags"><span class="management-action-tag">${Security.escapeHtml(auditLabel(log.action || ''))}</span><span class="management-category-tag">${Security.escapeHtml(auditLabel(category))}</span><span class="management-severity-tag ${severityColors[severity] || severityColors.info}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span></div><time datetime="${Security.escapeHtml(String(log.date || ''))}">${new Date(log.date).toLocaleDateString(appDateLocale())}<span>${new Date(log.date).toLocaleTimeString(appDateLocale())}</span></time></div>
                         <div class="management-activity-author"><span class="management-avatar" aria-hidden="true">${Security.escapeHtml(String(userName).charAt(0).toUpperCase())}</span><strong>${Security.escapeHtml(userName)}</strong></div>
                         <p class="management-activity-description">${Security.escapeHtml(log.description || '')}</p>
                         <div class="management-activity-footer">${log.resourceId ? `<p class="management-resource-id"><span>${isAr ? 'معرّف السجل' : 'Record ID'}</span><bdi>${Security.escapeHtml(String(log.resourceId))}</bdi></p>` : '<span></span>'}<button type="button" data-log-id="${Security.escapeHtml(String(log.id || ''))}" onclick="showLogDetails(this.dataset.logId)" class="management-button"><i data-lucide="eye" class="h-4 w-4"></i>${isAr ? 'عرض التفاصيل' : 'View details'}</button></div>
@@ -6622,12 +6598,44 @@ async function cleanupAuditLogs() {
   }
 }
 
+// "This phone" (app only), also on More: staff have no Settings. Reminders: ads/reconciliation users.
+function renderNativeDeviceSettingsCard(isAr) {
+  const nativeStatus = typeof nativeSecuritySettingsStatus === 'function' ? nativeSecuritySettingsStatus() : null;
+  if (!nativeStatus?.isNative) return '';
+  const showReminders = isCurrentUserAdmin() || userCanAccessView(state.currentUser, 'ads') || userCanAccessView(state.currentUser, 'reconciliation');
+  return `
+      <div id="settings-device" tabindex="-1" class="management-card management-settings-card" data-native-device-settings>
+        <h2 class="text-xl font-bold mb-2 flex items-center gap-2">
+          <i data-lucide="smartphone" class="w-5 h-5 text-indigo-600"></i>
+          ${isAr ? 'حماية هذا الهاتف' : 'This phone'}
+        </h2>
+        <p class="text-sm text-slate-500 mb-4">${isAr ? 'هذه الإعدادات محفوظة بأمان على هذا الهاتف فقط، ولا تغيّر أجهزة المستخدمين الآخرين.' : 'These settings are encrypted on this phone only and do not change other users’ devices.'}</p>
+        <div class="space-y-3">
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="font-bold flex items-center gap-2"><i data-lucide="scan-face" class="w-5 h-5 text-emerald-600"></i>${isAr ? 'قفل بالبصمة أو Face ID' : 'Biometric app lock'}</div>
+              <p class="mt-1 text-xs text-slate-500">${isAr ? 'عند مغادرة البيان، استخدم بصمة الهاتف أو Face ID أو رمز قفل الهاتف لفتحه.' : 'After leaving Albayan, unlock it with biometrics or the phone’s device credential.'}</p>
+            </div>
+            <button type="button" onclick="setNativeBiometricLockEnabled(${nativeStatus.biometricEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.biometricEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
+              ${nativeStatus.biometricEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
+            </button>
+          </div>
+          ${showReminders ? `<div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="font-bold flex items-center gap-2"><i data-lucide="bell-ring" class="w-5 h-5 text-amber-600"></i>${isAr ? 'تذكيرات تسوية الإعلانات' : 'Ad reconciliation reminders'}</div>
+              <p class="mt-1 text-xs text-slate-500">${isAr ? 'يرسل الهاتف تذكيراً في اليوم التالي لانتهاء الإعلان أو إيقافه.' : 'Your phone reminds you the day after an ad ends or is stopped.'}</p>
+            </div>
+            <button type="button" onclick="setNativeRemindersEnabled(${nativeStatus.remindersEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.remindersEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
+              ${nativeStatus.remindersEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
+            </button>
+          </div>` : ''}
+        </div>
+      </div>`;
+}
+
 function renderSettingsView() {
   const isAr = state.language === 'ar';
   const history = state.exchangeRateHistory || [];
-  const nativeStatus = typeof nativeSecuritySettingsStatus === 'function'
-    ? nativeSecuritySettingsStatus()
-    : { isNative: false, ready: true, biometricEnabled: false, remindersEnabled: false, biometricAvailable: false };
   const settingsSections = [
     [typeof renderSettingsAppearanceCard === 'function' ? 'settings-appearance' : 'settings-performance', 'sliders-horizontal', isAr ? 'التفضيلات' : 'Preferences'],
     ['settings-security', 'shield-check', isAr ? 'الأمان والحساب' : 'Security & account'],
@@ -6721,35 +6729,7 @@ function renderSettingsView() {
         ` : ''}
       </div>
 
-      ${nativeStatus.isNative ? `
-      <!-- Protection and reminders for this physical phone only -->
-      <div id="settings-device" tabindex="-1" class="management-card management-settings-card" data-native-device-settings>
-        <h2 class="text-xl font-bold mb-2 flex items-center gap-2">
-          <i data-lucide="smartphone" class="w-5 h-5 text-indigo-600"></i>
-          ${isAr ? 'حماية هذا الهاتف' : 'This phone'}
-        </h2>
-        <p class="text-sm text-slate-500 mb-4">${isAr ? 'هذه الإعدادات محفوظة بأمان على هذا الهاتف فقط، ولا تغيّر أجهزة المستخدمين الآخرين.' : 'These settings are encrypted on this phone only and do not change other users’ devices.'}</p>
-        <div class="space-y-3">
-          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-              <div class="font-bold flex items-center gap-2"><i data-lucide="scan-face" class="w-5 h-5 text-emerald-600"></i>${isAr ? 'قفل بالبصمة أو Face ID' : 'Biometric app lock'}</div>
-              <p class="mt-1 text-xs text-slate-500">${isAr ? 'عند مغادرة البيان، استخدم بصمة الهاتف أو Face ID أو رمز قفل الهاتف لفتحه.' : 'After leaving Albayan, unlock it with biometrics or the phone’s device credential.'}</p>
-            </div>
-            <button type="button" onclick="setNativeBiometricLockEnabled(${nativeStatus.biometricEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.biometricEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
-              ${nativeStatus.biometricEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
-            </button>
-          </div>
-          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-              <div class="font-bold flex items-center gap-2"><i data-lucide="bell-ring" class="w-5 h-5 text-amber-600"></i>${isAr ? 'تذكيرات تسوية الإعلانات' : 'Ad reconciliation reminders'}</div>
-              <p class="mt-1 text-xs text-slate-500">${isAr ? 'يرسل الهاتف تذكيراً في اليوم التالي لانتهاء الإعلان أو إيقافه.' : 'Your phone reminds you the day after an ad ends or is stopped.'}</p>
-            </div>
-            <button type="button" onclick="setNativeRemindersEnabled(${nativeStatus.remindersEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.remindersEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
-              ${nativeStatus.remindersEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
-            </button>
-          </div>
-        </div>
-      </div>` : ''}
+      ${renderNativeDeviceSettingsCard(isAr)}
 
       <!-- Privacy and account deletion -->
       <div id="settings-privacy" tabindex="-1" class="management-card management-settings-card">

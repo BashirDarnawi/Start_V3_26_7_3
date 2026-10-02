@@ -158,6 +158,7 @@ function renderMoreView() {
   const isAr = state.language === 'ar';
   const tiles = shellMoreTiles();
   const user = state.currentUser || {};
+  const deviceCard = renderNativeDeviceSettingsCard(isAr);
   return `
     <div class="hub-shell">
       <h1 class="text-[26px] font-extrabold tracking-tight text-slate-900 dark:text-white mb-4">${isAr ? 'المزيد' : 'More'}</h1>
@@ -174,6 +175,7 @@ function renderMoreView() {
             <span class="shell-tile-sub block text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">${tile.sub}</span>
           </button>`).join('')}
       </div>
+      ${deviceCard ? `<div class="mt-6">${deviceCard}</div>` : ''}
       <div class="mt-6 grid grid-cols-2 gap-2">
         <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(shellThemeLabel(state.theme, isAr))}</button>
         <button type="button" onclick="toggleLanguage()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="globe" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
@@ -281,13 +283,9 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   `;
 }
 
+// openReceiptRecord also clears filters Collect a debt left on (else an empty list).
 function openReceiptFromHome(receiptId) {
-  const id = String(receiptId || '');
-  if (!id) return;
-  state.receiptSearch = '';
-  state.receiptCustomerFilter = '';
-  state.receiptRecordFilter = id;
-  navigateTo('receipts');
+  return openReceiptRecord(String(receiptId || ''));
 }
 
 // ---------- Collect a debt ----------
@@ -449,10 +447,8 @@ function remindDebtor(customerId) {
   render();
 }
 
-// Browsers only allow one new window per tap, so "Remind all" walks the
-// overdue list one tap at a time: each tap opens the next customer not
-// reminded in the last day. No usable phone (remindDebtor's own
-// buildWhatsAppLink test): skipped, never stamped, and counted.
+// One new window per tap (browser rule): each "Remind all" tap opens the next overdue customer
+// not reminded in a day. No usable phone (buildWhatsAppLink): skipped, never stamped, counted.
 function remindAllOverdue() {
   const log = shellReminderLog();
   const dayAgo = Date.now() - TIME_CONSTANTS.MILLISECONDS_PER_DAY;
@@ -497,7 +493,7 @@ function shellSetTheme(theme) {
   state.theme = theme === 'dark' ? 'dark' : theme === 'system' ? 'system' : 'light';
   applyTheme();
   saveState();
-  render();
+  forceFullRender();  // redraws the sidebar theme button too
 }
 
 function renderSettingsAppearanceCard() {
@@ -512,7 +508,7 @@ function renderSettingsAppearanceCard() {
   return `
     <button type="button" onclick="editUser('${shellEsc(user.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
       <span class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white font-bold flex-shrink-0">${shellEsc(shellInitial(user.name))}</span>
-      <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(user.role || '')}${user.email ? ` · <span dir="ltr">${shellEsc(user.email)}</span>` : ''}</span></span>
+      <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(shellRoleLabel(user.role, isAr))}${user.email ? ` · <span dir="ltr">${shellEsc(user.email)}</span>` : ''}</span></span>
       <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
     </button>
     <div class="hub-section-title mt-5">${isAr ? 'المظهر' : 'Appearance'}</div>
@@ -678,9 +674,8 @@ function shellListRow({ kind, id, avatar, title, sub, trailing = '', facts = '',
     </article>`;
 }
 
-// Table lists (Ads, Deliveries): on phones a summary row sits above each
-// detail row and the detail row shows only when expanded; on desktop the
-// summary rows are hidden and the table stays a table (see style.css).
+// Table lists (Ads, Deliveries): on phones a summary row expands each detail row;
+// on desktop the summary rows are hidden and the table stays a table (style.css).
 function shellTableSummaryRow(kind, id, fields, colspan) {
   const open = shellRowIsOpen(kind, id);
   return `<tr class="shell-tr-summary ${open ? 'is-open' : ''}" data-shell-row="${shellEsc(kind)}" data-shell-row-id="${shellEsc(id)}"><td colspan="${Number(colspan) || 1}" class="shell-tr-cell"><div class="shell-table-summary-layout ${fields.media ? 'has-media' : ''}">${fields.media ? `<div class="shell-summary-media">${fields.media}</div>` : ''}${shellSummaryButton({ kind, id, open, ...fields })}</div>${fields.extra || ''}</td></tr>`;

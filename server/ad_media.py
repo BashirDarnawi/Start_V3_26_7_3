@@ -117,13 +117,8 @@ def create_ad_media_router(
     """Build the ad-media router without importing the main application."""
     router = APIRouter()
 
-    @router.get("/api/collections/ads/{entity_id}/primary-photo")
-    def get_ad_primary_photo(
-        entity_id: str,
-        index: Optional[int] = None,
-        user: dict[str, Any] = Depends(current_user_dependency),
-    ):
-        """Return one authorized thumbnail without hydrating every photo."""
+    def readable_ad(entity_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        """The ad's data when this user may read the ad: a Delivery user only their own job."""
         item = get_entity_fn("ads", entity_id)
         if not item or item.get("deleted"):
             raise HTTPException(status_code=404, detail="Not found")
@@ -141,6 +136,16 @@ def create_ad_media_router(
             record_creator_id=str(creator or ""),
         ):
             raise HTTPException(status_code=403, detail="Forbidden")
+        return data
+
+    @router.get("/api/collections/ads/{entity_id}/primary-photo")
+    def get_ad_primary_photo(
+        entity_id: str,
+        index: Optional[int] = None,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """Return one authorized thumbnail without hydrating every photo."""
+        data = readable_ad(entity_id, user)
         if not user_has_permission_fn(user, "ads", "viewPhotos"):
             raise HTTPException(status_code=403, detail="View Photos permission required")
 
@@ -169,5 +174,15 @@ def create_ad_media_router(
             selected = 0
 
         return data_url_image_response(sources[selected], max_data_url_length)
+
+    @router.get("/api/collections/ads/{entity_id}/meta-thumbnail")
+    def get_ad_meta_thumbnail(entity_id: str, user: dict[str, Any] = Depends(current_user_dependency)):
+        """Our archived copy of the Meta creative: lean lists omit it and the signed
+        fbcdn link expires. Reading the ad is enough; the Meta tile never needed
+        View Photos (those guard the photos people upload)."""
+        source = str(readable_ad(entity_id, user).get("metaThumbnailData") or "").strip()
+        if not source.startswith("data:image/"):
+            raise HTTPException(status_code=404, detail="Photo not found")
+        return data_url_image_response(source, max_data_url_length)
 
     return router

@@ -703,6 +703,43 @@ def test_scrub_never_touches_the_ledger_and_repeats_as_a_no_op(staff):
     assert [dict(row) for row in again] == [dict(row) for row in studio_rows]
 
 
+def test_a_rule_name_never_outlives_its_owner_in_the_audit_log(staff):
+    """Bug-hunt round 2: an admin's rule for a customer (?ownerId=) wrote the rule's name into the audit
+    message (under the admin's user id), and the customer's privacy anonymisation kept it there. The
+    create message carries no name now, and anonymisation rewrites the messages of the customer's rules
+    (one written before the fix too); another account's rule keeps its message."""
+    admin = staff["admin"]
+    user = _customer(staff, "rule-audit")
+    name, other_name = f"Fatima Saleh boutique {TAG}", f"Other shop {TAG}"
+    reset_rate_limit(f"social-studio:mutations:{admin['id']}")
+    created = client.post(f"/api/social-studio/rules?ownerId={user['id']}", json={
+        "name": name, "platform": "fb", "trigger": "every", "publicReply": "Thanks!",
+    }, cookies=admin["cookies"])
+    assert created.status_code == 200, created.text
+    rule_id, other_rule_id = created.json()["id"], _uid("srule_other")
+
+    def messages(resource_id):
+        with db_conn() as conn:
+            return conn.execute(text("SELECT message FROM audit_logs WHERE resource_id = :id ORDER BY ts, id"),
+                                {"id": resource_id}).scalars().all()
+
+    assert messages(rule_id) and not any(name in message for message in messages(rule_id))  # before: "... rule <name>"
+    with db_conn() as conn:  # create messages as they were written before the fix
+        for resource_id, owner_id, rule_name in ((rule_id, user["id"], name), (other_rule_id, "someone_else", other_name)):
+            conn.execute(text(
+                "INSERT INTO audit_logs (id, ts, user_id, action, resource_type, resource_id, message, metadata_json) "
+                "VALUES (:id, :ts, :uid, 'create', 'socialReplyRules', :rid, :message, :meta)"
+            ), {"id": new_id("audit"), "ts": now_ms(), "uid": admin["id"], "rid": resource_id,
+                "message": f"Created auto-reply rule {rule_name}", "meta": json_dumps({"ownerId": owner_id})})
+        conn.execute(text("UPDATE users SET deleted = true WHERE id = :id"), {"id": user["id"]})
+    main_module._privacy_anonymize_deleted_user_atomic(user["id"])
+    with db_conn() as conn:
+        quoting = conn.execute(text("SELECT COUNT(*) FROM audit_logs WHERE message LIKE :name"), {"name": f"%{name}%"}).scalar()
+    assert quoting == 0
+    assert set(messages(rule_id)) == {"Activity retained after account privacy anonymization"}
+    assert messages(other_rule_id) == [f"Created auto-reply rule {other_name}"]
+
+
 def test_studio_profiles_are_router_only(staff):
     """The profile holds a phone number: the generic collections API refuses its type (P2-07 adds its route)."""
     assert STUDIO_PROFILES_TYPE in OWNED_TYPES and STUDIO_PROFILES_TYPE in SOCIAL_STUDIO_COLLECTIONS

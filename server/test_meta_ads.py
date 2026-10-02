@@ -3791,3 +3791,113 @@ def test_webhook_route_writes_counts_once_per_minute(webhook_counter):
     assert meta_ads.count_webhook_delivery(["not", "a", "dict"]) is False
     assert meta_ads.count_webhook_delivery({"object": ["odd"], "entry": "x"}) is False
     assert meta_ads.webhook_counts_report()["notYetStored"] == {"page.feed": 1, "other.other": 1}
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt round 2: a dead Meta token costs one call a pass, and a renewed one
+# resyncs every ad within one normal interval
+# ---------------------------------------------------------------------------
+
+
+def _meta_refusal(status, code, subcode=None):
+    """The error MetaAdsClient._safe_error makes of Meta's answer."""
+    probe = meta_ads.MetaAdsClient.__new__(meta_ads.MetaAdsClient)
+    error = {"code": code, "message": "Meta refused", **({"error_subcode": subcode} if subcode else {})}
+    return probe._safe_error(httpx.Response(status), {"error": error})
+
+
+class _RefusingMetaClient:
+    def __init__(self, error):
+        self.error = error
+        self.calls = []
+
+    def get_ad_snapshot(self, meta_ad_id):
+        self.calls.append(str(meta_ad_id))
+        raise self.error
+
+
+@pytest.fixture()
+def due_ads(actors, monkeypatch):
+    """A fixed clock (meta_ads.now_ms) and the due-ad queue limited to the ads a test makes."""
+    made = []
+    clock = {"now": now_ms()}
+    monkeypatch.setattr(meta_ads, "now_ms", lambda: clock["now"])
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", meta_ads.time.monotonic() + 3600)  # no stored pause
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", "secret-token-must-never-leak")
+    monkeypatch.setenv("ALBAYAN_META_AD_ACCOUNT_IDS", "444444444444444")
+    for name in ("ALBAYAN_META_SYNC_INTERVAL_MINUTES", "ALBAYAN_META_SYNC_BATCH_SIZE"):
+        monkeypatch.delenv(name, raising=False)
+    real_due = meta_ads._due_meta_ads
+    monkeypatch.setattr(meta_ads, "_due_meta_ads", lambda limit: [row for row in real_due(1000) if row["adId"] in made][:limit])
+
+    def add(ad_id, meta_id):
+        _insert_ad(ad_id, actors["admin_id"], metaAdId=meta_id, metaLinkState="linked", metaAdAccountId="444444444444444",
+                   metaMediaVersion=meta_ads._META_MEDIA_VERSION, metaMediaRepairVersion=meta_ads._META_MEDIA_VERSION,
+                   metaNextSyncAt=0, metaSyncError="", metaSyncErrorCode="", metaSyncFailureCount=0)
+        made.append(ad_id)
+
+    try:
+        yield add, clock
+    finally:
+        with db_conn() as conn:
+            for ad_id in made:
+                conn.execute(text("DELETE FROM entities WHERE type='ads' AND id=:id"), {"id": ad_id})
+
+
+def test_a_dead_meta_token_costs_one_snapshot_call_a_pass(due_ads, monkeypatch):
+    add, _clock = due_ads
+    add("meta_test_r2_dead_1", "987100000000001")
+    add("meta_test_r2_dead_2", "987100000000002")
+    dead = _RefusingMetaClient(_meta_refusal(401, 190, 463))
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: dead)
+    assert len(meta_ads.sync_due_meta_ads(limit=2)) == 1  # the first ad shows the error
+    assert len(dead.calls) == 1  # before: one call per due ad, every pass
+
+
+def test_a_renewed_meta_token_resyncs_within_one_interval(due_ads, monkeypatch):
+    add, clock = due_ads
+    ad_id, meta_id = "meta_test_r2_renewed", "987100000000009"
+    add(ad_id, meta_id)
+    error = _meta_refusal(401, 190, 463)  # the token expired
+    assert (error.code, error.provider_code) == ("authorization", "190.463")
+    dead = _RefusingMetaClient(error)
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: dead)
+    interval = 15 * 60_000
+    for attempt in range(1, 6):
+        clock["now"] = max(clock["now"], int(_stored_ad(ad_id)[0]["metaNextSyncAt"] or 0)) + 1
+        attempted_at = clock["now"]
+        meta_ads.sync_due_meta_ads(limit=2)
+        stored, _ = _stored_ad(ad_id)
+        assert stored["metaSyncFailureCount"] == attempt
+        assert stored["metaNextSyncAt"] == attempted_at + interval, attempt  # before: 30, 60, 120, 240 minutes
+        assert stored["metaSyncError"] == "Meta authorization failed. Reconnect the access token."
+        assert stored["metaSyncErrorCode"] == "authorization:190.463"
+    assert len(dead.calls) == 5
+    # The owner renews the token: within one normal interval the ad reads Meta again and the error is gone.
+    fixed = FakeMetaClient()
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: fixed)
+    clock["now"] += interval
+    assert len(meta_ads.sync_due_meta_ads(limit=2)) == 1
+    assert fixed.snapshot_calls == [meta_id]
+    stored, _ = _stored_ad(ad_id)
+    assert stored["metaSyncError"] == "" and stored["metaSyncFailureCount"] == 0
+
+
+def test_a_permission_refusal_keeps_its_growing_backoff(due_ads, monkeypatch):
+    """A 403 with a permission code concerns that ad: every due ad is still tried and backs off as before."""
+    add, clock = due_ads
+    ads = ["meta_test_r2_perm_1", "meta_test_r2_perm_2"]
+    add(ads[0], "987100000000011")
+    add(ads[1], "987100000000012")
+    error = _meta_refusal(403, 200)
+    assert (error.code, error.provider_code) == ("authorization", "200")
+    refused = _RefusingMetaClient(error)
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: refused)
+    for attempt, minutes in enumerate((15, 30, 60), start=1):
+        clock["now"] = max([clock["now"]] + [int(_stored_ad(ad_id)[0]["metaNextSyncAt"] or 0) for ad_id in ads]) + 1
+        attempted_at = clock["now"]
+        meta_ads.sync_due_meta_ads(limit=2)
+        assert len(refused.calls) == 2 * attempt  # the pass goes on to the next ad
+        for ad_id in ads:
+            assert _stored_ad(ad_id)[0]["metaNextSyncAt"] == attempted_at + minutes * 60_000

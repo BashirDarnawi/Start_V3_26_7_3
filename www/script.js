@@ -868,6 +868,8 @@ let _nativeReminderWork = Promise.resolve();
 let _nativeReminderSettingsWork = Promise.resolve();
 // A disable wins at once, even while secure storage waits or fails; only a saved re-enable lifts it.
 let _nativeReminderSchedulingSuppressed = false;
+// A reminder tap that launched the app arrives before init restores the session: init opens it.
+let _nativePendingReconciliationOpen = false;
 let _nativePrefs = {
   ready: false,
   biometricEnabled: false,
@@ -1016,7 +1018,9 @@ async function readNativeClipboardImage() {
   try {
     const result = await clipboard.read();
     if (!String(result?.type || '').toLowerCase().startsWith('image/')) return null;
-    return _nativeDataUrlToFile(result.value, 'clipboard-photo');
+    const file = _nativeDataUrlToFile(result.value, 'clipboard-photo');
+    // iOS pastes a full-size PNG: shrink it like an upload.
+    try { return (file && _nativeDataUrlToFile(await compressImageToDataUrl(file), 'clipboard-photo')) || file; } catch (_) { return file; }
   } catch (_) { return null; }
 }
 
@@ -1258,9 +1262,8 @@ async function getNativeBiometricInfo(refresh = false) {
   } catch (_) { return null; }
 }
 
-// iOS shows the Face ID / passcode sheet out of process: its willResignActive and
-// didBecomeActive reach appStateChange. While this flag is set they are the sheet's own,
-// not a background / return (a cancelled prompt re-opened forever; slow unlocks prompted twice).
+// iOS: the Face ID sheet's resign/become-active reach appStateChange; while this is set they are
+// not a background/return (a cancelled prompt re-opened forever; slow unlocks prompted twice).
 let _nativePromptOpen = false;
 
 async function authenticateNativeDevice(reason = '') {
@@ -1323,10 +1326,9 @@ function removeNativeAppLock() {
   document.body.classList.remove('native-app-locked');
 }
 
-// After a sign-out (manual, forced by a 401, or emergency): a login form needs
-// no lock, and a pending "authentication required" must not outlive the user.
+// After any sign-out: a login form needs no lock, and no challenge (or tap) outlives the user.
 function resetNativeAppLockSession() {
-  _nativeAuthenticationRequired = false;
+  _nativeAuthenticationRequired = _nativePendingReconciliationOpen = false;
   removeNativeAppLock();
 }
 
@@ -1378,7 +1380,7 @@ async function setNativeBiometricLockEnabled(enabled) {
     _nativeAuthenticationRequired = false;
     removeNativeAppLock();
   }
-  if (state.currentView === 'settings') render();
+  if (['settings', 'more'].includes(state.currentView)) render();
   showNotification(
     state.language === 'ar' ? 'تم تحديث حماية الجهاز' : 'Device protection updated',
     next
@@ -1438,8 +1440,7 @@ function resetNativeReminderSession() {
   _nativeReminderGeneration++;
   clearTimeout(_nativeReminderTimer);
   _nativeReminderTimer = null;
-  // Serialize cancellation after any OS schedule call already in progress;
-  // a late native response must not reintroduce the previous user's reminders.
+  // Queued after any OS schedule in flight: a late reply must not restore the old user's reminders.
   return _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
 }
 
@@ -1502,15 +1503,13 @@ function queueNativeReminderSync() {
 }
 
 function setNativeRemindersEnabled(enabled) {
-  // Invalidate immediately, even when an OS permission/storage operation from
-  // an earlier toggle is still pending. Persist preference writes in order.
+  // Invalidate now, even while an earlier toggle's OS call is pending; preference writes stay in order.
   _nativeReminderGeneration++;
   clearTimeout(_nativeReminderTimer);
   _nativeReminderTimer = null;
   if (enabled !== true) {
     _nativeReminderSchedulingSuppressed = true;
-    // Cancellation must not wait behind secure storage. The OS work queue
-    // still orders it after any schedule already being installed.
+    // Cancel without waiting for secure storage (still after any schedule in flight).
     if (isPackagedMobileApp()) _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
   }
   const context = _captureNativeReminderContext();
@@ -1551,7 +1550,7 @@ async function _setNativeRemindersEnabledOnce(enabled, context) {
         : (state.language === 'ar' ? 'لم يتغير الإعداد المحفوظ. حاول مرة أخرى.' : 'The saved setting has not changed. Please try again.'),
       'warning'
     );
-    if (state.currentView === 'settings') render();
+    if (['settings', 'more'].includes(state.currentView)) render();
     return false;
   }
   _nativePrefs.remindersEnabled = next;
@@ -1561,7 +1560,7 @@ async function _setNativeRemindersEnabledOnce(enabled, context) {
   }
   else await _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
   if (!_nativeReminderContextIsCurrent(context)) return false;
-  if (state.currentView === 'settings') render();
+  if (['settings', 'more'].includes(state.currentView)) render();
   return true;
 }
 
@@ -1574,15 +1573,18 @@ async function syncNativeSystemBarsTheme() {
 
 async function initializeNativeSessionProtection() {
   await setupNativeServices();
+  let unlocked = true;
   if (!isPackagedMobileApp() || !state?.currentUser || !_nativePrefs.biometricEnabled) {
     _nativeAuthenticationRequired = false;
     removeNativeAppLock();
-    queueNativeReminderSync();
-    return true;
+  } else {
+    renderNativeAppLock();
+    unlocked = await unlockNativeApp();
   }
-  renderNativeAppLock();
-  const unlocked = await unlockNativeApp();
   queueNativeReminderSync();
+  const open = _nativePendingReconciliationOpen && unlocked && state?.currentUser;
+  _nativePendingReconciliationOpen = false;
+  if (open) try { navigateToInternal('reconciliation'); } catch (_) {}
   return unlocked;
 }
 
@@ -1595,8 +1597,7 @@ async function setupNativeServices() {
       return;
     }
 
-    // Four independent native reads: run them together (each bridge call costs
-    // a few ms on a phone, and the login page waits for this block).
+    // Independent native reads run together: the login page waits for this block.
     const [biometricEnabled, remindersEnabled] = await Promise.all([
       nativeSecureGet('biometric_lock_enabled'),
       nativeSecureGet('reconciliation_reminders_enabled'),
@@ -1643,8 +1644,7 @@ async function setupNativeServices() {
       }
       queueNativeReminderSync();
     });
-    // iOS: the sheet's own resign is ignored above, so a real background behind
-    // an open sheet is recorded here ('pause' never fires for the sheet itself).
+    // iOS: a real background behind an open sheet is recorded here ('pause' never fires for the sheet).
     if (Platform.isIOS) await _addNativeListener(app, 'pause', () => {
       _nativeBackgroundedAt = Date.now();
       _nativeWentBackground = true;
@@ -1660,14 +1660,14 @@ async function setupNativeServices() {
     const notifications = getCapacitorPlugin('LocalNotifications');
     await _addNativeListener(notifications, 'localNotificationActionPerformed', async action => {
       if (action?.notification?.extra?.albayanType !== 'reconciliation') return;
+      if (window.__albayanInitSettled !== true || !state?.currentUser) { _nativePendingReconciliationOpen = true; return; }
       if (_nativePrefs.biometricEnabled && state?.currentUser) await unlockNativeApp();
       if (state?.currentUser && typeof navigateToInternal === 'function') navigateToInternal('reconciliation');
     });
 
     const browser = getCapacitorPlugin('Browser');
     await _addNativeListener(browser, 'browserFinished', () => {
-      // Keep the pending PKCE request: the external login may still return
-      // through a deep link after the browser view finishes.
+      // Keep the PKCE request: the login may still return through a deep link.
       try { if (typeof render === 'function') render(); } catch (_) {}
     });
     await syncNativeSystemBarsTheme();
@@ -1691,10 +1691,9 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
-// PURE-JS CRYPTO FALLBACK: crypto.subtle exists only in secure contexts
-// (https:// or localhost); on a plain-HTTP LAN origin it is undefined on iOS
-// Safari and Android Chrome. These SHA-256 / PBKDF2-HMAC-SHA256 routines give
-// byte-identical output to Web Crypto and run only when crypto.subtle is absent.
+// PURE-JS CRYPTO FALLBACK: crypto.subtle is missing outside secure contexts (a
+// plain-HTTP LAN origin on iOS Safari / Android Chrome). These SHA-256 and
+// PBKDF2-HMAC-SHA256 routines match Web Crypto exactly and run only then.
 
 // New hashes created on the pure-JS path use fewer iterations (still recorded
 // in the stored `iterations` field, so they verify anywhere) because 600k
@@ -1935,6 +1934,26 @@ const Security = {
     return sanitized;
   },
 
+  // JSON with sorted keys (arrays keep order, undefined is skipped): equal data
+  // compares equal in any key order, as the iPhone app reorders native replies.
+  stableJson: (value) => {
+    const seen = new WeakSet();  // the current path only: a cycle becomes null
+    const normalize = (v) => {
+      if (v === null || typeof v !== 'object') return v;
+      if (seen.has(v)) return null;
+      seen.add(v);
+      let out;
+      if (Array.isArray(v)) out = v.map(normalize);
+      else {
+        out = {};
+        for (const k of Object.keys(v).sort()) if (v[k] !== undefined) out[k] = normalize(v[k]);
+      }
+      seen.delete(v);
+      return out;
+    };
+    return JSON.stringify(normalize(value));
+  },
+
   // Internal: bytes <-> hex helpers
   _bytesToHex: (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''),
   _hexToBytes: (hex) => {
@@ -2069,10 +2088,8 @@ const Security = {
     return `${prefix}_${Date.now()}_${random.substring(0, 12)}`;
   },
 
-  // Record identifiers are used in URLs, data-* attributes and (for legacy
-  // screens) inline handlers. Keep them deliberately boring so an imported or
-  // server-provided id can never break out of one of those contexts. This also
-  // matches the backend's 80-character id limit.
+  // Ids go into URLs, data-* attributes and legacy inline handlers: keep them
+  // boring so no imported/server id can break out (the backend's 80-char limit).
   isValidRecordId: (value) => {
     const id = String(value == null ? '' : value).trim();
     return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id);
@@ -2085,11 +2102,8 @@ const Security = {
     if (depth > 12 || value === null || value === undefined) return { valid: true };
     if (Array.isArray(value)) {
       for (let i = 0; i < value.length; i++) {
-        // A top-level array is a collection of records, so each direct child's
-        // `id` is a record id. Nested arrays are data inside a record (for
-        // example passkeys[].id is an opaque WebAuthn credential and can be
-        // much longer than 80 characters), so their generic `id` fields must
-        // not be treated as entity identifiers.
+        // Only a top-level array holds records with record ids. Nested arrays are
+        // record data (passkeys[].id is a long opaque WebAuthn credential).
         const childOwnId = depth === 0 && validateOwnId;
         const result = Security.validateRecordIdentifiers(value[i], `${path}[${i}]`, depth + 1, childOwnId);
         if (!result.valid) return result;
@@ -2353,11 +2367,9 @@ const DataIsolation = {
 // SESSION MANAGEMENT - Secure session handling
 // ==========================================
 
-// iOS Safari with "Block All Cookies" (and Chrome/Android with cookies
-// blocked for the site) makes ANY window.sessionStorage access throw a
-// SecurityError. Local-mode login calls createSession AFTER the password is
-// already verified, so an unguarded throw made login impossible with a
-// misleading generic error. Fall back to a page-lifetime in-memory session.
+// Blocked cookies (iOS "Block All Cookies", Chrome per-site) make any
+// sessionStorage access throw, which made local login impossible after a
+// verified password. Fall back to a page-lifetime in-memory session.
 let _memorySession = null;
 
 const SessionManager = {
@@ -3736,7 +3748,8 @@ async function refreshCurrentUserPermissions() {
   try {
     const currentId = String(state.currentUser.id || '');
     const requestIdentity = getAuthMeIdentity();
-    const beforeAccess = JSON.stringify({
+    // Key-order blind: the iPhone app delivers the login user's maps reordered.
+    const beforeAccess = Security.stableJson({
       role: String(state.currentUser.role || '').toLowerCase(),
       permissions: state.currentUser.permissions || {},
       subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
@@ -3754,15 +3767,14 @@ async function refreshCurrentUserPermissions() {
         permissions: (me.permissions && typeof me.permissions === 'object') ? me.permissions : {},
         subscriptions: Array.isArray(me.subscriptions) ? me.subscriptions : (state.currentUser.subscriptions || [])
       };
-      const afterAccess = JSON.stringify({
+      const afterAccess = Security.stableJson({
         role: String(state.currentUser.role || '').toLowerCase(),
         permissions: state.currentUser.permissions || {},
         subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
       });
       const changed = beforeAccess !== afterAccess;
-      // Also update in users array — UPSERT: if the record is missing (users
-      // list fetch failed or returned permission-less stubs), insert it so the
-      // periodic refresh can repair an empty state.users.
+      // UPSERT into state.users, so the periodic refresh repairs a missing or
+      // permission-less (stub) record.
       upsertCurrentUserIntoUsers();
       if (changed) console.log('[Permissions] Refreshed current user access');
       return changed;
@@ -3776,10 +3788,8 @@ async function refreshCurrentUserPermissions() {
   return false;
 }
 
-// Ensure state.users contains the current user's record WITH permissions.
-// state.currentUser always carries the full permission map from the server
-// login / /api/auth/me response; the users list for non-admins does not
-// (GET /api/users/public returns only {id,name,role}).
+// Keep the current user's record in state.users WITH permissions: login and
+// /api/auth/me carry the full map; GET /api/users/public only {id,name,role}.
 function upsertCurrentUserIntoUsers() {
   const cu = state.currentUser;
   if (!cu || !cu.id) return;
@@ -6949,7 +6959,7 @@ function toggleTheme() {
   state.theme = themes[(currentIndex + 1) % themes.length];
   applyTheme();
   saveState();
-  render();
+  forceFullRender();  // redraws the sidebar/drawer theme button too
 }
 
 function toggleLanguage() {
@@ -6957,12 +6967,8 @@ function toggleLanguage() {
   document.documentElement.setAttribute('dir', getDir());
   document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   saveState();
-  // Force a FULL re-render, not the partial (same-view) content swap: the
-  // <main> wrapper's sidebar-offset margin is direction-dependent
-  // (md:ml-72 in LTR vs md:mr-72 in RTL) and the sidebar itself flips side.
-  // A partial update left <main> with the old-direction margin while the
-  // sidebar had already moved via [dir] CSS, so the content overlapped the
-  // sidebar until the next full render.
+  // A FULL re-render, not the same-view swap: <main>'s sidebar margin depends on direction
+  // (md:ml-72 LTR, md:mr-72 RTL), so a partial update left the content under the moved sidebar.
   _lastRenderedView = null;
   _lastRenderedUserId = null;
   render();
@@ -9459,12 +9465,12 @@ async function apiJson(path, options = {}, timeout = {}) {
       console.warn(`[apiJson] ${resp.status} ${options.method || 'GET'} ${path} rid=${rid} ${String(text || '').slice(0, 160).replace(/\s+/g, ' ')}`);
     } catch (_) {}
     // A definitive 401 during an authenticated request means cached business
-    // data must not remain visible indefinitely. Login/setup failures and the
-    // user's own logout request are intentionally excluded.
+    // data must not remain visible indefinitely. Login/setup failures, the user's
+    // own logout and a mistyped current password (older servers) are excluded.
     if (
       resp.status === 401 &&
       state.currentUser &&
-      !['/api/auth/login', '/api/auth/setup-admin', '/api/auth/logout'].includes(path) &&
+      !['/api/auth/login', '/api/auth/setup-admin', '/api/auth/logout', '/api/auth/password-change'].includes(path) &&
       typeof handleServerAuthExpired === 'function' &&
       !serverSessionIdentityChanged(requestSessionIdentity)
     ) {
@@ -11487,11 +11493,9 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   return entity;
 }
 
-// Full-record update used by the delete-cascade cleanup (15-modals.js). This
-// name was referenced there but never defined, so in server mode deleting a
-// receipt that funded an ad crashed with a ReferenceError HALF-WAY through the
-// cleanup — the receipt survived while the ad lost its funding locally.
-// Delegates to apiPatchEntity, which brings retry + timeout handling.
+// Full-record update for the delete-cascade cleanup (15-modals.js). Without it,
+// deleting a receipt that funded an ad crashed half-way (ReferenceError): the
+// receipt survived, the ad lost its funding. apiPatchEntity adds retry + timeout.
 async function apiUpdateEntity(collection, id, record) {
   return await apiPatchEntity(collection, id, record);
 }
@@ -12452,11 +12456,8 @@ const _serverLiveSync = {
   // Signature of the last delivery-role payload, so identical polls don't
   // force a full re-render every 3s (which snapped dropdowns shut on phones).
   lastDeliverySig: null,
-  // Highest _lastModified ever seen in an ACTUAL server response. The delta
-  // cursor is seeded/re-seeded from this, never from client-written _lastModified
-  // values — otherwise a device whose clock runs fast would seed the cursor
-  // minutes ahead of server time and silently skip everyone else's updates
-  // (the server's updated_since window only looks back 15s).
+  // Highest _lastModified seen in a real server response; seeds the delta cursor.
+  // A client stamp from a fast clock would skip others' updates (15s look-back).
   serverWatermark: 0,
   fullLoadCursorReady: false,
   // True from the boot's first render until its first data load settles (17-init): the rows may
@@ -12466,24 +12467,17 @@ const _serverLiveSync = {
   lastCompatibilityCheckAt: 0,
   collectionCursors: Object.create(null),
   serviceEntitlements: null,
-  // Authentication identity and poller lifecycle are deliberately separate.
-  // sessionEpoch changes only when the authenticated session changes; it is
-  // part of getServerSessionIdentity(), so late full-load/cache responses are
-  // rejected. pollerEpoch changes whenever polling is stopped/restarted, so a
-  // late tick is discarded without invalidating an unrelated full load.
+  // Kept apart: sessionEpoch (in getServerSessionIdentity) changes only with the
+  // session and rejects late loads; pollerEpoch changes on each stop/restart and
+  // drops a late tick without voiding an unrelated full load.
   sessionEpoch: 0,
   pollerEpoch: 0,
-  // Failure backoff: after consecutive tick failures, polls are skipped until
-  // nextAllowedAt (6s/12s/24s/48s/60s at 3s base). An unreachable server must
-  // not be hammered every 3s from a phone (battery + cell radio); the
-  // visibilitychange/online handlers reset the backoff for an immediate retry.
+  // Failure backoff (6s..60s at a 3s base) spares a phone's battery and radio;
+  // visibilitychange/online reset it for an immediate retry.
   failStreak: 0,
   nextAllowedAt: 0,
-  // Collections already purged after a per-collection 403 (permission boundary).
-  // A revoked collection keeps returning 403 every 3s until the current user's
-  // permissions refresh (every usersSyncIntervalMs). Tracking already-purged
-  // collections here stops an identical 403 from re-clearing state + writing
-  // IndexedDB + forcing a full re-render on every tick (battery/jank storm).
+  // Collections purged after a 403: a revoked one answers 403 until permissions
+  // refresh, and must not re-purge, re-write IndexedDB and re-render every tick.
   purgedForbidden: new Set()
 };
 
@@ -12731,12 +12725,9 @@ function _deltaRecordVersion(record) {
   return Number.isFinite(version) ? version : null;
 }
 
-// The server deliberately overlaps each delta window so an update cannot be
-// missed at a cursor boundary. Most records in a poll are therefore exact
-// replays of records already in memory. Replace an existing object only for a
-// newer server revision (or the equal-revision deletion tie handled below);
-// preserving object identity for normal equal/stale replays also prevents a
-// needless whole-view render every 3s.
+// Delta windows overlap on purpose, so most polled rows replay what is in memory.
+// Replace a row only for a newer revision (or the equal-revision delete tie below);
+// keeping its identity otherwise avoids a whole-view render every 3s.
 function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false) {
   const incomingVersion = _deltaRecordVersion(incoming);
   const currentVersion = _deltaRecordVersion(current);
@@ -12773,10 +12764,8 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
   const arr = state[collectionName];
 
-  // PERFORMANCE: build id->index ONCE. The old code did arr.findIndex per
-  // incoming record (O(delta × collection)) plus an O(n) arr.unshift per new
-  // record, so a large catch-up delta (tab hidden overnight / cursor frozen on
-  // failures) froze the UI for hundreds of ms. This is O(delta + collection).
+  // PERFORMANCE: one id->index map, O(delta + collection); a findIndex per row
+  // froze the UI on a large catch-up delta.
   const byId = new Map();
   for (let i = 0; i < arr.length; i++) {
     const x = arr[i];
@@ -12894,11 +12883,9 @@ async function refreshServerDataCompatibility() {
   return { ok: true, refreshed: true };
 }
 
-// Customer page spending and the delivery WhatsApp preview are body-mounted
-// dialogs rather than children of #app. A normal view render cannot update or
-// remove them, so any authoritative state replacement must close them before
-// stale financial/contact data can remain visible. Never restore focus here:
-// the original card/button may already have been replaced by sync or logout.
+// Customer page spending and the delivery WhatsApp preview are body-mounted, so
+// a render cannot refresh them: close them on any authoritative state change.
+// Never restore focus here (sync or logout may have replaced that button).
 function _closeCustomerPagesDialogForStateChange() {
   let closed = false;
   const shareDialog = document.getElementById('delivery-whatsapp-share-dialog');
@@ -12921,14 +12908,28 @@ function _closeCustomerPagesDialogForStateChange() {
   return true;
 }
 
-// A scope-narrowing response contains no tombstones for newly hidden rows.
-// Every role transition therefore needs the same purge before a scoped reload,
-// including Delivery -> Employee (whose next tick switches sync strategies).
+// Lost access (D6): a role change, any removed action or subscription, or any
+// scope change. Set-based, so key order is never a change. A pure grant keeps
+// the open form, its photos and the delivery drafts.
+function _accessNarrowed(before, after) {
+  if (String(before?.role || '').toLowerCase() !== String(after?.role || '').toLowerCase()) return true;
+  const lower = list => (Array.isArray(list) ? list : []).map(item => String(item).toLowerCase());
+  for (const module of Object.keys(before?.permissions || {})) {
+    const kept = new Set(lower(after?.permissions?.[module]));
+    if (lower(before.permissions[module]).some(action => !kept.has(action))) return true;
+  }
+  const subs = new Set(lower(after?.subscriptions));
+  if (lower(before?.subscriptions).some(sub => !subs.has(sub))) return true;
+  return getServerVisibilityScopeChanges(before, after).length > 0;
+}
+
+// A scope-narrowing response has no tombstones for newly hidden rows, so every
+// role change purges before a scoped reload (Delivery -> Employee too).
 async function reloadServerDataForAccessChange(accessBefore, isAborted) {
   const scopeChanges = getServerVisibilityScopeChanges(accessBefore, state.currentUser);
   if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
   _serverLiveSync.lastDeliverySig = null;
-  closeSensitiveAuthenticatedUi();
+  if (_accessNarrowed(accessBefore, state.currentUser)) closeSensitiveAuthenticatedUi();
   _authMeRequestGeneration += 1;
   _sessionRequest = null;
   cancelPendingRequests();
@@ -13129,10 +13130,8 @@ async function serverLiveSyncOnce() {
   if (!(_serverLiveSync.purgedForbidden instanceof Set)) _serverLiveSync.purgedForbidden = new Set();
   // Only act on collections NOT already purged (see purgedForbidden above).
   const newlyForbidden = forbiddenCollections.filter(name => !_serverLiveSync.purgedForbidden.has(name));
-  // ROOT CAUSE: the first time a previously-authorized collection returns 403,
-  // collapse the usersSyncInterval wait so refreshCurrentUserPermissions runs
-  // this very tick (below) — it drops the collection from the authorized list,
-  // so it is never requested again and the churn ends immediately.
+  // ROOT CAUSE: a first 403 refreshes permissions this very tick (below), which
+  // drops the collection from the authorized list and ends the churn.
   if (newlyForbidden.length > 0) _serverLiveSync.lastUsersSyncAt = 0;
   const customerPageForbidden = newlyForbidden.some(name =>
     name === 'ads' || name === 'receipts' || name === 'customers' || name === 'pages' || name === 'exchangeRateHistory'
@@ -13349,11 +13348,8 @@ let _syncIndicatorShowTimer = null;
 // Is a badge actually on screen? A healthy tick must leave nothing behind,
 // and "Synced" may only appear to close out a badge the user already saw.
 let _syncIndicatorVisible = false;
-// The poll runs every 3s. Painting "Syncing…" then "Synced" on EVERY tick
-// left a pill flashing in the corner forever, which reads as a fault — the
-// behavior the owner reported as "sync failed" even while syncing was fine.
-// Routine ticks are now silent: a badge appears only for a genuinely slow
-// sync, a real failure, or a sync the user asked for (immediate: true).
+// Routine 3s ticks stay silent (a pill on every tick read as "sync failed"): a
+// badge shows only for a slow sync, a failure, or a user's sync (immediate).
 const SYNC_BADGE_SLOW_MS = 1200;
 
 function updateSyncIndicator(status, { immediate = false } = {}) {
@@ -13431,8 +13427,18 @@ function _paintSyncIndicator(status) {
   }
 }
 
+// Sign-out: no badge, and no timer that would paint one, outlives the session.
+function clearSyncIndicator() {
+  clearTimeout(_syncIndicatorShowTimer);
+  clearTimeout(_syncIndicatorHideTimer);
+  _syncIndicatorShowTimer = _syncIndicatorHideTimer = null;
+  document.getElementById('sync-status-indicator')?.remove();
+  _syncIndicatorVisible = false;
+}
+
 // Manual sync function for users
 async function manualSyncData() {
+  if (!state.currentUser) return;  // a badge tapped after sign-out
   if (!isServerModeEnabled()) {
     showNotification(state.language === 'ar' ? 'وضع عدم الاتصال' : 'Offline Mode', state.language === 'ar' ? 'غير متصل بالسيرفر' : 'Not connected to server', 'info');
     return;
@@ -13519,13 +13525,9 @@ function startServerLiveSync() {
   // Run one immediately, then poll.
   serverLiveSyncTick().catch(() => {});
   _serverLiveSync.timer = setInterval(() => {
-    // BATTERY/SERVER SAVER: skip polls while the tab/app is hidden. The
-    // visibilitychange handler below fires an immediate catch-up sync the
-    // moment the app becomes visible again, so no update is ever missed.
+    // BATTERY/SERVER SAVER: no polls while hidden; visibilitychange catches up.
     if (document.visibilityState === 'hidden') return;
-    // Definitely offline, or backing off after repeated failures: skip. The
-    // 'online'/'visibilitychange' handlers below reset the backoff and fire
-    // an immediate catch-up tick, so recovery is never delayed by this.
+    // Offline or backing off: skip; 'online'/'visibilitychange' reset it and catch up.
     if (navigator.onLine === false) return;
     const wait = _serverLiveSync.nextAllowedAt - Date.now();
     if (wait > 0 && wait <= 60000) return; // past the 60 s cap only a clock step: poll now
@@ -13822,11 +13824,9 @@ async function _activateServerSession(user, loginGeneration) {
       return;
 }
 
-// SYSTEM-BROWSER APP LOGIN (Phase 2), native side: exchange the one-time
-// deep-link code plus the device-held PKCE verifier for a session, then run
-// the exact same post-auth pipeline as a password login. Called only from
-// _processAppLoginCallback (09-api-auth.js), which owns the pending-request
-// bookkeeping and the waiting/busy UI.
+// SYSTEM-BROWSER APP LOGIN (Phase 2), native side: trade the one-time code and
+// PKCE verifier for a session, then run the password login's post-auth steps.
+// Only _processAppLoginCallback (09-api-auth.js) calls it; it owns the busy UI.
 async function completeAppBrowserLogin(code, verifier) {
   if (_logoutInFlight || _serverAuthExpiryInFlight) {
     showNotification(
@@ -14162,6 +14162,7 @@ function closeSensitiveAuthenticatedUi() {
 
 function resetAuthenticatedServerCaches() {
   closeSensitiveAuthenticatedUi();
+  clearSyncIndicator();
   _authMeRequestGeneration += 1;
   _sessionRequest = null;
   _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' };
@@ -14234,6 +14235,13 @@ async function wipeAuthenticatedServerDataFromClient() {
   await Promise.allSettled(writes);
 }
 
+// Sign-out drops the old account's address (?customer=&receipt=, a pending dialog
+// link) so the next sign-in cannot re-apply it; '/' becomes that user's landing.
+function _resetSignedOutAddress() {
+  _bootModalParams = null;
+  try { window.history.replaceState({}, '', IS_STUDIO_SHELL ? window.location.pathname : '/'); } catch (_) {}
+}
+
 function emergencyFinishClientSignOut(serverMode, expired) {
   closeSensitiveAuthenticatedUi();
   try { stopServerLiveSync(); } catch (_) {}
@@ -14252,6 +14260,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
   if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
   if (serverMode) activateAnonymousServerCollectionStorage();
   state.currentView = 'analytics';
+  _resetSignedOutAddress();
   saveState();
   showNotification(
     state.language === 'ar' ? (expired ? 'انتهت الجلسة' : 'تم تسجيل الخروج') : (expired ? 'Session Expired' : 'Logged Out'),
@@ -14296,6 +14305,7 @@ async function _handleLogoutOnce() {
     if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
     if (serverMode) activateAnonymousServerCollectionStorage();
     state.currentView = 'analytics';
+    _resetSignedOutAddress();
     saveState();
     if (serverMode && !serverSignedOut) {
       showNotification(state.language === 'ar' ? 'تم تسجيل الخروج من هذا الجهاز' : 'Signed out on this device',
@@ -14348,6 +14358,7 @@ function handleServerAuthExpired(requestIdentity, done) {  // done: [title, text
       if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
       activateAnonymousServerCollectionStorage();
       state.currentView = 'analytics';
+      _resetSignedOutAddress();
       saveState();
       showNotification(
         done ? done[0] : state.language === 'ar' ? 'انتهت الجلسة' : 'Session Expired',
@@ -14624,10 +14635,8 @@ function updateUrlForView(view, replace = false) {
 // Handle browser back/forward buttons
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
-    // A history.back() issued by the app itself purely to consume an
-    // overlay/modal entry (X/Cancel close — see the overlay history model in
-    // 01b-mobile-runtime.js): the UI is already correct, and running the
-    // router would only re-render and scroll-reset the unchanged view.
+    // The app's own history.back() consuming an overlay/modal entry (X/Cancel;
+    // overlay history model in 01b-mobile-runtime.js): the UI is already right.
     if (typeof shouldSuppressOverlayPopstate === 'function' && shouldSuppressOverlayPopstate()) return;
 
     // Phone browsers: Back closes the top-most overlay (same order as the native app); the popped
@@ -14650,7 +14659,8 @@ function setupUrlRouting() {
     // Navigate without pushing to history (already handled by popstate)
     navigateToInternal(view, false);
 
-    // Also restore modal state from URL params
+    // Also restore modal state from URL params; the one-shot boot link never replays on Back.
+    _bootModalParams = null;
     restoreModalFromUrl();
   });
 }
@@ -14683,11 +14693,8 @@ const MODAL_URL_HANDLERS = {
   'clothes-order':    { newOpen: () => withClothesSystem(() => showClothesOrderModal()),    open: (id) => withClothesSystem(() => editClothesOrder(id)) }
 };
 
-// Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
-// The modal/id present in the URL when the app FIRST loaded — captured now,
-// during module evaluation, BEFORE init() calls updateUrlForView() which
-// rebuilds the query from viewUrlParamsFor() and drops ?modal&id. Without this,
-// refreshing or sharing a dialog deep-link never reopened the dialog.
+// The ?modal=&id= of the FIRST load, captured before init()'s updateUrlForView()
+// drops it, so a refreshed or shared dialog link reopens its dialog (one-shot).
 let _bootModalParams = (() => {
   try { const p = getUrlParams(); return (p && p.modal && p.id) ? { modal: p.modal, id: p.id } : null; }
   catch (_) { return null; }
@@ -15445,12 +15452,6 @@ function getAdActualSpendUSDLite(ad) {
 // VIEW RENDERING FUNCTIONS  
 // ==========================================
 
-// All views and modals continue here...
-// Due to file size, creating comprehensive vanilla_v1/COMPLETE_SCRIPT_CONTINUATION.txt
-// with all remaining code that should be appended here.
-
-// For now, here's a minimal working version:
-
 // Track last rendered view to avoid unnecessary full re-renders
 let _lastRenderedView = null;
 let _lastRenderedUserId = null;
@@ -15467,11 +15468,8 @@ function _selectDefaultValue(sel) {
   }
   return sel.options.length ? sel.options[0].value : '';
 }
-// The exact HTML last written into the view container. A background live-sync tick
-// calls render() whenever ANY data changed anywhere; if this view's HTML is byte-for-byte
-// what is already on screen, we skip the DOM swap entirely — no icon flash, no re-played
-// entry animation, no scroll/focus disturbance ("plink"/shake). renderView() is
-// deterministic for a given state, so equal strings mean nothing visible changed.
+// The HTML last written into the view container: a live-sync render() whose view HTML is
+// identical skips the DOM swap (no icon flash, re-played animation or scroll/focus jump).
 let _lastViewHTML = null;
 
 // Force a full re-render (bypasses partial update optimization)
@@ -15581,12 +15579,8 @@ function render() {
       }
     }
 
-    // Save scroll and lock layout only when a DOM write will actually happen.
-    // While the overlay body scroll lock (01b-mobile-runtime.js) is active,
-    // body is position:fixed and window.scrollY reads 0 — sample the locked
-    // position instead, otherwise a render fired between closeModal() and the
-    // observer's unlock (every modal save on a phone) restores the list to
-    // the top.
+    // Save scroll and lock layout only before a real DOM write. Under the overlay scroll lock
+    // (01b) scrollY reads 0: use the locked position, or a phone modal save jumps to the top.
     const resetScroll = _resetScrollOnNextRender;
     _resetScrollOnNextRender = false;
     const _lockedScroll = (typeof _scrollLockActive !== 'undefined' && _scrollLockActive);
@@ -16535,10 +16529,8 @@ function renderLogin() {
 
 let _postLoginRoutePromise = null;
 
-// A direct link (for example /ads-studio) is still in the address bar while
-// the login screen is open. The login flow deliberately chooses a safe landing
-// page first, so re-apply that direct link only after authentication and only
-// when the authenticated user is allowed to open it.
+// A direct link (e.g. /ads-studio) waits in the address bar during login. The
+// login lands somewhere safe first; re-apply the link only if this user may open it.
 function getAllowedPostLoginView(user, requestedView) {
   const view = String(requestedView || '');
   if (!user || !Object.prototype.hasOwnProperty.call(VIEW_TO_PATH, view)) return null;
@@ -16554,13 +16546,14 @@ function restoreRequestedViewAfterLogin(requestedView) {
   if (targetView) {
     restoreViewStateFromUrl(targetView);
     // The address is normally already at the requested path. Passing true is
-    // safe because updateUrlForView replaces the matching history entry rather
-    // than pushing a duplicate.
+    // safe: updateUrlForView replaces the matching entry, never a duplicate.
     navigateToInternal(targetView, true);
+    // A dialog link opened while signed out opens now (its opener re-checks access).
+    if (_bootModalParams) restoreModalFromUrl();
     return true;
   }
-  // Root, unknown and unauthorized links must reflect the safe landing chosen
-  // by the login flow instead of leaving a misleading/stale address in the bar.
+  _bootModalParams = null;
+  // Root, unknown and unauthorized links show the safe landing, not a stale address.
   updateUrlForView(state.currentView, true);
   return false;
 }
@@ -16570,8 +16563,7 @@ function loginFromCurrentRoute(email, password, rememberMe) {
   const loginPromise = handleLogin(email, password, rememberMe === true);
   if (!loginPromise || typeof loginPromise.then !== 'function') return loginPromise;
 
-  // Both click and submit can fire for the same form action. handleLogin()
-  // intentionally returns the same in-flight promise; attach one redirect only.
+  // Click and submit can both fire; handleLogin() returns one shared promise, so attach one redirect.
   if (_postLoginRoutePromise === loginPromise) return loginPromise;
   _postLoginRoutePromise = loginPromise;
   const clearPendingRoute = () => {
@@ -16659,8 +16651,7 @@ function attachLoginHandlers() {
     } catch (_) {}
     // #endregion
 
-    // A chosen saved account already filled the email — put the caret straight
-    // into the password box so sign-in is one field away.
+    // A chosen saved account filled the email: start in the password box.
     if (_loginPrefillEmail) {
       const passwordField = document.getElementById('login-password');
       if (passwordField) {
@@ -17979,11 +17970,8 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
   }).join('');
 }
 
-// PAGINATION ("Load more") for the customers grid — mirrors the receipts grid.
-// Rendering every customer card at once (each card has two financial grids and
-// several icons) freezes the view past a few hundred customers; render the first
-// CUSTOMERS_PAGE_SIZE and reveal more on demand. The limit resets automatically
-// whenever the search/sort/financial-filter changes (fingerprint check below).
+// "Load more" for the customers grid (like receipts): all cards at once froze the view past a few
+// hundred customers. The limit resets when search/sort/financial filter change (fingerprint).
 const CUSTOMERS_PAGE_SIZE = 50;
 let _customersShowLimit = CUSTOMERS_PAGE_SIZE;
 let _customersFilterFingerprint = '';
@@ -18163,11 +18151,8 @@ function renderCustomersView() {
   `;
 }
 
-// PAGINATION ("Load more") for the receipts grid. Rendering every receipt
-// card at once makes the view slow past a few hundred receipts; we render
-// the first RECEIPTS_PAGE_SIZE and reveal more on demand. The limit resets
-// automatically whenever the search/filters/sort change (fingerprint check
-// inside renderReceiptsView), so filtering always starts from page one.
+// "Load more" for the receipts grid: all cards at once is slow past a few hundred receipts. The
+// limit resets when search/filters/sort change (fingerprint in renderReceiptsView).
 const RECEIPTS_PAGE_SIZE = 50;
 let _receiptsShowLimit = RECEIPTS_PAGE_SIZE;
 let _receiptsFilterFingerprint = '';
@@ -18220,11 +18205,8 @@ function renderReceiptsView() {
     if (receiptCustomerFilter && receiptCustomerId !== receiptCustomerFilter) return false;
     const customer = customersById.get(receiptCustomerId);
 
-    // Search filter. Fold ONLY while a query exists: foldSearchText (NFKC +
-    // 6 regex passes) on four fields per receipt per render was measurable
-    // jank on phones for the common no-search repaint. Falls back to any
-    // denormalized name stamped on the receipt so name search still works
-    // for a role that can see receipts but not load customers.
+    // Fold only while a query exists (four fields per receipt per render was phone jank); the
+    // receipt's own customerName keeps name search for a role that cannot load customers.
     if (receiptSearchTerm) {
       const customerName = foldSearchText(customer?.name || receipt.customerName || '');
       const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
@@ -18925,11 +18907,8 @@ function renderPagesView() {
           .some(value => foldSearchText(value).includes(pageSearch));
       });
   const hasPageFilters = !!pageSearch || pageOwnerFilter !== 'all';
-  // Reset the reveal limit whenever the SEARCH changes, so a new search starts
-  // at its top matches instead of inheriting a huge previous limit. Keyed on
-  // the search only: including the result count meant a background Meta sync
-  // adding or removing one page silently threw the user back to the first 50
-  // rows after they had pressed "Load more" several times.
+  // Reset the reveal limit when the SEARCH changes (only then: keying on the result count let a
+  // background Meta sync throw the user back to the first 50 rows after "Load more").
   const pagesFilterFingerprint = JSON.stringify([pageSearch, pageOwnerFilter]);
   if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
     _pagesFilterFingerprint = pagesFilterFingerprint;
@@ -19119,8 +19098,10 @@ function completeMetaImportedAd(adId) {
   if (!ad) return;
   const page = (state.pages || []).find(item => String(item.id) === String(ad.pageId));
   if (page && getPageCustomerIds(page).length === 0) {
+    const isAr = state.language === 'ar';
     showNotification(
-      state.language === 'ar'
+      isAr ? 'اربط الصفحة بعميل أولاً' : 'Assign the page to a customer first',
+      isAr
         ? 'اربط صفحة Meta بعميل أولاً، ثم أكمل الدفع والوصل في الإعلان.'
         : 'First assign the imported Meta page to a customer, then complete payment and receipt details in the ad.',
       'warning'
@@ -20612,6 +20593,7 @@ function setDeliveryDashboardFilter(status) {
 
 // Manual refresh button for delivery dashboard - forces immediate sync from server
 async function refreshDeliveryDashboard() {
+  if (!state.currentUser) return;  // never a sync badge on the login screen
   if (!isServerModeEnabled()) {
     render();
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة' : 'Dashboard refreshed', 'success');
@@ -20645,6 +20627,7 @@ async function refreshDeliveryDashboard() {
     updateSyncIndicator('synced', { immediate: true });
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة بأحدث البيانات' : 'Dashboard updated with latest data', 'success');
   } catch (e) {
+    if (!state.currentUser || e?.code === 'SERVER_SESSION_CHANGED') return;  // signed out meanwhile
     console.error('Failed to refresh delivery dashboard:', e);
     updateSyncIndicator('error');
     showNotification(state.language === 'ar' ? 'فشل التحديث' : 'Refresh Failed', state.language === 'ar' ? 'تعذّر جلب أحدث البيانات. يرجى المحاولة مجدداً.' : 'Could not fetch latest data. Please try again.', 'error');
@@ -21381,11 +21364,8 @@ function renderAuditView() {
     // User filter
     if (state.auditUserFilter !== 'all' && log.userId !== state.auditUserFilter) return false;
     
-    // Date range filter. `new Date('2026-07-12')` parses as UTC midnight, which
-    // is a different LOCAL day on any non-UTC device, so both boundaries used
-    // to hide or include the wrong entries. Build each boundary from the Y/M/D
-    // components as a LOCAL time so a whole calendar day is matched exactly,
-    // regardless of the device's timezone.
+    // Date range: new Date('2026-07-12') is UTC midnight (another local day off UTC), so each
+    // boundary is built as LOCAL Y/M/D time to match whole calendar days in any timezone.
     const _localDayStart = (ymd) => {
       const [y, m, d] = String(ymd).split('-').map(Number);
       return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
@@ -21445,6 +21425,9 @@ function renderAuditView() {
     'financial': 'dollar-sign',
     'general': 'file-text'
   };
+  // Arabic display text only; values, filters and unknown ids stay raw.
+  const auditAr = { create: 'إنشاء', update: 'تعديل', delete: 'حذف', login: 'تسجيل دخول', logout: 'تسجيل خروج', restore: 'استعادة', cleanup: 'تنظيف', password_change: 'تغيير كلمة المرور', password_reset: 'إعادة تعيين كلمة المرور', password_reset_request: 'طلب إعادة تعيين كلمة المرور', password_change_failed: 'فشل تغيير كلمة المرور', password_change_blocked: 'حظر تغيير كلمة المرور', setup_admin: 'إعداد المدير', wallet_release: 'تحرير المحفظة', sync: 'مزامنة', automatic_sync: 'مزامنة تلقائية', link: 'ربط', auth: 'مصادقة', data: 'بيانات', financial: 'مالي', general: 'عام' };
+  const auditLabel = id => { const label = isAr && auditAr[String(id).toLowerCase()]; return typeof label === 'string' ? label : id; };
   
   return `
     <div class="management-workspace audit-workspace" dir="${isAr ? 'rtl' : 'ltr'}">
@@ -21517,7 +21500,7 @@ function renderAuditView() {
           <div class="audit-filter-controls workspace-filter-grid">
             <select aria-label="${isAr ? 'الإجراء' : 'Action'}" onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
-              ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
+              ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(auditLabel(a))}</option>`).join('')}
             </select>
 
             <select aria-label="${isAr ? 'الفئة' : 'Category'}" onchange="updateAuditFilter('category', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditCategoryFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
@@ -21577,7 +21560,7 @@ function renderAuditView() {
                     <li class="management-timeline-item">
                       <span class="management-timeline-marker" aria-hidden="true"><i data-lucide="${categoryIcons[category] || 'file-text'}" class="h-4 w-4"></i></span>
                       <article class="management-card management-activity-card">
-                        <div class="management-activity-top"><div class="management-activity-tags"><span class="management-action-tag">${Security.escapeHtml(log.action || '')}</span><span class="management-category-tag">${Security.escapeHtml(category)}</span><span class="management-severity-tag ${severityColors[severity] || severityColors.info}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span></div><time datetime="${Security.escapeHtml(String(log.date || ''))}">${new Date(log.date).toLocaleDateString(appDateLocale())}<span>${new Date(log.date).toLocaleTimeString(appDateLocale())}</span></time></div>
+                        <div class="management-activity-top"><div class="management-activity-tags"><span class="management-action-tag">${Security.escapeHtml(auditLabel(log.action || ''))}</span><span class="management-category-tag">${Security.escapeHtml(auditLabel(category))}</span><span class="management-severity-tag ${severityColors[severity] || severityColors.info}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span></div><time datetime="${Security.escapeHtml(String(log.date || ''))}">${new Date(log.date).toLocaleDateString(appDateLocale())}<span>${new Date(log.date).toLocaleTimeString(appDateLocale())}</span></time></div>
                         <div class="management-activity-author"><span class="management-avatar" aria-hidden="true">${Security.escapeHtml(String(userName).charAt(0).toUpperCase())}</span><strong>${Security.escapeHtml(userName)}</strong></div>
                         <p class="management-activity-description">${Security.escapeHtml(log.description || '')}</p>
                         <div class="management-activity-footer">${log.resourceId ? `<p class="management-resource-id"><span>${isAr ? 'معرّف السجل' : 'Record ID'}</span><bdi>${Security.escapeHtml(String(log.resourceId))}</bdi></p>` : '<span></span>'}<button type="button" data-log-id="${Security.escapeHtml(String(log.id || ''))}" onclick="showLogDetails(this.dataset.logId)" class="management-button"><i data-lucide="eye" class="h-4 w-4"></i>${isAr ? 'عرض التفاصيل' : 'View details'}</button></div>
@@ -22065,12 +22048,44 @@ async function cleanupAuditLogs() {
   }
 }
 
+// "This phone" (app only), also on More: staff have no Settings. Reminders: ads/reconciliation users.
+function renderNativeDeviceSettingsCard(isAr) {
+  const nativeStatus = typeof nativeSecuritySettingsStatus === 'function' ? nativeSecuritySettingsStatus() : null;
+  if (!nativeStatus?.isNative) return '';
+  const showReminders = isCurrentUserAdmin() || userCanAccessView(state.currentUser, 'ads') || userCanAccessView(state.currentUser, 'reconciliation');
+  return `
+      <div id="settings-device" tabindex="-1" class="management-card management-settings-card" data-native-device-settings>
+        <h2 class="text-xl font-bold mb-2 flex items-center gap-2">
+          <i data-lucide="smartphone" class="w-5 h-5 text-indigo-600"></i>
+          ${isAr ? 'حماية هذا الهاتف' : 'This phone'}
+        </h2>
+        <p class="text-sm text-slate-500 mb-4">${isAr ? 'هذه الإعدادات محفوظة بأمان على هذا الهاتف فقط، ولا تغيّر أجهزة المستخدمين الآخرين.' : 'These settings are encrypted on this phone only and do not change other users’ devices.'}</p>
+        <div class="space-y-3">
+          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="font-bold flex items-center gap-2"><i data-lucide="scan-face" class="w-5 h-5 text-emerald-600"></i>${isAr ? 'قفل بالبصمة أو Face ID' : 'Biometric app lock'}</div>
+              <p class="mt-1 text-xs text-slate-500">${isAr ? 'عند مغادرة البيان، استخدم بصمة الهاتف أو Face ID أو رمز قفل الهاتف لفتحه.' : 'After leaving Albayan, unlock it with biometrics or the phone’s device credential.'}</p>
+            </div>
+            <button type="button" onclick="setNativeBiometricLockEnabled(${nativeStatus.biometricEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.biometricEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
+              ${nativeStatus.biometricEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
+            </button>
+          </div>
+          ${showReminders ? `<div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="font-bold flex items-center gap-2"><i data-lucide="bell-ring" class="w-5 h-5 text-amber-600"></i>${isAr ? 'تذكيرات تسوية الإعلانات' : 'Ad reconciliation reminders'}</div>
+              <p class="mt-1 text-xs text-slate-500">${isAr ? 'يرسل الهاتف تذكيراً في اليوم التالي لانتهاء الإعلان أو إيقافه.' : 'Your phone reminds you the day after an ad ends or is stopped.'}</p>
+            </div>
+            <button type="button" onclick="setNativeRemindersEnabled(${nativeStatus.remindersEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.remindersEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
+              ${nativeStatus.remindersEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
+            </button>
+          </div>` : ''}
+        </div>
+      </div>`;
+}
+
 function renderSettingsView() {
   const isAr = state.language === 'ar';
   const history = state.exchangeRateHistory || [];
-  const nativeStatus = typeof nativeSecuritySettingsStatus === 'function'
-    ? nativeSecuritySettingsStatus()
-    : { isNative: false, ready: true, biometricEnabled: false, remindersEnabled: false, biometricAvailable: false };
   const settingsSections = [
     [typeof renderSettingsAppearanceCard === 'function' ? 'settings-appearance' : 'settings-performance', 'sliders-horizontal', isAr ? 'التفضيلات' : 'Preferences'],
     ['settings-security', 'shield-check', isAr ? 'الأمان والحساب' : 'Security & account'],
@@ -22164,35 +22179,7 @@ function renderSettingsView() {
         ` : ''}
       </div>
 
-      ${nativeStatus.isNative ? `
-      <!-- Protection and reminders for this physical phone only -->
-      <div id="settings-device" tabindex="-1" class="management-card management-settings-card" data-native-device-settings>
-        <h2 class="text-xl font-bold mb-2 flex items-center gap-2">
-          <i data-lucide="smartphone" class="w-5 h-5 text-indigo-600"></i>
-          ${isAr ? 'حماية هذا الهاتف' : 'This phone'}
-        </h2>
-        <p class="text-sm text-slate-500 mb-4">${isAr ? 'هذه الإعدادات محفوظة بأمان على هذا الهاتف فقط، ولا تغيّر أجهزة المستخدمين الآخرين.' : 'These settings are encrypted on this phone only and do not change other users’ devices.'}</p>
-        <div class="space-y-3">
-          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-              <div class="font-bold flex items-center gap-2"><i data-lucide="scan-face" class="w-5 h-5 text-emerald-600"></i>${isAr ? 'قفل بالبصمة أو Face ID' : 'Biometric app lock'}</div>
-              <p class="mt-1 text-xs text-slate-500">${isAr ? 'عند مغادرة البيان، استخدم بصمة الهاتف أو Face ID أو رمز قفل الهاتف لفتحه.' : 'After leaving Albayan, unlock it with biometrics or the phone’s device credential.'}</p>
-            </div>
-            <button type="button" onclick="setNativeBiometricLockEnabled(${nativeStatus.biometricEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.biometricEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
-              ${nativeStatus.biometricEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
-            </button>
-          </div>
-          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-              <div class="font-bold flex items-center gap-2"><i data-lucide="bell-ring" class="w-5 h-5 text-amber-600"></i>${isAr ? 'تذكيرات تسوية الإعلانات' : 'Ad reconciliation reminders'}</div>
-              <p class="mt-1 text-xs text-slate-500">${isAr ? 'يرسل الهاتف تذكيراً في اليوم التالي لانتهاء الإعلان أو إيقافه.' : 'Your phone reminds you the day after an ad ends or is stopped.'}</p>
-            </div>
-            <button type="button" onclick="setNativeRemindersEnabled(${nativeStatus.remindersEnabled ? 'false' : 'true'})" class="min-h-11 shrink-0 rounded-xl px-4 py-2 font-bold ${nativeStatus.remindersEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200' : 'bg-indigo-600 text-white'}">
-              ${nativeStatus.remindersEnabled ? (isAr ? 'مفعّل - إيقاف' : 'On - turn off') : (isAr ? 'تفعيل' : 'Enable')}
-            </button>
-          </div>
-        </div>
-      </div>` : ''}
+      ${renderNativeDeviceSettingsCard(isAr)}
 
       <!-- Privacy and account deletion -->
       <div id="settings-privacy" tabindex="-1" class="management-card management-settings-card">
@@ -23648,6 +23635,7 @@ function renderMoreView() {
   const isAr = state.language === 'ar';
   const tiles = shellMoreTiles();
   const user = state.currentUser || {};
+  const deviceCard = renderNativeDeviceSettingsCard(isAr);
   return `
     <div class="hub-shell">
       <h1 class="text-[26px] font-extrabold tracking-tight text-slate-900 dark:text-white mb-4">${isAr ? 'المزيد' : 'More'}</h1>
@@ -23664,6 +23652,7 @@ function renderMoreView() {
             <span class="shell-tile-sub block text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">${tile.sub}</span>
           </button>`).join('')}
       </div>
+      ${deviceCard ? `<div class="mt-6">${deviceCard}</div>` : ''}
       <div class="mt-6 grid grid-cols-2 gap-2">
         <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(shellThemeLabel(state.theme, isAr))}</button>
         <button type="button" onclick="toggleLanguage()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="globe" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
@@ -23771,13 +23760,9 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   `;
 }
 
+// openReceiptRecord also clears filters Collect a debt left on (else an empty list).
 function openReceiptFromHome(receiptId) {
-  const id = String(receiptId || '');
-  if (!id) return;
-  state.receiptSearch = '';
-  state.receiptCustomerFilter = '';
-  state.receiptRecordFilter = id;
-  navigateTo('receipts');
+  return openReceiptRecord(String(receiptId || ''));
 }
 
 // ---------- Collect a debt ----------
@@ -23939,10 +23924,8 @@ function remindDebtor(customerId) {
   render();
 }
 
-// Browsers only allow one new window per tap, so "Remind all" walks the
-// overdue list one tap at a time: each tap opens the next customer not
-// reminded in the last day. No usable phone (remindDebtor's own
-// buildWhatsAppLink test): skipped, never stamped, and counted.
+// One new window per tap (browser rule): each "Remind all" tap opens the next overdue customer
+// not reminded in a day. No usable phone (buildWhatsAppLink): skipped, never stamped, counted.
 function remindAllOverdue() {
   const log = shellReminderLog();
   const dayAgo = Date.now() - TIME_CONSTANTS.MILLISECONDS_PER_DAY;
@@ -23987,7 +23970,7 @@ function shellSetTheme(theme) {
   state.theme = theme === 'dark' ? 'dark' : theme === 'system' ? 'system' : 'light';
   applyTheme();
   saveState();
-  render();
+  forceFullRender();  // redraws the sidebar theme button too
 }
 
 function renderSettingsAppearanceCard() {
@@ -24002,7 +23985,7 @@ function renderSettingsAppearanceCard() {
   return `
     <button type="button" onclick="editUser('${shellEsc(user.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
       <span class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white font-bold flex-shrink-0">${shellEsc(shellInitial(user.name))}</span>
-      <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(user.role || '')}${user.email ? ` · <span dir="ltr">${shellEsc(user.email)}</span>` : ''}</span></span>
+      <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(shellRoleLabel(user.role, isAr))}${user.email ? ` · <span dir="ltr">${shellEsc(user.email)}</span>` : ''}</span></span>
       <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
     </button>
     <div class="hub-section-title mt-5">${isAr ? 'المظهر' : 'Appearance'}</div>
@@ -24168,9 +24151,8 @@ function shellListRow({ kind, id, avatar, title, sub, trailing = '', facts = '',
     </article>`;
 }
 
-// Table lists (Ads, Deliveries): on phones a summary row sits above each
-// detail row and the detail row shows only when expanded; on desktop the
-// summary rows are hidden and the table stays a table (see style.css).
+// Table lists (Ads, Deliveries): on phones a summary row expands each detail row;
+// on desktop the summary rows are hidden and the table stays a table (style.css).
 function shellTableSummaryRow(kind, id, fields, colspan) {
   const open = shellRowIsOpen(kind, id);
   return `<tr class="shell-tr-summary ${open ? 'is-open' : ''}" data-shell-row="${shellEsc(kind)}" data-shell-row-id="${shellEsc(id)}"><td colspan="${Number(colspan) || 1}" class="shell-tr-cell"><div class="shell-table-summary-layout ${fields.media ? 'has-media' : ''}">${fields.media ? `<div class="shell-summary-media">${fields.media}</div>` : ''}${shellSummaryButton({ kind, id, open, ...fields })}</div>${fields.extra || ''}</td></tr>`;
@@ -27239,11 +27221,8 @@ async function openDeliveryReceiptWhatsAppShare(receiptId) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  // FB/IG/Messenger in-app browsers drop script-initiated _blank navigations
-  // inconsistently (and iOS never auto-launches an app from a JS navigation).
-  // The attempt above is harmless when the shell honors it — but do NOT tear
-  // down the dialog (it holds the working Copy fallback) and do NOT claim
-  // WhatsApp opened. Keep the preview open and tell the user the way out.
+  // FB/IG/Messenger in-app browsers drop script _blank navigations (iOS never opens an app
+  // from one): keep the dialog (its Copy fallback works), never claim WhatsApp opened.
   if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
     showNotification(
       isAr ? 'إن لم يفتح واتساب' : 'If WhatsApp did not open',
@@ -27371,8 +27350,8 @@ function _receiptFinalNoExists(serial, excludeId) {
 // ---- IMAGE COMPRESSION (shared by all photo uploads) ----
 // A 3-6MB camera photo stored as a base64 data URL inflates every save, sync
 // payload and export; max 1280px JPEG (~80%) keeps receipts readable at
-// 10-20x less. PNG stays PNG (transparency); on ANY failure the original
-// data URL is kept so a photo is never lost.
+// 10-20x less. PNG/WebP stay PNG only with a transparent pixel; on ANY
+// failure the original data URL is kept so a photo is never lost.
 const IMAGE_MAX_DIMENSION = 1280;
 const IMAGE_JPEG_QUALITY = 0.8;
 
@@ -27416,7 +27395,7 @@ async function compressImageToDataUrl(file) {
     if (!w || !h) return originalDataUrl;
     const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(w, h));
     // PNG and WebP may carry transparency — re-encode as PNG to keep it.
-    const keepAlpha = /image\/(png|webp)/.test(type);
+    let keepAlpha = /image\/(png|webp)/.test(type);
     // Small already and not worth re-encoding? Keep the original.
     if (scale === 1 && originalDataUrl.length < 300 * 1024) return originalDataUrl;
     const canvas = document.createElement('canvas');
@@ -27425,6 +27404,14 @@ async function compressImageToDataUrl(file) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return originalDataUrl;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    // ...only with a transparent (or unreadable) pixel: an opaque PNG, like an iPhone paste, is a JPEG.
+    if (keepAlpha) {
+      try {
+        const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        keepAlpha = false;
+        for (let i = 3; i < px.length && !keepAlpha; i += 4) keepAlpha = px[i] < 255;
+      } catch (_) { keepAlpha = true; }
+    }
     const out = keepAlpha
       ? canvas.toDataURL('image/png')
       : canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY);
@@ -27453,11 +27440,8 @@ function isSafeReceiptPhotoSource(value) {
   return /^(?:\/|\.\/|\.\.\/)[^\s"'<>`]+$/.test(source);
 }
 
-// Distinguish "valid image, just bigger than the 8M-char cap above" from a
-// truly unsupported format, so an oversized JPG gets the "too large" message
-// instead of being told it is not a JPG. Prefix-only regex: never run a
-// full-string pattern over an 8M+ character value. Keep the size threshold
-// aligned with isSafeReceiptPhotoSource.
+// An oversized valid image gets "too large", not "unsupported format". Prefix-only regex (never a
+// full pattern over 8M+ chars); the threshold matches isSafeReceiptPhotoSource.
 function isOversizedReceiptPhotoSource(value) {
   const source = String(value || '').trim();
   return source.length > 8 * 1024 * 1024
@@ -27858,10 +27842,8 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
     document.getElementById('delivery-receipt-image-empty')?.classList.add('hidden');
     updateReceiptDeliveryCompletionComputed();
   }).catch((err) => {
-    // compressImageToDataUrl only rejects when the FileReader itself fails
-    // (iCloud photo that cannot download, expired Android picker document,
-    // WebView memory pressure). The proof photo is REQUIRED, so silence here
-    // left the driver staring at a disabled submit with no explanation.
+    // Only a failed FileReader rejects (iCloud download, expired picker document, memory). The proof
+    // photo is REQUIRED: silence left the driver at a disabled submit with no reason.
     try { console.warn('[deliveryPhoto] Could not read the picked photo:', err?.message || err); } catch (_) {}
     showNotification(
       state.language === 'ar' ? 'خطأ' : 'Error',
@@ -34234,7 +34216,7 @@ async function _saveReceiptFromModalInner() {
     const newPayments = status === 'Not Paid'
       ? (receipt.plannedPayments || [])
       : (receipt.payments || []);
-    if (JSON.stringify(oldPayments) !== JSON.stringify(newPayments)) {
+    if (Security.stableJson(oldPayments) !== Security.stableJson(newPayments)) {  // key order is not a change
       changes.push({
         field: 'Payments',
         from: `${oldPayments.length} payment(s)`,
@@ -34242,9 +34224,8 @@ async function _saveReceiptFromModalInner() {
       });
     }
     
-    // Add to edit history if there are changes, on a COPY: oldReceipt is the
-    // live row, and a failed save left the row in it (a retry then uploaded the
-    // edit twice; a refused edit was recorded as if it happened).
+    // History goes on a COPY: a failed save must not leave the edit in the live
+    // row (a retry uploaded it twice; a refused edit was recorded as done).
     if (changes.length > 0) {
       const editHistory = Array.isArray(oldReceipt.editHistory) ? oldReceipt.editHistory.slice() : [];
       editHistory.push({
@@ -41831,7 +41812,7 @@ async function handleModalSubmit() {
         // Track receipt allocations changes
         const oldAllocations = oldAd.receiptAllocations || [];
         const newAllocations = allocations || [];
-        if (JSON.stringify(oldAllocations) !== JSON.stringify(newAllocations)) {
+        if (Security.stableJson(oldAllocations) !== Security.stableJson(newAllocations)) {  // key order is not a change
           changes.push({
             field: 'Receipt Funding',
             from: `${oldAllocations.length} allocation(s) • $${oldAllocations.reduce((s, a) => s + parseFloat(a.amountUSD || 0), 0).toFixed(2)}`,
@@ -41850,9 +41831,8 @@ async function handleModalSubmit() {
           });
         }
         
-        // Work on a detached history copy. The live record changes only after
-        // the save succeeds, so a rejected/conflicted edit cannot create a
-        // false history row or duplicate it on retry.
+        // A detached history copy: the live record changes only after the save,
+        // so a refused edit adds no false row and a retry no duplicate.
         Object.assign(adUpdates, buildAdEditHistoryUpdates(oldAd, changes));
         
         if (isServerModeEnabled()) {
@@ -42984,12 +42964,8 @@ function renderAdsStudioLoadingState() {
 if (IS_STUDIO_SHELL || /^\/(ads-studio|studio)(\/|$)/.test(window.location.pathname || '')) {
   try { ensureAdsStudioLoaded(); } catch (_) {}
 }
-// META ADS — SECURE READ-ONLY SYNCHRONIZATION. Albayan stays the source of
-// truth for customers, receipts, payments, rates, photos and notes; Meta facts
-// live only in server-controlled meta* fields, shown beside Albayan's values.
-// STARTUP half: what ad rows/cards/headers draw, the dialog state sign-out
-// resets, the two closers. The dialogs ship in lazy meta-tools.js
-// (src/15d-meta-ads.js) via 15d1-meta-tools-loader.js.
+// META ADS (read-only sync): Albayan owns customers, money, photos and notes; Meta facts stay in
+// server-set meta* fields. Startup half (rows, cards, headers, closers); dialogs: lazy meta-tools.js.
 
 const metaAdsUi = {
   open: false, // the renderer draws only while open: a late load never reopens a closed dialog
@@ -43069,9 +43045,8 @@ function metaAdsTotalRemainingMinor(ad) {
 }
 
 function metaAdCurrencyIsKnownUSD(ad) {
-  // Must be KNOWN dollars. A draft carries Meta's budget minors before the ad
-  // account's currency is read, so guessing USD would lock EUR 30 in as $30 of
-  // customer debt. Unknown stays manual until a later sync learns it.
+  // KNOWN dollars only: a draft has budget minors before the currency is read, and guessing
+  // USD would book EUR 30 as $30 of debt. Unknown stays manual until a sync learns it.
   return String(ad?.metaCurrency || '').trim().toUpperCase() === 'USD';
 }
 
@@ -43085,9 +43060,8 @@ function metaAdAutoBudgetUSD(ad) {
 }
 
 function metaAdRealSpendUSD(ad) {
-  // Meta's actual spend in dollars, or null when it cannot be trusted: not
-  // linked, never synced (a 0 before the first sync would wrongly promise
-  // "nothing was spent"), or an ad account that is not known to be in USD.
+  // Meta's spend in dollars, or null when untrusted: not linked, never synced (a 0 then would
+  // promise "nothing spent"), or an account not known to be USD.
   if (!ad?.metaAdId || !ad.metaSyncedAt) return null;
   if (!metaAdCurrencyIsKnownUSD(ad)) return null;
   const minor = Number(ad.metaSpendMinor);
@@ -43130,27 +43104,35 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
 }
 
 function adPagePictureUrl(ad, adPage) {
-  // Our OWN archived copy wins: signed fbcdn links expire (and stop working
-  // entirely once the Meta link is gone), the stored data URL does not.
+  // Our archived copy wins: signed fbcdn links expire, the stored data URL does not.
   const stored = String(adPage?.metaPagePictureData || ad?.metaPagePictureData || '').trim();
   if (stored.indexOf('data:image/') === 0) return stored;
-  // Lean page record (server lists omit the archived picture): the picture
-  // route serves it by id, through the native interceptor on the phone.
+  // Lean page (lists omit the archive): the picture route serves it by id (phone: native interceptor).
   if (adPage && adPage._mediaOmitted === true && adPage.id && String(adPage.metaPagePictureArchivedFrom || '').trim() && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
     return protectedImageUrl(`/api/collections/pages/${encodeURIComponent(String(adPage.id))}/picture?v=${Math.max(0, Number(adPage._lastModified) || 0)}`);
   }
-  // Server-synced Facebook Page profile picture: the ad's own copy first
-  // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
-  // the linked page record's copy for ads the sync has not revisited yet.
+  // Synced page picture: the ad's own copy first (each sync refreshes its signed URL), then the
+  // linked page's copy for ads the sync has not revisited.
   const url = String(ad?.metaPagePictureUrl || adPage?.metaPagePictureUrl || '').trim();
   return /^https:\/\//i.test(url) ? url : '';
 }
 
-// The ad creative to display: archived copy first, signed link as fallback.
-function metaAdThumbnailSrc(ad) {
+// The ad creative: our archived copy (inline, or by route on lean rows), else Meta's expiring
+// link. img: for an <img> src (the packaged app's interceptor).
+function metaAdThumbnailSrc(ad, img) {
   const stored = String(ad?.metaThumbnailData || '').trim();
   if (stored.indexOf('data:image/') === 0) return stored;
+  if (ad?.id && String(ad.metaThumbnailArchivedFrom || '').trim() && isServerModeEnabled()) {
+    const path = `/api/collections/ads/${encodeURIComponent(String(ad.id))}/meta-thumbnail?v=${Math.max(0, Number(ad._lastModified) || 0)}`;
+    return img ? protectedImageUrl(path) : getServerBaseUrl() + path;
+  }
   return String(ad?.metaThumbnailUrl || '').trim();
+}
+
+// Meta's link: no referrer. Our route: the session (credentials in the packaged app, as uploads).
+function metaAdThumbnailImgAttrs(ad) {
+  const src = metaAdThumbnailSrc(ad, true);
+  return `src="${Security.escapeHtml(src)}"${src === String(ad?.metaThumbnailUrl || '').trim() ? ' referrerpolicy="no-referrer"' : (getServerBaseUrl() && src.indexOf('data:') ? ' crossorigin="use-credentials"' : '')}`;
 }
 
 function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
@@ -43172,9 +43154,8 @@ function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
 }
 
 function adPageAvatarError(img) {
-  // Signed avatar URLs expire between syncs. A dead one disappears quietly
-  // instead of leaving a broken-image circle beside the ad photo; the next
-  // sync pass stores a fresh URL.
+  // Signed avatar URLs expire between syncs: drop a dead one quietly (no broken circle); the
+  // next sync stores a fresh URL.
   img?.closest?.('.ad-page-avatar')?.remove();
 }
 
@@ -43194,7 +43175,7 @@ function renderMetaAdThumbnail(ad, isAr) {
     ? (isAr ? 'صورة الصفحة — صورة الإعلان الأصلية غير متاحة من Meta' : "Page picture — Meta does not expose this ad's original photo")
     : (isAr ? 'عرض صورة إعلان Meta' : 'View Meta ad image');
   return `<button type="button" data-meta-preview-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdPreview(this.dataset.metaPreviewAdId)" class="meta-ad-thumbnail-button" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
-    <img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="metaAdsThumbnailError(this)">
+    <img ${metaAdThumbnailImgAttrs(ad)} alt="${label}" loading="lazy" decoding="async" onerror="metaAdsThumbnailError(this)">
     <span class="meta-ad-thumbnail-badge"><i data-lucide="maximize-2" class="h-3 w-3"></i></span>
   </button>`;
 }
@@ -43230,9 +43211,8 @@ function renderAdPrimaryThumbnail(ad, isAr) {
 }
 
 function adUploadedThumbnailError(img) {
-  // Never replace a failed Albayan upload with a Meta/page picture: that can
-  // show a believable but wrong image. Keep the failure explicit and retryable
-  // through View Photos / Choose main photo.
+  // Never swap a failed upload for a Meta/page picture (believable but wrong): keep the failure
+  // explicit, retryable via View Photos / Choose main photo.
   const button = img?.closest?.('.meta-ad-thumbnail-button');
   if (!button || button.classList.contains('meta-ad-thumbnail-placeholder')) return;
   const unavailable = metaAdsIsArabic() ? 'الصورة المرفوعة غير متاحة' : 'Uploaded photo unavailable';
@@ -43268,7 +43248,7 @@ function openMetaAdPreview(adId) {
         <div class="min-w-0"><h2 id="meta-ad-preview-title" class="truncate font-black text-slate-800 dark:text-white">${Security.escapeHtml(title)}</h2><p class="truncate text-xs text-slate-500">${Security.escapeHtml(ad.metaAdAccountName || '')}</p></div>
         <button type="button" onclick="document.getElementById('meta-ad-preview-modal').remove()" class="touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img src="${Security.escapeHtml(metaAdThumbnailSrc(ad))}" alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain" referrerpolicy="no-referrer"></div>
+      <div class="flex max-h-[75dvh] items-center justify-center overflow-auto bg-slate-100 p-2 dark:bg-slate-950 sm:p-4"><img ${metaAdThumbnailImgAttrs(ad)} alt="${Security.escapeHtml(title)}" class="max-h-[70dvh] max-w-full rounded-xl object-contain"></div>
     </div>
   </div>`);
   lucide.createIcons();
@@ -43309,10 +43289,8 @@ const metaInsightsUi = {
 };
 
 function metaAdsActiveRemainingSummary() {
-  // Combined remaining budget of every Albayan ad whose linked Meta ad is
-  // currently ACTIVE, grouped per ad account. Pure local computation.
-  // Open-ended ads (daily budget, no end date) have no total budget, so they
-  // are reported separately instead of silently contributing 0.
+  // Remaining budget of ads whose Meta ad is ACTIVE, per ad account (local only). Open-ended
+  // ads (daily budget, no end) have no total: listed apart, never counted as 0.
   const byAccount = new Map();
   let totalMinor = 0;
   let count = 0;
@@ -43369,9 +43347,8 @@ function renderMetaAdStatusSummary(ad, isAr) {
   const liveStatus = String(ad.metaEffectiveStatus || ad.metaConfiguredStatus || 'UNKNOWN');
   const synced = metaAdsFormatDate(ad.metaSyncedAt, true);
   const errorCode = String(ad.metaSyncErrorCode || '');
-  // Meta throttling is one shared provider pause, not a failure of this ad.
-  // Older rows may still contain the previous per-ad error; hide it here and
-  // show the single safe retry state in the Meta Sync dialog instead.
+  // Throttling is one shared Meta pause, not this ad's failure: hide old per-ad errors here; the
+  // Meta Sync dialog shows the single retry state.
   const providerThrottle = errorCode.toLowerCase().includes('rate_limited');
   const error = providerThrottle ? '' : String(ad.metaSyncError || '');
   const accountName = String(ad.metaAdAccountName || '').trim();
@@ -45029,26 +45006,6 @@ function importData() {
       await Promise.all(runners);
     };
 
-    // Stable stringify for deterministic verification (sort object keys recursively)
-    const stableStringify = (value) => {
-      const seen = new WeakSet();
-      const normalize = (v) => {
-        if (v === null || v === undefined) return v;
-        if (typeof v !== 'object') return v;
-        if (seen.has(v)) return null;
-        seen.add(v);
-        if (Array.isArray(v)) return v.map(normalize);
-        const out = {};
-        for (const k of Object.keys(v).sort()) {
-          const vv = v[k];
-          if (vv === undefined) continue;
-          out[k] = normalize(vv);
-        }
-        return out;
-      };
-      return JSON.stringify(normalize(value));
-    };
-
     // Strict backup shape checks shared by the transactional and the legacy
     // import paths (backup must contain explicit unique IDs — we do NOT
     // generate IDs; that would break relationships).
@@ -45114,8 +45071,9 @@ function importData() {
         const b = backupById.get(id);
         const s = serverById.get(id);
         if (!b || !s) continue;
-        const bStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(b)));
-        const sStr = stableStringify(stripVolatileMeta(Security.sanitizeObject(s)));
+        // Security.stableJson sorts keys, so only real differences count.
+        const bStr = Security.stableJson(stripVolatileMeta(Security.sanitizeObject(b)));
+        const sStr = Security.stableJson(stripVolatileMeta(Security.sanitizeObject(s)));
         if (bStr !== sStr) mismatched.push(id);
       }
       if (mismatched.length) {

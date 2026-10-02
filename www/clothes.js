@@ -866,7 +866,7 @@ function renderClothesProductCard(p) {
       ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
       : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300');
 
-  const variantChips = variants.map((v, idx) => {
+  const variantChips = variants.map(v => {
     const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
     const label = [v?.color, v?.size].map(s => String(s || '').trim()).filter(Boolean).join(' · ') || (isAr ? 'بدون تحديد' : 'unspecified');
     const chipClass = qty === 0
@@ -876,13 +876,15 @@ function renderClothesProductCard(p) {
         : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300');
     // touch-action: manipulation on the +/- steppers: the page is zoomable
     // (user-scalable=yes), so without it iOS Safari can eat a rapid second
-    // tap as double-tap smart zoom instead of a second increment.
+    // tap as double-tap smart zoom instead of a second increment. They carry
+    // colour + size, never a list position (live sync may remove a row first).
+    const which = `data-color="${Security.escapeHtml(String(v?.color || ''))}" data-size="${Security.escapeHtml(String(v?.size || ''))}"`;
     return `
       <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
         <span>${Security.escapeHtml(label)}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
+        <button type="button" ${which} onclick="adjustClothesVariantQty('${p.id}', this.dataset.color, this.dataset.size, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
         <span class="font-bold">${qty}</span>
-        <button type="button" onclick="adjustClothesVariantQty('${p.id}', ${idx}, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
+        <button type="button" ${which} onclick="adjustClothesVariantQty('${p.id}', this.dataset.color, this.dataset.size, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
       </span>
     `;
   }).join('');
@@ -928,12 +930,12 @@ function renderClothesProductCard(p) {
   `;
 }
 
-async function adjustClothesVariantQty(productId, variantIndex, delta) {
+async function adjustClothesVariantQty(productId, color, size, delta) {
   if (!clothesCanUse()) return;
   const product = getVisibleClothesProducts().find(p => p.id === productId);
   if (!product) return;
   const variants = (Array.isArray(product.variants) ? product.variants : []).map(v => ({ ...v }));
-  const v = variants[variantIndex];
+  const v = variants[findClothesVariantIndex(product, color, size)];
   if (!v) return;
   v.qty = Math.max(0, Math.floor(Number(v.qty) || 0) + (Number(delta) || 0));
   const saved = await updateRecord(state.clothesProducts, productId, { variants });
@@ -1882,6 +1884,28 @@ function findClothesVariantIndex(product, color, size) {
   );
 }
 
+// A picker option names its colour + size, never a list position: live sync
+// may remove or reorder the product's rows while the form is open.
+function clothesVariantKey(v) {
+  return `k:${encodeURIComponent(String(v?.color || ''))}|${encodeURIComponent(String(v?.size || ''))}`;
+}
+
+// The picked option's variant as the product has it NOW, or null with a
+// notice when another device removed it (the line is then cleared).
+function clothesPickedVariant(product, value) {
+  const m = /^k:([^|]*)\|(.*)$/.exec(String(value || ''));
+  let v = null;
+  try {
+    if (m) v = (Array.isArray(product?.variants) ? product.variants : [])[findClothesVariantIndex(product, decodeURIComponent(m[1]), decodeURIComponent(m[2]))] || null;
+  } catch (_) { v = null; }
+  if (!v) {
+    const isAr = clothesIsAr();
+    showNotification(isAr ? 'تغيّرت القائمة' : 'List changed',
+      isAr ? 'تغيّرت ألوان ومقاسات هذا المنتج على جهاز آخر. اختر من جديد.' : 'This product\'s colors/sizes changed on another device. Pick again.', 'warning');
+  }
+  return v;
+}
+
 let _clothesTempShipLines = [];
 
 function showClothesShipmentModal() {
@@ -2003,7 +2027,7 @@ function refreshClothesShipLines() {
     const matchIdx = product ? findClothesVariantIndex(product, line.color, line.size) : -1;
     // "new" mode stays sticky while the user is typing a brand-new color/size
     const isNew = line._newVariant === true || (matchIdx === -1 && !!(String(line.color || '').trim() || String(line.size || '').trim()));
-    const selectVal = (matchIdx >= 0 && !line._newVariant) ? `v:${matchIdx}` : (isNew ? 'new' : '');
+    const selectVal = (matchIdx >= 0 && !line._newVariant) ? clothesVariantKey(variants[matchIdx]) : (isNew ? 'new' : '');
     return `
     <div style="${rowStyle}" class="clothes-line-row pb-2 border-b border-slate-100 dark:border-slate-800">
       <select oninput="onClothesShipLineField(${idx}, 'productId', this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm">
@@ -2016,7 +2040,7 @@ function refreshClothesShipLines() {
       <div style="${subStyle}" class="clothes-shipment-subgrid">
         <select oninput="onClothesShipLineVariantPick(${idx}, this.value)" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" ${product ? '' : 'disabled'} title="${isAr ? 'اللون والمقاس' : 'Color & size'}">
           <option value="" ${selectVal === '' ? 'selected' : ''}>${product ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'اختر المنتج أولاً' : 'choose product first')}</option>
-          ${variants.map((v, vi) => `<option value="v:${vi}" ${selectVal === `v:${vi}` ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
+          ${variants.map(v => `<option value="${Security.escapeHtml(clothesVariantKey(v))}" ${selectVal === clothesVariantKey(v) ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, false))}</option>`).join('')}
           ${product ? `<option value="new" ${selectVal === 'new' ? 'selected' : ''}>${isAr ? '+ لون/مقاس جديد' : '+ new color/size'}</option>` : ''}
         </select>
         <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesShipLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
@@ -2037,13 +2061,11 @@ function onClothesShipLineVariantPick(idx, value) {
   const line = _clothesTempShipLines[idx];
   if (!line) return;
   const product = getVisibleClothesProducts().find(p => p.id === line.productId);
-  if (String(value).startsWith('v:')) {
-    const v = (product?.variants || [])[Number(String(value).slice(2))];
-    if (v) {
-      line.color = String(v.color || '');
-      line.size = String(v.size || '');
-      line._newVariant = false;
-    }
+  if (String(value).startsWith('k:')) {
+    const v = clothesPickedVariant(product, value);
+    line.color = v ? String(v.color || '') : '';
+    line.size = v ? String(v.size || '') : '';
+    line._newVariant = false;
   } else if (value === 'new') {
     line.color = '';
     line.size = '';
@@ -2900,7 +2922,7 @@ function refreshClothesOrderLines() {
           <option value="" ${matchIdx < 0 ? 'selected' : ''}>${!product
             ? (isAr ? 'اختر المنتج أولاً' : 'choose product first')
             : (variants.length ? (isAr ? '— اللون والمقاس —' : '— color & size —') : (isAr ? 'لا مخزون لهذا المنتج' : 'no stock for this product'))}</option>
-          ${variants.map((v, vi) => `<option value="v:${vi}" ${matchIdx === vi ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, true))}</option>`).join('')}
+          ${variants.map((v, vi) => `<option value="${Security.escapeHtml(clothesVariantKey(v))}" ${matchIdx === vi ? 'selected' : ''}>${Security.escapeHtml(clothesVariantOptionLabel(v, true))}</option>`).join('')}
         </select>
         <input type="number" min="0" step="1" value="${Math.max(0, Math.floor(Number(line.qty) || 0))}" oninput="onClothesOrderLineField(${idx}, 'qty', this.value)" placeholder="${isAr ? 'كمية' : 'Qty'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'الكمية' : 'Quantity'}" />
         <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(line.priceLYD ?? ''))}" oninput="sanitizeMoneyInput(this); onClothesOrderLineField(${idx}, 'priceLYD', this.value)" placeholder="${isAr ? 'سعر/1' : 'LYD/1'}" style="${cellStyle}" class="glass-input px-3 py-2 rounded-xl text-sm" title="${isAr ? 'سعر القطعة بالدينار' : 'Unit price LYD'}" />
@@ -2916,12 +2938,10 @@ function onClothesOrderLineVariantPick(idx, value) {
   const line = _clothesTempOrderLines[idx];
   if (!line) return;
   const product = getVisibleClothesProducts().find(p => p.id === line.productId);
-  if (String(value).startsWith('v:')) {
-    const v = (product?.variants || [])[Number(String(value).slice(2))];
-    if (v) {
-      line.color = String(v.color || '');
-      line.size = String(v.size || '');
-    }
+  if (String(value).startsWith('k:')) {
+    const v = clothesPickedVariant(product, value);
+    line.color = v ? String(v.color || '') : '';
+    line.size = v ? String(v.size || '') : '';
   } else {
     line.color = '';
     line.size = '';

@@ -614,3 +614,95 @@ def test_poll_p95_latency_within_ten_minutes_on_a_seeded_run(actors, graph, monk
     p95 = latencies[max(int(len(latencies) * 0.95) - 1, 0)]
     assert 0 <= latencies[0] and p95 <= 10 * 60, (p95, latencies[-5:])
     assert max(source.interval_of(entry) for entry in source.load_poll_state()["accounts"].values()) <= source.POLL_MAX_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt round 2: a polled account's lost access reaches the page's health
+# ---------------------------------------------------------------------------
+
+
+def _studio_alerts() -> list[dict]:
+    with db_conn() as conn:
+        rows = conn.execute(text("SELECT data_json FROM entities WHERE type='studioAlerts'")).mappings().all()
+    return [json_loads(row["data_json"]) for row in rows]
+
+
+def _page_data(page_id: str) -> dict:
+    with db_conn() as conn:
+        raw = conn.execute(text("SELECT data_json FROM entities WHERE type='socialPages' AND id=:id"), {"id": page_id}).scalar()
+    return json_loads(raw)
+
+
+def _customer_view(actors, who: str = "owner") -> dict:
+    listed = client.get("/api/social-studio/pages", cookies=actors[who]["cookies"])
+    assert listed.status_code == 200, listed.text
+    return listed.json()["pages"][0]["health"]
+
+
+@pytest.fixture
+def alerts():
+    """The studio alerts start empty and are put back afterwards."""
+    saved = _rows_of("studioAlerts")
+    _replace_rows("studioAlerts", [])
+    yield _studio_alerts
+    _replace_rows("studioAlerts", saved)
+
+
+def test_a_polled_account_that_lost_albayans_role_needs_attention(actors, graph, alerts):
+    """With Instagram read by polling, Meta refusing the account's reads for a PAGE reason (190.492: the
+    role on the page was lost) only failed every poll: the page kept saying "Working" and no alert was
+    raised. The poll's reads now mark the page as a reply does, and a read that answers clears it."""
+    ig = Instagram(graph)
+    ig.add_account(IG_A, PAGE_A, [MEDIA_A1])
+    _page(actors, "spg_role_a", IG_A, PAGE_A, "owner")
+    _rule(actors, "srule_role_a", "owner")
+    _capability(actors, "poll")
+    graph.routes[("GET", f"{IG_A}/media")] = meta_ads.MetaAdsError(
+        "authorization", "Meta authorization failed. Reconnect the access token.", provider_code="190.492")
+    for step in range(2):  # refused twice: one alert for the day
+        report = run_ig_poll(T0 + step * source.ERROR_RETRY)
+        assert report["errors"] == [{"pageId": "spg_role_a", "code": "authorization"}]
+    data = _page_data("spg_role_a")
+    assert (data.get("healthState"), data.get("healthReason"), data.get("healthy")) == ("attention", "page_role_lost", False)
+    assert [(alert["kind"], alert["relatedId"]) for alert in alerts()] == [("page_health_drop", "spg_role_a")]
+    view = _customer_view(actors)
+    assert view["state"] == "attention" and view["reason"] == "page_role_lost" and view["label"]["en"] != "Working"
+    assert view["fix"]["en"]  # the step the owner can take
+    # The owner gives Albayan its role back: the next poll reads the account and the page works again.
+    ig.route_account(IG_A)
+    later = run_ig_poll(T0 + 2 * source.ERROR_RETRY)
+    assert later["errors"] == [] and later["polled"] == ["spg_role_a"]
+    data = _page_data("spg_role_a")
+    assert (data["healthState"], data["healthy"]) == ("ok", True)
+    assert _customer_view(actors)["label"]["en"] == "Working"
+    assert len(alerts()) == 1
+
+
+def test_the_daily_check_reads_a_polled_account(actors, graph, alerts):
+    """The daily page check made no Meta call for an account read by polling (there is no webhook to
+    check), so it never noticed a lost role. In poll mode the same media read now checks the account's
+    access: one read that marks the page, or clears it once access is back (and no comment-count
+    snapshot: the "not arriving" heuristic assumes webhook delivery)."""
+    ig = Instagram(graph)
+    ig.add_account(IG_A, PAGE_A, [MEDIA_A1])
+    _page(actors, "spg_check_a", IG_A, PAGE_A, "owner")
+    _capability(actors, "poll")
+    graph.routes[("GET", f"{IG_A}/media")] = meta_ads.MetaAdsError(
+        "authorization", "Meta authorization failed. Reconnect the access token.", provider_code="190.492")
+
+    def check(moment):
+        before = len(graph.calls)
+        with db_conn() as conn:
+            row = conn.execute(text("SELECT * FROM entities WHERE type='socialPages' AND id='spg_check_a'")).mappings().first()
+        result = studio.check_page_health(studio._entity_from_row(row), now=moment)
+        return result, [path for _method, path, _body, _token in graph.calls[before:]]
+
+    result, reads = check(T0)
+    assert reads == [f"{IG_A}/media"] and result["reason"] == "page_role_lost"  # before: no Meta call at all
+    assert result["health"]["state"] == "attention" and _page_data("spg_check_a")["healthReason"] == "page_role_lost"
+    assert [(alert["kind"], alert["relatedId"]) for alert in alerts()] == [("page_health_drop", "spg_check_a")]
+    ig.route_account(IG_A)
+    result, reads = check(T0 + timedelta(days=1))
+    assert reads == [f"{IG_A}/media"] and result["reason"] == "" and result["health"]["state"] == "ok"
+    data = _page_data("spg_check_a")
+    assert data["healthState"] == "ok" and data["healthy"] is True and "igCommentCounts" not in data

@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -1801,3 +1802,71 @@ def test_capability_gate_editor_refuses_actions_the_channel_cannot_do(actors):
     _disarm()
     assert _rule(a, name="Any", platform="fb", publicReply="hi", dmEnabled=True, dmText="x", likeComment=True)["likeComment"] is True
     assert client.get(f"{API}/rules", cookies=a).json()["channels"]["states"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt round 2: a burst of comments never holds up the rest of Albayan
+# ---------------------------------------------------------------------------
+
+
+def test_a_comment_burst_never_holds_up_other_routes(actors, monkeypatch):
+    """60 comments on one page at once (a giveaway). Each reply used to run on the shared request
+    threadpool and wait there for the page lane (one paced call at a time), so every other route waited
+    for a free thread (44 s measured with 100 comments). The replies now wait in their own queue: an
+    unrelated route answers at once, and every comment is still answered exactly once."""
+    from anyio.from_thread import start_blocking_portal
+
+    page_id, burst = "5100000000090", 60
+    posts, codes = [], []
+
+    def handler(request):  # Meta answers at once; the real page lane's lock and pacing stay in place
+        if request.method == "GET":
+            return httpx.Response(200, json={"id": page_id, "access_token": "PAGE-TOKEN-burst"})
+        posts.append(request.url.path.split("/", 2)[2])
+        return httpx.Response(200, json={"id": "1"})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(meta_ads.httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    monkeypatch.setenv("ALBAYAN_META_MIN_REQUEST_INTERVAL_MS", "500")  # Meta's pace while the burst arrives
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATES", {"studio_results": meta_ads._MetaLaneState(), "page": meta_ads._MetaLaneState()})
+    for name, value in (("_META_REMOTE_BACKOFF_UNTIL", 0.0), ("_META_APP_WIDE_UNTIL", 0.0),
+                        ("_META_PROVIDER_STATE_REFRESHED_AT", time.monotonic() + 3600),
+                        ("_META_LANE_STATE_REFRESHED_AT", time.monotonic() + 3600)):
+        monkeypatch.setattr(meta_ads, name, value)  # no pause stored by another module's test
+    monkeypatch.setattr(studio, "_WEBHOOK_QUEUE_IN_TESTS", True)  # the production hand-off
+    _link(actors, "a", page_id)
+    _rule(actors["a"]["cookies"], publicReply="Thanks for joining!")
+
+    def deliver(index):
+        raw = json.dumps(_fb_comment(page_id, f"{page_id}_{index}", f"92000000{index:04d}", "count me in")).encode("utf-8")
+        signature = "sha256=" + hmac.new(APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+        answer = shared.post("/api/meta-ads/webhook", content=raw,
+                             headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature})
+        codes.append(answer.status_code)
+
+    try:
+        with start_blocking_portal() as portal:
+            shared = TestClient(app, headers={"Origin": "http://testserver"})
+            shared.portal = portal  # ONE event loop (one AnyIO thread pool) for every request, as under uvicorn
+            threads = [threading.Thread(target=deliver, args=(index,), daemon=True) for index in range(burst)]
+            for thread in threads:
+                thread.start()
+            time.sleep(1.5)  # every delivery is in; its reply waits for the page lane
+            started = time.monotonic()
+            me = shared.get("/api/studio/me", cookies=actors["a"]["cookies"])
+            waited = time.monotonic() - started
+            assert me.status_code == 200, me.text
+            assert waited < 2, f"an unrelated route waited {waited:.1f} s behind the comment burst"
+            monkeypatch.setenv("ALBAYAN_META_MIN_REQUEST_INTERVAL_MS", "100")  # the rest of the burst, faster
+            for thread in threads:
+                thread.join(timeout=60)
+            assert codes == [200] * burst
+            assert studio._drain_webhook_queue_for_tests(120)
+    finally:
+        stopping = studio._signal_webhook_stop()  # the comment thread ends with the test
+        if stopping is not None:
+            stopping.join(timeout=5)
+    rows = _log_rows(actors["a"]["id"])
+    assert sorted(row["commentId"] for row in rows) == sorted(f"{page_id}_{index}" for index in range(burst))
+    assert all(row["actions"] == ["public"] and row["processing"] is False for row in rows)
+    assert sorted(posts) == sorted(f"{page_id}_{index}/comments" for index in range(burst))  # one reply each

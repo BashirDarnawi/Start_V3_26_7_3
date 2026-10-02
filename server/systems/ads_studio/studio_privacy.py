@@ -292,3 +292,18 @@ def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
             stamp,
         )
     return {"profiles": profiles, "replyLog": reply_log, "tickets": tickets, "social": social}
+
+
+def studio_audit_resources_conn(conn: Any, user_id: str) -> list[tuple[str, str]]:
+    """(record type, id) of the account's studio rows whose audit messages may quote what it wrote:
+    its reply rules, deleted ones too (before R2 an admin's "Created auto-reply rule <name>" kept the
+    name under the admin's user id). main.py's privacy anonymisation rewrites those messages on the
+    same transaction (audit_logs is a platform table: no system SQL reaches it)."""
+    uid = str(user_id or "")
+    if not uid:
+        return []
+    rows = conn.execute(
+        text("SELECT id FROM entities WHERE type = :type AND created_by = :uid ORDER BY id"),
+        {"type": SOCIAL_RULES_TYPE, "uid": uid},
+    ).all()
+    return [(SOCIAL_RULES_TYPE, str(row[0])) for row in rows]

@@ -280,7 +280,7 @@ function toggleTheme() {
   state.theme = themes[(currentIndex + 1) % themes.length];
   applyTheme();
   saveState();
-  render();
+  forceFullRender();  // redraws the sidebar/drawer theme button too
 }
 
 function toggleLanguage() {
@@ -288,12 +288,8 @@ function toggleLanguage() {
   document.documentElement.setAttribute('dir', getDir());
   document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
   saveState();
-  // Force a FULL re-render, not the partial (same-view) content swap: the
-  // <main> wrapper's sidebar-offset margin is direction-dependent
-  // (md:ml-72 in LTR vs md:mr-72 in RTL) and the sidebar itself flips side.
-  // A partial update left <main> with the old-direction margin while the
-  // sidebar had already moved via [dir] CSS, so the content overlapped the
-  // sidebar until the next full render.
+  // A FULL re-render, not the same-view swap: <main>'s sidebar margin depends on direction
+  // (md:ml-72 LTR, md:mr-72 RTL), so a partial update left the content under the moved sidebar.
   _lastRenderedView = null;
   _lastRenderedUserId = null;
   render();

@@ -633,7 +633,9 @@ function controlCenterTimestamp(value) {
 const CONTROL_CENTER_BLOCKER_TEXT = {
   ads_need_setup: ['Ads still need customer, amount, or payment setup', 'إعلانات تحتاج استكمال العميل أو المبلغ أو الدفع'],
   unpaid_receipts: ['Receipts are still unpaid', 'وصولات لا تزال غير مدفوعة'],
-  ads_still_running: ['Meta ads from this month are still running (not stopped or completed)', 'إعلانات ميتا من هذا الشهر لا تزال تعمل (لم تُوقف ولم تكتمل)']
+  ads_still_running: ['Meta ads from this month are still running (not stopped or completed)', 'إعلانات ميتا من هذا الشهر لا تزال تعمل (لم تُوقف ولم تكتمل)'],
+  deliveries_open: ['Delivery jobs from this month are still open', 'مهام توصيل من هذا الشهر لا تزال مفتوحة'],
+  driver_cash_not_handed_over: ['Drivers still hold cash collected for this month\'s deliveries', 'نقود توصيلات هذا الشهر لم تُسلَّم للمكتب بعد']
 };
 function controlCenterBlockerLine(item) {
   const pair = CONTROL_CENTER_BLOCKER_TEXT[String(item?.code || '')];

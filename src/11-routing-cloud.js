@@ -251,10 +251,8 @@ function updateUrlForView(view, replace = false) {
 // Handle browser back/forward buttons
 function setupUrlRouting() {
   window.addEventListener('popstate', (event) => {
-    // A history.back() issued by the app itself purely to consume an
-    // overlay/modal entry (X/Cancel close — see the overlay history model in
-    // 01b-mobile-runtime.js): the UI is already correct, and running the
-    // router would only re-render and scroll-reset the unchanged view.
+    // The app's own history.back() consuming an overlay/modal entry (X/Cancel;
+    // overlay history model in 01b-mobile-runtime.js): the UI is already right.
     if (typeof shouldSuppressOverlayPopstate === 'function' && shouldSuppressOverlayPopstate()) return;
 
     // Phone browsers: Back closes the top-most overlay (same order as the native app); the popped
@@ -277,7 +275,8 @@ function setupUrlRouting() {
     // Navigate without pushing to history (already handled by popstate)
     navigateToInternal(view, false);
 
-    // Also restore modal state from URL params
+    // Also restore modal state from URL params; the one-shot boot link never replays on Back.
+    _bootModalParams = null;
     restoreModalFromUrl();
   });
 }
@@ -310,11 +309,8 @@ const MODAL_URL_HANDLERS = {
   'clothes-order':    { newOpen: () => withClothesSystem(() => showClothesOrderModal()),    open: (id) => withClothesSystem(() => editClothesOrder(id)) }
 };
 
-// Restore modal from URL params (e.g., ?modal=ad&id=123 or ?modal=ad&id=new)
-// The modal/id present in the URL when the app FIRST loaded — captured now,
-// during module evaluation, BEFORE init() calls updateUrlForView() which
-// rebuilds the query from viewUrlParamsFor() and drops ?modal&id. Without this,
-// refreshing or sharing a dialog deep-link never reopened the dialog.
+// The ?modal=&id= of the FIRST load, captured before init()'s updateUrlForView()
+// drops it, so a refreshed or shared dialog link reopens its dialog (one-shot).
 let _bootModalParams = (() => {
   try { const p = getUrlParams(); return (p && p.modal && p.id) ? { modal: p.modal, id: p.id } : null; }
   catch (_) { return null; }

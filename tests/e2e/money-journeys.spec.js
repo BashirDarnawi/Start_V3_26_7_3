@@ -691,7 +691,7 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
     // Picking the product re-renders the line with its variant list enabled.
     const shipVariant = modal.locator('#clothes-ship-lines .clothes-line-row').first().locator('select').nth(1);
     await expect(shipVariant).toBeEnabled();
-    await shipVariant.selectOption('v:0');
+    await shipVariant.selectOption('k:Black|M');
     const shipLineAfter = modal.locator('#clothes-ship-lines .clothes-line-row').first();
     await shipLineAfter.locator('input[type="number"]').first().fill('10');
     await shipLineAfter.locator('input[inputmode="decimal"]').first().fill('5');
@@ -726,7 +726,7 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
     await modal.locator('#clothes-order-lines .clothes-line-row').first().locator('select').first().selectOption(productId);
     const orderVariant = modal.locator('#clothes-order-lines .clothes-line-row').first().locator('select').nth(1);
     await expect(orderVariant).toBeEnabled();
-    await orderVariant.selectOption('v:0');
+    await orderVariant.selectOption('k:Black|M');
     const orderLine = modal.locator('#clothes-order-lines .clothes-line-row').first();
     await orderLine.locator('input[type="number"]').first().fill('2');
     await orderLine.locator('input[inputmode="decimal"]').first().fill('60');

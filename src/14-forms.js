@@ -2253,7 +2253,7 @@ async function _saveReceiptFromModalInner() {
     const newPayments = status === 'Not Paid'
       ? (receipt.plannedPayments || [])
       : (receipt.payments || []);
-    if (JSON.stringify(oldPayments) !== JSON.stringify(newPayments)) {
+    if (Security.stableJson(oldPayments) !== Security.stableJson(newPayments)) {  // key order is not a change
       changes.push({
         field: 'Payments',
         from: `${oldPayments.length} payment(s)`,
@@ -2261,9 +2261,8 @@ async function _saveReceiptFromModalInner() {
       });
     }
     
-    // Add to edit history if there are changes, on a COPY: oldReceipt is the
-    // live row, and a failed save left the row in it (a retry then uploaded the
-    // edit twice; a refused edit was recorded as if it happened).
+    // History goes on a COPY: a failed save must not leave the edit in the live
+    // row (a retry uploaded it twice; a refused edit was recorded as done).
     if (changes.length > 0) {
       const editHistory = Array.isArray(oldReceipt.editHistory) ? oldReceipt.editHistory.slice() : [];
       editHistory.push({

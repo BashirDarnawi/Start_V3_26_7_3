@@ -887,3 +887,103 @@ def test_diagnostics_show_the_lane_report(graph):
     assert [park["object"] for park in lanes["lanes"]["page"]["parks"]] == [f"…{PAGE_A[-4:]}"]
     assert lanes["lanes"]["studio_results"]["parkCount"] == 1
     _no_ids_or_tokens(lanes)
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt round 2: a limit Meta sends with HTTP 403 is a limit, not a dead token
+# ---------------------------------------------------------------------------
+
+
+def _answer(status, code, *, subcode=None, transient=False):
+    """Meta's refusal with this HTTP status and Graph code."""
+    error = {"code": code, "message": "Meta refused", **({"error_subcode": subcode} if subcode else {}),
+             **({"is_transient": True} if transient else {})}
+    return lambda request: httpx.Response(status, json={"error": error})
+
+
+def test_a_403_app_limit_pauses_every_lane_like_a_400_one(graph):
+    """Code 4 sent as HTTP 403 read as "Reconnect the access token": no pause, so Albayan kept calling."""
+    graph.routes[("GET", ADMIN_PATH)] = _answer(403, 4, transient=True)
+    graph.route_page(PAGE_B)
+    with pytest.raises(meta_ads.MetaAdsError) as limited:
+        _admin_read()
+    assert (limited.value.code, limited.value.retryable, limited.value.provider_code) == ("rate_limited", True, "4")
+    seen = len(graph.seen)
+    _refused_locally(_admin_read)
+    _refused_locally(lambda: _results_read(ACCOUNT))
+    actions, _errors, retryable = _reply(PAGE_B)
+    assert actions == [] and retryable is True and len(graph.seen) == seen  # nothing more reaches Meta
+    report = meta_ads.lane_state_report()
+    assert report["appWide"]["paused"] is True and report["appWide"]["reason"] == "meta_4"
+    as_400 = _client()._safe_error(httpx.Response(400), {"error": {"code": 4, "is_transient": True}})
+    assert (as_400.code, as_400.retryable, as_400.provider_code) == ("rate_limited", True, "4")  # the same as HTTP 400
+
+
+def test_a_403_page_limit_parks_only_that_page(graph):
+    graph.route_page(PAGE_A, reply=_answer(403, 32))
+    graph.route_page(PAGE_B)
+    graph.routes[("GET", ADMIN_PATH)] = _ok({"data": []})
+    actions, errors, retryable = _reply(PAGE_A)
+    assert actions == [] and retryable is True and "(32)" in errors[0]  # before: an authorization failure, lost
+    seen = len(graph.seen)
+    assert _reply(PAGE_A)[0] == [] and len(graph.seen) == seen  # page A waits, nothing sent
+    assert _reply(PAGE_B)[0] == ["public"]  # page B keeps replying
+    _admin_read()
+    report = meta_ads.lane_state_report()
+    assert report["appWide"]["paused"] is False and report["lanes"]["admin"]["paused"] is False
+    assert [(park["object"], park["reason"]) for park in report["lanes"]["page"]["parks"]] == [(f"…{PAGE_A[-4:]}", "meta_32")]
+    error = _client()._safe_error(httpx.Response(403), {"error": {"code": 32}}, lane="page", subjects=(PAGE_A,))
+    assert meta_ads._page_reason_of(error) == social_studio.page_problem_reason(error) == "throttled"
+
+
+def test_a_403_permission_refusal_stays_an_authorization_failure(graph):
+    graph.route_page(PAGE_A, reply=_answer(403, 200))
+    actions, errors, retryable = _reply(PAGE_A)
+    assert actions == [] and retryable is False and "(200)" in errors[0]
+    error = _client()._safe_error(httpx.Response(403), {"error": {"code": 200, "message": "Permissions error"}})
+    assert error.code == "authorization" and meta_ads._page_reason_of(error) == "permission_missing"
+    report = meta_ads.lane_state_report()
+    assert report["appWide"]["paused"] is False and report["lanes"]["page"]["parkCount"] == 0
+    assert meta_ads._meta_remote_backoff_remaining() == 0
+    assert graph.count("GET", PAGE_A) == 1  # the working Page token stayed cached
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_dead_page_token_is_still_refused_and_forgotten(graph, status):
+    graph.route_page(PAGE_A, reply=_answer(status, 190, subcode=460))
+    actions, errors, retryable = _reply(PAGE_A)
+    assert actions == [] and retryable is False and "(190.460)" in errors[0]
+    assert graph.count("GET", PAGE_A) == 2  # forgotten after the refusal: fetched again for the one retry
+    assert graph.count("POST", f"{COMMENTS[PAGE_A]}/comments") == 1
+    assert meta_ads.lane_state_report()["appWide"]["paused"] is False and meta_ads._meta_remote_backoff_remaining() == 0
+
+
+def test_due_sync_stops_at_a_403_limit_and_marks_no_ad(graph, monkeypatch):
+    """Two due ads and Meta's app limit sent as HTTP 403: before, every due ad was called and marked
+    "Reconnect the access token" behind a growing backoff. Now: one call, the pause, no ad marked."""
+    ads = {f"r2_lane_ad_{TAG}_{n}": f"1209500000{n:05d}" for n in (1, 2)}
+    stamp = now_ms()
+    with db_conn() as conn:
+        for ad_id, meta_id in ads.items():
+            data = {"id": ad_id, "recordType": "ad", "customerId": "", "amountUSD": 0, "paymentStatus": "pending_setup",
+                    "status": "Active", "metaLinkState": "linked", "metaAdId": meta_id, "metaAdAccountId": ACCOUNT,
+                    "metaMediaVersion": meta_ads._META_MEDIA_VERSION, "metaNextSyncAt": 0, "metaSyncError": "",
+                    "metaSyncErrorCode": "", "metaSyncFailureCount": 0, "_created": stamp, "_lastModified": stamp}
+            conn.execute(text("INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                              "VALUES ('ads',:id,:data,false,:stamp,NULL,:stamp)"),
+                         {"id": ad_id, "data": json.dumps(data), "stamp": stamp})
+            graph.routes[("GET", meta_id)] = _answer(403, 4, transient=True)
+    real_due = meta_ads._due_meta_ads
+    monkeypatch.setattr(meta_ads, "_due_meta_ads", lambda limit: [row for row in real_due(1000) if row["adId"] in ads][:limit])
+    try:
+        assert meta_ads.sync_due_meta_ads(limit=2) == []
+        assert sum(graph.count("GET", meta_id) for meta_id in ads.values()) == 1
+        assert meta_ads._meta_remote_backoff_remaining() > 0 and meta_ads.lane_state_report()["appWide"]["paused"] is True
+        with db_conn() as conn:
+            stored = [json.loads(raw) for raw in conn.execute(
+                text("SELECT data_json FROM entities WHERE type='ads' AND id IN (:a, :b)"), dict(zip("ab", ads))).scalars()]
+        assert len(stored) == 2
+        assert all(row["metaSyncError"] == "" and row["metaSyncFailureCount"] == 0 for row in stored)
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type='ads' AND id IN (:a, :b)"), dict(zip("ab", ads)))

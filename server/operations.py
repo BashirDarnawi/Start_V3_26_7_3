@@ -162,6 +162,29 @@ def _numeric_or_none(value: Any) -> float | None:
     return number if number == number and abs(number) != float("inf") else None
 
 
+_JS_NUMBER_TEXT = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+")
+
+
+def _js_number(value: Any) -> float | None:
+    """JavaScript Number(value) when it is finite, else None: null, false and blank text are 0."""
+    if value is None or isinstance(value, bool):
+        return float(bool(value))
+    if isinstance(value, str):
+        text_value = value.strip()
+        if not text_value:
+            return 0.0
+        if not _JS_NUMBER_TEXT.fullmatch(text_value):
+            return None
+        value = int(text_value, 0) if text_value[1:2] in ("x", "X", "o", "O", "b", "B") else text_value
+    if not isinstance(value, (int, float, str)):
+        return None  # an object reads as NaN
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
 def _entity_rows(collection: str, conn: Any | None = None) -> list[dict[str, Any]]:
     # The month snapshot needs a few numeric fields per row; let the database
     # strip the inline photos so closing a month never materialises every
@@ -600,6 +623,26 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         if str(row.get("metaAdId") or "").strip()
         and str(row.get("status") or "").strip().lower() not in _TERMINAL_AD_STATUSES
     ]
+    # Delivery work freezes the same way (423): the driver cannot complete or cancel and the office
+    # cannot record the cash handover. Open = the driver-delete guard's statuses; held cash mirrors
+    # the delivery board's _getCollectedCashLocal and _isReceivedInOffice (src/12-views.js).
+    def _collected_cash_local(row: dict[str, Any]) -> float:
+        # A missing key is JS undefined (NaN: use amountLocal); an explicit null is 0.
+        collected = _js_number(row["amountCollectedFromCustomer"]) if "amountCollectedFromCustomer" in row else None
+        return collected if collected is not None else (_js_number(row.get("amountLocal")) or 0.0)
+
+    def _received_in_office(row: dict[str, Any]) -> bool:
+        for key in ("isReceivedInOffice", "officeHandover"):
+            if isinstance(row.get(key), bool):
+                return bool(row[key])
+        return False
+
+    delivery_rows = normal_receipts + ads
+    open_deliveries = [row for row in delivery_rows if str(row.get("deliveryStatus") or "").strip() in ("Needs Delivery", "In Progress")]
+    cash_with_drivers = [
+        row for row in delivery_rows
+        if str(row.get("deliveryStatus") or "").strip() == "Delivered" and not _received_in_office(row) and _collected_cash_local(row) > 0
+    ]
     blockers = []
     if setup_ads:
         blockers.append({"code": "ads_need_setup", "count": len(setup_ads), "message": "Ads still need customer, amount, or payment setup"})
@@ -607,6 +650,10 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         blockers.append({"code": "unpaid_receipts", "count": len(unpaid_receipts), "message": "Receipts are still unpaid"})
     if running_ads:
         blockers.append({"code": "ads_still_running", "count": len(running_ads), "message": "Meta ads from this month are still running (not stopped or completed)"})
+    if open_deliveries:
+        blockers.append({"code": "deliveries_open", "count": len(open_deliveries), "message": "Delivery jobs from this month are still open"})
+    if cash_with_drivers:
+        blockers.append({"code": "driver_cash_not_handed_over", "count": len(cash_with_drivers), "message": "Drivers still hold cash collected for this month's deliveries"})
     return {
         "period": period,
         "generatedAt": now_ms(),
@@ -617,6 +664,8 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
             "ads": len(ads),
             "adsNeedingSetup": len(setup_ads),
             "adsStillRunning": len(running_ads),
+            "deliveriesOpen": len(open_deliveries),
+            "driverCashNotHandedOver": len(cash_with_drivers),
             "dollarPurchases": len(purchases),
         },
         "totals": {

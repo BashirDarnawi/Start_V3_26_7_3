@@ -52,9 +52,11 @@ import hmac
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import threading
+import time
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -282,7 +284,7 @@ _CURSOR_RE = re.compile(r"^(\d{1,15}):([A-Za-z0-9][A-Za-z0-9._:-]{0,79})$")
 # The reply-log row the actions sent inside a _reply_row() block are saved to as each one succeeds
 # (P4-02): a server killed mid-reply leaves the exact list behind, so nothing is ever replayed. The
 # tuple: (log id, owner, the actions already on the row before this attempt, the row's first sentAt,
-# the actions this attempt marked in flight on the row before its first Meta send (_mark_in_flight),
+# the actions this attempt marked in flight on the row as each Meta send left (_mark_in_flight),
 # the actions Meta accepted in this attempt, kept in memory even when their save is lost).
 _REPLY_ROW: ContextVar[tuple[str, str, tuple[str, ...], str, list[str], list[str]] | None] = ContextVar(
     "albayan_social_reply_row", default=None)
@@ -1644,6 +1646,8 @@ def start_social_studio_worker() -> None:
             target=_worker_loop, args=(_WORKER_STOP,), name="albayan-social-studio", daemon=True
         )
         _WORKER_THREAD.start()
+    if _webhook_queue_on():
+        _start_webhook_thread()
     print("[albayan] Social Studio scheduled publishing enabled.")
 
 
@@ -1654,8 +1658,11 @@ def stop_social_studio_worker() -> None:
         if _STOP_JOINED:
             return  # already stopped once; the second hook must not pay the join again
         _WORKER_STOP.set()
-    if thread and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=1)
+    webhooks = _signal_webhook_stop()
+    deadline = time.monotonic() + 1  # one short wait for both threads (the shutdown budget is shared)
+    for each in (thread, webhooks):
+        if each and each.is_alive() and each is not threading.current_thread():
+            each.join(timeout=max(0, deadline - time.monotonic()))
     with _WORKER_LOCK:
         _STOP_JOINED = True
         if _WORKER_THREAD is thread and not (thread and thread.is_alive()):
@@ -1847,16 +1854,21 @@ def _save_sent_actions(actions: list[str], sent_at: str) -> None:
 
 
 def _mark_in_flight(kinds: list[str]) -> None:
-    """r8 #10: before the first Meta send of an attempt, write the actions about to go out to the reply-log
-    row of the surrounding _reply_row() block as ``inFlight`` (no block: nothing to do). NOT best effort,
+    """r8 #10: as each Meta send of an attempt leaves (R2: inside the page lane, after its wait;
+    meta_ads.before_meta_send), add it to ``inFlight`` on the reply-log row of the surrounding
+    _reply_row() block (no block: nothing to do); an earlier mark is never erased. NOT best effort,
     unlike _save_sent_actions: when this write fails the error propagates and nothing is sent. So a row
     whose per-action saves were lost (the database dropped mid-reply) still shows that a send began, and
-    the stuck-claim pass never re-arms a reply Meta may already have accepted."""
+    the stuck-claim pass never re-arms a reply Meta may already have accepted, while a reply that was
+    still waiting for the lane is not marked and is re-armed."""
     row = _REPLY_ROW.get()
     if not row or not row[0] or not kinds:
         return
-    _ctx()["patch_entity"](LOG_TYPE, row[0], {"inFlight": list(kinds)}, row[1] or "system")
-    row[4].extend(kinds)
+    running = [*row[4], *[kind for kind in dict.fromkeys(kinds) if kind not in row[4]]]
+    if running == row[4]:
+        return  # already marked (the token-refresh retry of the same action)
+    _ctx()["patch_entity"](LOG_TYPE, row[0], {"inFlight": running}, row[1] or "system")
+    row[4][:] = running
 
 
 def page_problem_reason(error: Any) -> str:
@@ -2027,9 +2039,10 @@ def _execute_rule_actions(
     temporary Meta condition (pause, outage), so the scheduler may try again
     instead of the comment being lost, even when another action went out (r8
     #8: a retry sends only what is missing, never an action saved on the row;
-    a timed-out send may have landed, so it never counts as temporary). Before
-    the first send the actions about to go out are marked in flight on the
-    row (_mark_in_flight: a failed mark raises, nothing is sent). The tuple also
+    a timed-out send may have landed, so it never counts as temporary). Each
+    action is marked in flight on the row as its own request leaves, after the
+    page lane's wait (R2; _mark_in_flight: a failed mark raises, that action
+    is not sent). The tuple also
     carries ``auth_codes``, ``auth_failed_at`` and ``timed_out`` (_ReplyOutcome)
     for the parking rule (P3-18b), ``skipped`` (P4-05: an action whose channel
     is gated, off or unavailable is never sent; nothing reaches Meta when every
@@ -2092,13 +2105,14 @@ def _execute_rule_actions(
     dm_sent = False
     refreshed = False
 
-    def post(path: str, data: dict[str, Any]) -> None:
+    def post(kind: str, path: str, data: dict[str, Any]) -> None:
         # A Page token revoked since it was cached: meta_ads forgot it, so fetch a fresh one
         # and retry this action once. Meta applied nothing on an authorization refusal, so the
         # retry cannot send twice.
         nonlocal token, refreshed
         try:
-            client._post(path, data, access_token=token)
+            with _meta.before_meta_send(lambda: _mark_in_flight([kind])):
+                client._post(path, data, access_token=token)
         except _meta.MetaAdsError as error:
             if error.code != "authorization" or refreshed:
                 raise
@@ -2107,7 +2121,8 @@ def _execute_rule_actions(
             if not fresh or fresh == token:
                 raise
             token = fresh
-            client._post(path, data, access_token=token)
+            with _meta.before_meta_send(lambda: _mark_in_flight([kind])):
+                client._post(path, data, access_token=token)
 
     def note(kind: str, error: Any) -> str:
         if getattr(error, "code", "") == "authorization":
@@ -2120,7 +2135,6 @@ def _execute_rule_actions(
         return f"{kind}: {error.public_message}{code}"
 
     if client is not None:
-        _mark_in_flight([kind for kind, wanted in (("dm", dm_wanted), ("public", public_wanted), ("like", like_wanted)) if wanted])
         if dm_wanted:
             try:
                 # One private reply per comment, within 7 days of the comment, through the
@@ -2129,7 +2143,7 @@ def _execute_rule_actions(
                 # A refusal (already replied, too old) is a permanent request_failed: never retried.
                 sender = page.get("metaPageId") if platform == "fb" else page.get("igUserId")
                 post(
-                    f"{sender}/messages",
+                    "dm", f"{sender}/messages",
                     {
                         "recipient": json.dumps({"comment_id": str(comment_id)}, separators=(",", ":")),
                         "message": json.dumps({"text": dm_text}, separators=(",", ":"), ensure_ascii=False),
@@ -2144,7 +2158,7 @@ def _execute_rule_actions(
         if public_wanted and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
             try:
                 path = f"{comment_id}/comments" if platform == "fb" else f"{comment_id}/replies"
-                post(path, {"message": public_reply})
+                post("public", path, {"message": public_reply})
                 sent("public")
             except _meta.MetaAdsError as error:
                 errors.append(note("public", error))
@@ -2152,7 +2166,7 @@ def _execute_rule_actions(
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
         if like_wanted:
             try:
-                post(f"{comment_id}/likes", {})
+                post("like", f"{comment_id}/likes", {})
                 sent("like")
             except _meta.MetaAdsError as error:
                 errors.append(note("like", error))
@@ -2596,6 +2610,87 @@ def handle_meta_webhook(payload: Any) -> int:
     return handled
 
 
+# R2: the webhook route queues each signed Page/Instagram delivery for ONE comment thread instead of
+# answering it on the shared request threadpool, where a burst of comments on one page (a giveaway)
+# waited for the page lane and every other route waited for a free thread. One thread loses nothing:
+# the page lane sends one call at a time per process anyway. A full queue answers inline, as before;
+# so does pytest (tests expect the reply when the request returns) unless a test sets
+# _WEBHOOK_QUEUE_IN_TESTS, and WEBHOOK_QUEUE_ENABLED = False. Payloads still queued when the process is
+# killed are lost, like the background tasks they replace (Meta has had its 200 either way).
+WEBHOOK_QUEUE_MAX = 1000
+WEBHOOK_QUEUE_ENABLED = True
+_WEBHOOK_QUEUE_IN_TESTS = False
+_WEBHOOK_QUEUE: "queue.Queue[Any]" = queue.Queue(maxsize=WEBHOOK_QUEUE_MAX)
+_WEBHOOK_STOP = object()  # the sentinel that ends the comment thread
+_WEBHOOK_THREAD: threading.Thread | None = None
+_WEBHOOK_LOCK = threading.Lock()
+
+
+def _webhook_queue_on() -> bool:
+    return WEBHOOK_QUEUE_ENABLED and (_WEBHOOK_QUEUE_IN_TESTS or not os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def _webhook_loop() -> None:
+    while True:
+        payload = _WEBHOOK_QUEUE.get()
+        try:
+            if payload is _WEBHOOK_STOP:
+                return
+            handle_meta_webhook(payload)
+        except Exception as error:  # one bad payload never ends the loop
+            print(f"[albayan] Social Studio webhook handling failed ({type(error).__name__}).")
+        finally:
+            _WEBHOOK_QUEUE.task_done()
+
+
+def _start_webhook_thread() -> None:
+    global _WEBHOOK_THREAD
+    with _WEBHOOK_LOCK:
+        if _WEBHOOK_THREAD is not None and _WEBHOOK_THREAD.is_alive():
+            return
+        _WEBHOOK_THREAD = threading.Thread(target=_webhook_loop, name="albayan-social-webhooks", daemon=True)
+        _WEBHOOK_THREAD.start()
+
+
+def _signal_webhook_stop() -> threading.Thread | None:
+    """Ask the comment thread to end once it has answered what is already queued; returns it to join
+    (None when it is not running, or the queue is too full for the sentinel: it ends with the process)."""
+    with _WEBHOOK_LOCK:
+        thread = _WEBHOOK_THREAD
+    if thread is None or not thread.is_alive():
+        return None
+    try:
+        _WEBHOOK_QUEUE.put_nowait(_WEBHOOK_STOP)
+    except queue.Full:
+        return None
+    return thread
+
+
+def enqueue_meta_webhook(payload: Any) -> None:
+    """The webhook route's hand-off (R2): queue the payload for the comment thread, or answer it here
+    (handle_meta_webhook) when the queue is off, full, or no thread could start. Never raises."""
+    if _webhook_queue_on():
+        try:
+            _start_webhook_thread()
+            _WEBHOOK_QUEUE.put_nowait(payload)
+            return
+        except (queue.Full, RuntimeError):
+            pass  # answered inline below, as before the queue
+    handle_meta_webhook(payload)
+
+
+def _drain_webhook_queue_for_tests(timeout: float = 120.0) -> bool:
+    """Test helper: wait until every queued payload was handled; False when ``timeout`` ran out."""
+    deadline = time.monotonic() + timeout
+    with _WEBHOOK_QUEUE.all_tasks_done:
+        while _WEBHOOK_QUEUE.unfinished_tasks:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            _WEBHOOK_QUEUE.all_tasks_done.wait(left)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # P4-03 page health: the one writer, the customer's view, the check, the daily pass
 # ---------------------------------------------------------------------------
@@ -2784,7 +2879,8 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
     * Instagram, public replies ``on`` (webhook delivery): the "comments not arriving" heuristic.
       The sum of ``comments_count`` over recent media is kept with its time; when a later sum, at
       least 24 hours after, is higher and no comment event reached Albayan in between, the page is
-      marked ``instagram_comments_not_arriving`` (an event clears it, _note_comment_seen);
+      marked ``instagram_comments_not_arriving`` (an event clears it, _note_comment_seen); ``poll``:
+      the same read only checks the account's access (R2);
     * a standing reason goes back to ``ok`` only when a read of this check proved it wrong: a token,
       role or permission reason (and an unknown one from before P4-03) by a page-token read that
       answered, ``webhook_not_subscribed`` by the subscription read as subscribed; a check that made
@@ -2844,7 +2940,10 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
                 page_reason(answer["pageReason"])
             elif answer["errorCode"] == "authorization":
                 global_refusal = True
-    if platform == "ig" and str(gates.get("igPublicReply") if gates else "") == "on" and not found and not global_refusal:
+    ig_mode = str(gates.get("igPublicReply") if gates else "")
+    # R2: "poll" has no webhook to read, so the same media read checks the account's access (the
+    # "not arriving" heuristic below assumes webhook delivery: "on" only).
+    if platform == "ig" and ig_mode in CHANNEL_OPEN_STATES and not found and not global_refusal:
         total: int | None = None
         try:
             client = _meta.get_meta_ads_client()
@@ -2859,6 +2958,7 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
         out["igCommentTotal"] = total
         if total is not None:
             verified_token = True
+        if total is not None and ig_mode == "on":
             snapshot = data.get("igCommentCounts") if isinstance(data.get("igCommentCounts"), dict) else {}
             earlier_total = snapshot.get("total")
             earlier_at = _parse_iso(snapshot.get("at"))
@@ -3218,7 +3318,8 @@ def create_social_studio_router(
         clean = {**_clean_rule(ctx, scope.owner, body or {}), "createdAt": now, "updatedAt": now, "activeSince": now_ms()}
         rule_id = new_id("srule")
         saved = ctx["upsert_entity"](RULES_TYPE, rule_id, clean, scope.owner, reject_existing=True)
-        ctx["audit"](scope.uid, "create", RULES_TYPE, rule_id, f"Created auto-reply rule {clean['name']}", {"ownerId": scope.owner})
+        # No rule name in the audit text (R2): an admin's message would keep it past the owner's anonymisation.
+        ctx["audit"](scope.uid, "create", RULES_TYPE, rule_id, "Created auto-reply rule", {"ownerId": scope.owner})
         return _public(saved, user)
 
     @router.patch("/rules/{rule_id}")
