@@ -1,7 +1,6 @@
-// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS (split
-// out of 12-views.js). One responsive phone-first layout for web/iOS/Android;
-// every old action is kept. Prices come ONLY from the server plan catalog
-// (state.subscriptionPlans); purchases go through SUBSCRIPTIONS.purchasePlan.
+// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS: one phone-first layout for
+// web/iOS/Android. Prices come ONLY from the server plan catalog (state.subscriptionPlans); purchases
+// go through SUBSCRIPTIONS.purchasePlan. The iPhone app sells nothing (inAppPurchasingHidden).
 
 // ---------- shared helpers ----------
 
@@ -13,9 +12,13 @@ function hubEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
 }
 
-// Days left on the current user's real subscription rows for a service
-// (null when there is no dated active row — e.g. an Admin, who is granted
-// everything without buying it).
+// iPhone app: stands where a buy or top-up button was. Names no other way to pay; no link.
+function hubNoPurchaseLine(cls = 'text-center') {
+  return `<p class="text-xs text-slate-500 dark:text-slate-400 ${cls}">${hubText('Purchases are not available in this app.', 'الشراء غير متاح في هذا التطبيق.')}</p>`;
+}
+
+// Days left on the current user's subscription rows for a service (null with no dated active row,
+// e.g. an Admin, who is granted everything).
 function hubDaysLeft(serviceId) {
   const expiry = typeof getSubscriptionExpiryForCurrentUser === 'function'
     ? getSubscriptionExpiryForCurrentUser(serviceId)
@@ -24,9 +27,8 @@ function hubDaysLeft(serviceId) {
   return Math.max(0, Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
 }
 
-// Server plan that sells exactly this one service (the implicit `svc:<id>`
-// row, or any active single-service plan for it). Null until the catalog is
-// loaded — the hub then shows "Subscribe" instead of inventing a price.
+// The server plan selling exactly this one service (`svc:<id>`, or a single-service plan). Null until
+// the catalog loads: the hub then shows "Subscribe", never an invented price.
 function hubPlanForService(serviceId) {
   const sid = String(serviceId || '');
   const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
@@ -59,15 +61,14 @@ function hubPriceLabel(serviceId) {
   return `${hubMoney(price, plan.currency || 'LYD')} ${hubPeriodLabel(plan.durationDays)}`;
 }
 
-// One status object drives every pill on these screens:
-//   coming  -> "Coming soon"
-//   active  -> "Active · N d" (amber "Expires in N d" once ≤ 7 days remain)
-//   admin   -> "Included" (Admin is granted every service)
-//   locked  -> price from the server catalog, or "Subscribe"
+// One status object drives every pill: coming -> "Coming soon"; active -> "Active · N d" (amber
+// "Expires in N d" at ≤ 7 days); admin -> "Included" (an Admin is granted every service); locked ->
+// the catalog price or "Subscribe" ("Not active" in the iPhone app: no price to pay).
 function hubServiceStatus(serviceId) {
   const sid = String(serviceId || '');
   const svc = SERVICES[sid] || SMART_SYSTEMS_CHILDREN[sid];
-  if (!svc) return { kind: 'locked', label: hubText('Subscribe', 'اشترك'), tone: 'blue', days: null };
+  const locked = price => ({ kind: 'locked', label: inAppPurchasingHidden() ? hubText('Not active', 'غير مفعّلة') : (price || hubText('Subscribe', 'اشترك')), tone: 'blue', days: null });
+  if (!svc) return locked('');
   if (svc.comingSoon) return { kind: 'coming', label: hubText('Coming soon', 'قريباً'), tone: 'slate', days: null };
   const required = Array.isArray(svc.requiredSubscriptions) && svc.requiredSubscriptions.length
     ? svc.requiredSubscriptions
@@ -91,8 +92,7 @@ function hubServiceStatus(serviceId) {
   }
   if (!svc.requiresSubscription) return { kind: 'admin', label: hubText('Open', 'فتح'), tone: 'emerald', days: null };
   if (isCurrentUserAdmin()) return { kind: 'admin', label: hubText('Included', 'ضمن حسابك'), tone: 'emerald', days: null };
-  const price = hubPriceLabel(required[0] || sid);
-  return { kind: 'locked', label: price || hubText('Subscribe', 'اشترك'), tone: 'blue', days: null };
+  return locked(hubPriceLabel(required[0] || sid));
 }
 
 function hubPill(label, tone = 'slate', extraClass = '') {
@@ -124,12 +124,13 @@ function hubPageHeader(title, { backTo = 'services-hub', trailing = '' } = {}) {
     </div>`;
 }
 
-// Wallet balance card shared by the hub, plans and wallet screens.
+// Wallet balance card (hub, plans). iPhone app: the balance, then the neutral line.
 function hubWalletCard({ topUp = true, plansLink = false } = {}) {
   const uid = String(state.currentUser?.id || '');
   const balanceMinor = uid ? WALLET.getBalanceMinor(uid, 'LYD') : 0;
+  const noBuy = inAppPurchasingHidden();
   return `
-    <div class="hub-card flex items-center gap-3 p-3.5 mb-5">
+    <div class="hub-card flex items-center gap-3 p-3.5 ${noBuy ? 'mb-2' : 'mb-5'}">
       <button type="button" onclick="navigateTo('wallet')" class="flex flex-1 min-w-0 items-center gap-3 text-start touch-target">
         <span class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 flex items-center justify-center flex-shrink-0"><i data-lucide="wallet" class="w-5 h-5"></i></span>
         <span class="min-w-0">
@@ -137,13 +138,12 @@ function hubWalletCard({ topUp = true, plansLink = false } = {}) {
           <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, 'LYD'))}</span>
         </span>
       </button>
-      ${plansLink ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
-      ${topUp ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target min-h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 text-xs font-bold text-blue-700 dark:text-blue-300">${hubText('Top up', 'شحن')}</button>` : ''}
-    </div>`;
+      ${plansLink && !noBuy ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
+      ${topUp && !noBuy ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target min-h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 text-xs font-bold text-blue-700 dark:text-blue-300">${hubText('Top up', 'شحن')}</button>` : ''}
+    </div>${noBuy ? hubNoPurchaseLine('text-center mb-5') : ''}`;
 }
 
-// Load the server plan catalog once per session for price pills. Never
-// authoritative for money — the paywall forces a fresh fetch before buying.
+// The plan catalog once per session, for price pills only: the paywall fetches afresh before buying.
 let _hubPlansRequested = false;
 function hubEnsurePlansLoaded() {
   if (!isServerModeEnabled() || _hubPlansRequested) return;
@@ -174,8 +174,7 @@ function renderServicesHub() {
     .filter(s => s && s.id && s.id !== 'placeholder_coming_soon')
     .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
 
-  // Smart Systems children that are sold as their own product (clothes, Ads
-  // Studio) show as "your services" rows once bought, so they are one tap away.
+  // Smart Systems children sold on their own (clothes, Ads Studio) are "Your services" rows once bought.
   const ownedChildren = Object.values(SMART_SYSTEMS_CHILDREN)
     .filter(c => c && !c.comingSoon && Array.isArray(c.requiredSubscriptions) && !c.requiredSubscriptions.includes('smart_systems'))
     .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
@@ -224,7 +223,6 @@ function renderServicesHub() {
 
   return `
     <div class="hub-shell">
-      <!-- Header: avatar, greeting, quick actions (all pre-existing actions kept) -->
       <div class="flex items-center gap-3 mb-4">
         <div class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
           ${hubEsc(userName.charAt(0).toUpperCase())}
@@ -244,7 +242,6 @@ function renderServicesHub() {
 
       ${hubWalletCard({ topUp: true, plansLink: false })}
 
-      <!-- Hero -->
       <div class="hub-hero relative overflow-hidden rounded-3xl p-5 mb-6 text-white">
         <div class="absolute -top-10 -end-6 w-40 h-40 rounded-full bg-white/10"></div>
         <div class="relative flex items-center justify-between gap-4">
@@ -264,7 +261,7 @@ function renderServicesHub() {
 
       <div class="flex items-center justify-between mb-2.5">
         <div class="hub-section-title mb-0">${hubText('Explore', 'استكشف')}</div>
-        <button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 px-2 text-[13px] font-semibold text-blue-600 dark:text-blue-300">${hubText('Plans & bundles', 'الباقات والاشتراكات')}</button>
+        ${inAppPurchasingHidden() ? '' : `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 px-2 text-[13px] font-semibold text-blue-600 dark:text-blue-300">${hubText('Plans & bundles', 'الباقات والاشتراكات')}</button>`}
       </div>
       <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         ${exploreHtml}
@@ -323,7 +320,7 @@ function renderSmartSystems() {
           <div class="mt-2 text-2xl font-black">${hubText('Smart Systems', 'الأنظمة الذكية')}</div>
           <div class="mt-2 flex items-center justify-between gap-3">
             <span class="text-xs text-white/70">${children.length} ${hubText('systems', 'أنظمة')}</span>
-            <button type="button" onclick="showSubscriptionModal('smart_systems', 'smart_systems')" class="touch-target min-h-10 rounded-full bg-white/20 px-4 text-xs font-bold text-white hover:bg-white/30">${headerCta}</button>
+            ${inAppPurchasingHidden() ? '' : `<button type="button" onclick="showSubscriptionModal('smart_systems', 'smart_systems')" class="touch-target min-h-10 rounded-full bg-white/20 px-4 text-xs font-bold text-white hover:bg-white/30">${headerCta}</button>`}
           </div>
         </div>
       </div>
@@ -363,7 +360,9 @@ function hubPlanIsActive(plan) {
 function renderPlanRow(plan) {
   const isRTL = state.language === 'ar';
   const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
-  const bestValue = plan.badge === 'best_value' || isBundle;
+  // iPhone app: a read-only row, with no price, offer badge or buy button.
+  const noBuy = inAppPurchasingHidden();
+  const bestValue = !noBuy && (plan.badge === 'best_value' || isBundle);
   const price = Math.max(0, Number(plan.priceMinor) || 0);
   const { active, days } = hubPlanIsActive(plan);
   const soon = active && days !== null && days <= 7;
@@ -376,12 +375,12 @@ function renderPlanRow(plan) {
         ${bestValue ? `<span class="rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2.5 py-1 text-[10px] font-extrabold text-white">${hubText('Best value', 'الأفضل قيمة')}</span>` : ''}
       </div>
       ${isBundle ? `<div class="flex flex-wrap gap-1.5 my-1.5">${includes}</div>` : `<div class="text-xs text-slate-500 dark:text-slate-400">${hubText('Single service', 'خدمة واحدة')}</div>`}
-      ${Number(plan.savingsPct) > 0 ? `<div class="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${hubText(`Save ${Number(plan.savingsPct)}%`, `وفّر ${Number(plan.savingsPct)}%`)}</div>` : ''}
+      ${!noBuy && Number(plan.savingsPct) > 0 ? `<div class="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${hubText(`Save ${Number(plan.savingsPct)}%`, `وفّر ${Number(plan.savingsPct)}%`)}</div>` : ''}
       <div class="mt-2.5 flex items-center justify-between gap-3">
-        <span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>
-        ${active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : ''}
+        ${noBuy ? '' : `<span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>`}
+        ${active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : noBuy ? hubPill(hubText('Not active', 'غير مفعّلة')) : ''}
       </div>
-      <button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>
+      ${noBuy ? '' : `<button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>`}
     </div>`;
 }
 
@@ -397,7 +396,9 @@ function renderPlansView() {
     });
 
   let body = '';
-  if (!isServerModeEnabled()) {
+  if (inAppPurchasingHidden() && (!plans.length || !isServerModeEnabled())) {
+    // iPhone app: no price catalog to wait for, no "subscribe" hint.
+  } else if (!isServerModeEnabled()) {
     body = `
       <div class="hub-card p-5 text-sm text-slate-600 dark:text-slate-300">
         <div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Plans need the server connection', 'الباقات تحتاج إلى اتصال الخادم')}</div>
@@ -428,8 +429,7 @@ function renderPlansView() {
   `;
 }
 
-// Opens the paywall sheet with this plan pre-selected. The modal fetches a
-// fresh catalog before any purchase — the row on screen is never trusted.
+// Opens the paywall sheet on this plan; it fetches a fresh catalog before any purchase.
 function openPlanPaywall(planId) {
   const pid = String(planId || '');
   const plan = (Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : []).find(p => p && String(p.id) === pid);
@@ -555,15 +555,17 @@ async function chargeWalletCreateRequest() {
 
 function renderChargeWalletView() {
   const isRTL = state.language === 'ar';
-  ensureWalletPayMethods();
+  // iPhone app: a leftover link gets the neutral card and a way back; nothing is fetched.
+  const noBuy = inAppPurchasingHidden();
+  if (!noBuy) ensureWalletPayMethods();
 
-  if (!isServerModeEnabled()) {
+  if (noBuy || !isServerModeEnabled()) {
     return `
       <div class="hub-shell">
-        ${hubPageHeader(hubText('Charge wallet', 'اشحن المحفظة'))}
+        ${hubPageHeader(noBuy ? t('wallet') : hubText('Charge wallet', 'اشحن المحفظة'))}
         <div class="hub-card p-5 text-sm text-slate-600 dark:text-slate-300">
-          <div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Local mode', 'الوضع المحلي')}</div>
-          ${hubText('Charge requests need the server connection. In local mode an Admin can add balance from the Wallet screen.', 'طلبات الشحن تحتاج إلى اتصال الخادم. في الوضع المحلي يمكن للمدير إضافة رصيد من شاشة المحفظة.')}
+          ${noBuy ? hubNoPurchaseLine() : `<div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Local mode', 'الوضع المحلي')}</div>
+          ${hubText('Charge requests need the server connection. In local mode an Admin can add balance from the Wallet screen.', 'طلبات الشحن تحتاج إلى اتصال الخادم. في الوضع المحلي يمكن للمدير إضافة رصيد من شاشة المحفظة.')}`}
           <button type="button" onclick="navigateTo('wallet')" class="touch-target mt-4 w-full min-h-12 rounded-xl bg-slate-200 dark:bg-slate-700 font-bold text-slate-800 dark:text-white">${t('wallet')}</button>
         </div>
       </div>`;
@@ -722,6 +724,7 @@ function renderWalletView() {
   const isRTL = state.language === 'ar';
   const uid = String(state.currentUser?.id || '');
   const isAdmin = isAdminRole(state.currentUser?.role);
+  const noBuy = inAppPurchasingHidden();  // iPhone app: no Charge wallet, Plans or Top Up
 
   const balances = [];
   if (uid) {
@@ -820,10 +823,10 @@ function renderWalletView() {
           <div class="text-xs text-slate-500 dark:text-slate-400">${t('balance')}</div>
           <div class="space-y-0.5 mt-0.5">${balancesHtml}</div>
         </div>
-        <div class="flex w-full sm:w-auto gap-2">
+        ${noBuy ? hubNoPurchaseLine('w-full') : `<div class="flex w-full sm:w-auto gap-2">
           ${isServerModeEnabled() ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target flex-1 sm:flex-none min-h-11 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 text-sm font-bold text-white btn-shine">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>` : ''}
           <button type="button" onclick="navigateTo('plans')" class="touch-target flex-1 sm:flex-none min-h-11 rounded-xl bg-slate-100 dark:bg-slate-800 px-4 text-sm font-bold text-slate-700 dark:text-slate-200">${isRTL ? 'الباقات' : 'Plans & bundles'}</button>
-        </div>
+        </div>`}
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -859,7 +862,7 @@ function renderWalletView() {
           </div>
         </div>
 
-        ${isAdmin ? (isServerModeEnabled() ? `
+        ${isAdmin ? (noBuy ? '' : isServerModeEnabled() ? `
           <div class="hub-card p-6">
             <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-2">${t('topUp')}</h3>
             <p class="text-sm text-slate-500 dark:text-slate-400">
@@ -942,10 +945,8 @@ function handleServiceClick(serviceId) {
     }
   }
 
-  // Navigate to service
   const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
-  // Through the router: address, history entry, scroll reset and in-flight
-  // request cancellation, like every other navigation.
+  // Through the router like every other navigation: address, history, scroll reset, request cancellation.
   state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
   navigateToInternal(targetView, true);
 }
@@ -966,9 +967,8 @@ function handleSmartSystemClick(systemId) {
   const access = checkServiceAccess(systemId);
   if (!access.allowed) {
     if (access.reason === 'not_subscribed') {
-      // An expired Ads Studio customer whose campaigns still hold money must
-      // reach the read-only view (and its Stop & refund button) — the view
-      // shows the activate card itself. Everyone else sees the paywall.
+      // An expired Ads Studio customer whose campaigns still hold money must reach the read-only view
+      // (Stop & refund); it shows the activate card itself. Everyone else sees the paywall.
       const moneyRecovery = systemId === 'ad_maker'
         && typeof adsStudioCanViewOwn === 'function' && adsStudioCanViewOwn()
         && typeof adsStudioHasRecoverableCampaigns === 'function' && adsStudioHasRecoverableCampaigns();
@@ -979,7 +979,6 @@ function handleSmartSystemClick(systemId) {
     }
   }
 
-  // Navigate to system
   const targetView = system.openView || (systemId === 'albayan_manager' ? 'analytics' : 'service-placeholder');
   state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
   navigateToInternal(targetView, true);

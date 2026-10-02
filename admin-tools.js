@@ -1211,7 +1211,8 @@ const PERMISSION_TEXT_AR = {
     viewer: ['قراءة فقط', 'عرض فقط دون أي تعديل'],
     clothesSubscriber: ['مشترك نظام الملابس', 'يدير تجارة الملابس الخاصة به ويرى بياناته فقط'],
     adsStudioCustomer: ['عميل استوديو الإعلانات', 'ينشئ حملاته الإعلانية ويرسلها فقط'],
-    adsStudioReviewer: ['مراجع استوديو الإعلانات', 'يراجع حملات العملاء دون الوصول إلى البيانات المالية الداخلية']
+    adsStudioReviewer: ['مراجع استوديو الإعلانات', 'يراجع حملات العملاء دون الوصول إلى البيانات المالية الداخلية'],
+    appReviewDemo: ['حساب مراجعة المتجر', 'لمراجع المتجر: يرى فقط السجلات التي أنشأها هذا الحساب']
   }
 };
 // The startup bundle's typeof-guarded entry point (a function, like every lazy bundle's: a startup

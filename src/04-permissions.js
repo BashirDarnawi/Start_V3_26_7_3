@@ -1,10 +1,7 @@
-// ==========================================
-// CONSTANTS & ENUMS
-// ==========================================
+// ===== CONSTANTS & ENUMS =====
 
-// The generic 'Bank Transfer' was removed — it duplicated the explicit
-// LYD/USD variants. LEGACY_PAYMENT_METHODS keeps it selectable ONLY on
-// receipts that already carry it, so old records still display/save correctly.
+// The generic 'Bank Transfer' duplicated the LYD/USD variants: LEGACY_PAYMENT_METHODS keeps it
+// selectable ONLY on receipts that already carry it, so old records still display and save.
 const PAYMENT_METHODS = [
   'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT',
   'Transfer Office', 'Bank Transfer (LYD)',
@@ -12,9 +9,8 @@ const PAYMENT_METHODS = [
 ];
 const LEGACY_PAYMENT_METHODS = ['Bank Transfer'];
 
-// Payment methods for a given select: the current list, plus the record's own
-// legacy method when it is no longer offered (so editing an old receipt does
-// not silently switch its payment method).
+// Payment methods for a select: the current list plus the record's own legacy method, so editing
+// an old receipt never silently switches its payment method.
 function paymentMethodOptions(currentMethod) {
   const m = String(currentMethod || '').trim();
   if (m && !PAYMENT_METHODS.includes(m)) return [...PAYMENT_METHODS, m];
@@ -33,9 +29,7 @@ const BUSINESS_CONFIG = {
   RECEIPT_PROCESSING_FEE_LYD: 0, // Set to 0 - was 2.00 as placeholder; make configurable in settings if needed
 };
 
-// ==========================================
-// ADVANCED PERMISSIONS SYSTEM
-// ==========================================
+// ===== ADVANCED PERMISSIONS SYSTEM =====
 
 const PERMISSION_MODULES = {
   analytics: {
@@ -367,6 +361,19 @@ const PERMISSION_TEMPLATES = {
       // Reviewers see and decide every request; never rewrite or submit a customer's draft.
       adCampaignRequests: ['view', 'review']
     }
+  },
+  // The store reviewer's account (docs/store): it sees ONLY the records it created itself.
+  appReviewDemo: {
+    name: 'App Review demo',
+    description: 'Store reviewer: only the records this account created',
+    icon: 'smartphone',
+    color: 'violet',
+    permissions: {
+      customers: ['viewOwn', 'add'],
+      receipts: ['viewOwn'],
+      ads: ['viewOwn'],
+      deliveries: ['viewOwn']
+    }
   }
 };
 
@@ -562,18 +569,15 @@ function canActOnRecord(module, action, recordCreatorId) {
   return false;
 }
 
-// ==========================================
-// SUBSCRIPTION HELPERS (Services Hub)
-// ==========================================
+// ===== SUBSCRIPTION HELPERS (Services Hub) =====
 
 function hasSubscription(serviceId) {
   if (!state.currentUser) return false;
   if (isAdminRole(state.currentUser.role)) return true; // Admin gets all
   const uid = String(state.currentUser.id || '');
   if (uid && SUBSCRIPTIONS.isActive(uid, serviceId)) return true;
-  // In server mode only the server-owned subscription ledger is authoritative.
-  // The legacy array can be stale after cancellation (and is mutable client
-  // state), so it must never grant server-backed access.
+  // Server mode: only the server-owned subscription ledger grants access. The legacy array is
+  // mutable client state and can be stale after a cancellation.
   if (isServerModeEnabled()) return false;
   const subs = state.currentUser.subscriptions || [];
   return subs.includes(serviceId);
@@ -682,6 +686,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
   const idem = Security.generateSecureId('idem');
   state.modalData = { serviceId, serviceName, subscribeToId, planId: String(planId || ''), idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
+  if (inAppPurchasingHidden()) return;  // iPhone app: the sheet shows no price or balance to refresh
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
     // FORCE a fresh catalog: the shown price is the one the server checks (expectedPriceMinor).
     refreshSubscriptionPlans(true).then(() => {
@@ -773,9 +778,7 @@ async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
   }
 }
 
-// ==========================================
-// PASSWORD RESET (Advanced, Safe)
-// ==========================================
+// ===== PASSWORD RESET (Advanced, Safe) =====
 
 function generateRecoveryKeyPlain() {
   const bytes = new Uint8Array(32);
@@ -1001,9 +1004,7 @@ async function passwordResetConfirmLocal() {
   }
 }
 
-// ==========================================
-// PASSKEYS (WebAuthn) - Local-first, Safe Verification
-// ==========================================
+// ===== PASSKEYS (WebAuthn) - Local-first, Safe Verification =====
 
 function _bufToB64url(buf) {
   const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);

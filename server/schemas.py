@@ -13,7 +13,10 @@ class LoginRequest(BaseModel):
 class UserPublic(BaseModel):
     id: str
     name: str
-    email: EmailStr
+    # A plain str on purpose: this is the STORED address going out, and writes
+    # check it (security.normalize_signin_email). Re-validating it here made one
+    # old bad row answer 500 for GET /api/users, /api/auth/me and /api/bootstrap.
+    email: str
     role: str
     permissions: dict[str, list[str]] = Field(default_factory=dict)
 

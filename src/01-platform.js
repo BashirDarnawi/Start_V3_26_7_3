@@ -27,9 +27,8 @@ const Platform = {
     const ua = navigator.userAgent || '';
     const uaLower = ua.toLowerCase();
     
-    // Check for Capacitor (mobile app). document.URL is read defensively:
-    // headless test sandboxes stub document without it, and detect() is now
-    // reachable from routing paths (browser Back/overlay history model).
+    // Capacitor (mobile app). document.URL is read defensively: test sandboxes stub document
+    // without it, and routing paths reach detect().
     const docUrl = String((typeof document !== 'undefined' && document.URL) || '');
     const isCapacitor = typeof window.Capacitor !== 'undefined' ||
                         docUrl.startsWith('capacitor://') ||
@@ -71,23 +70,18 @@ const Platform = {
     if (!isCapacitor) {
       try {
         if (/FBAN|FBAV|FB_IAB|FBIOS/i.test(ua)) {
-          // Facebook family. Messenger ships the same FB tokens plus its own
-          // app names (MessengerForiOS / Orca-Android), so the sub-check is
-          // safe — it only runs once an FB token already matched.
+          // Facebook family; Messenger adds its own app names to the same FB tokens.
           isInAppBrowser = true;
           inAppBrowserKind = /messenger|orca/i.test(ua) ? 'messenger' : 'facebook';
         } else if (/instagram/i.test(ua)) {
           isInAppBrowser = true;
           inAppBrowserKind = 'instagram';
         } else if (/android/i.test(ua) && /; wv\)/.test(ua)) {
-          // Stock Android WebView marker (Chrome's "; wv)" token) — covers
-          // FB Lite, Gmail, and any other app hosting a bare WebView.
+          // Stock Android WebView ("; wv)"): FB Lite, Gmail, any app hosting a bare WebView.
           isInAppBrowser = true;
           inAppBrowserKind = 'android-webview';
         } else if (/\bLine\/|MicroMessenger|Snapchat|TikTok|musical_ly|BytedanceWebview|\bGSA\//i.test(ua)) {
-          // Other well-known in-app shells (LINE, WeChat, Snapchat, TikTok,
-          // the Google app). Same degraded capabilities; no finer branding
-          // is needed by any consumer.
+          // Other in-app shells (LINE, WeChat, Snapchat, TikTok, the Google app): same limits.
           isInAppBrowser = true;
           inAppBrowserKind = 'other';
         }
@@ -127,9 +121,7 @@ const Platform = {
   get supportsHover() { return this.detect().supportsHover; },
   get isMobile() { return this.detect().isMobile; },
   get isMobileBrowser() { return this.detect().isMobileBrowser; },
-  // In-app webview shells (Facebook/Instagram/Messenger, bare Android
-  // WebViews, other known app browsers). Consumers use this to degrade
-  // gracefully where those shells silently break downloads/printing.
+  // In-app webview shells: consumers degrade where those silently break downloads/printing.
   get isInAppBrowser() { return this.detect().isInAppBrowser; },
   // 'facebook' | 'instagram' | 'messenger' | 'android-webview' | 'other' | null
   get inAppBrowserKind() { return this.detect().inAppBrowserKind; },
@@ -164,14 +156,21 @@ if (document.readyState === 'loading') {
   Platform.applyBodyClasses();
 }
 
+// IPHONE APP: Apple allows only its own In-App Purchase for anything sold inside an app, so the owner
+// sells nothing there. True = hide every buy, subscribe and top-up button (balances, plans in use and
+// history stay). The web and the Android app are unchanged.
+function inAppPurchasingHidden() {
+  if (typeof Platform === 'undefined' || !Platform.isCapacitor) return false;
+  if (Platform.isIOS) return true;
+  // The same Apple build on an iPad, Mac or Vision Pro can send a desktop user agent: ask the shell.
+  try { return window.Capacitor.getPlatform() === 'ios'; } catch (_) { return false; }
+}
+
 // ==========================================
 // ROLE HELPERS
 // ==========================================
-// The server compares roles case-insensitively (server/main.py lowercases),
-// but the client used to do exact-case checks like role === 'Admin'. A role
-// stored as 'admin' would then pass ALL server permission checks while
-// failing the client's UI checks — half-privileged, inconsistent behavior.
-// These helpers make the client tolerant of case the same way the server is.
+// Case-insensitive like the server (main.py lowercases): a role stored as 'admin' passed every
+// server check while failing the UI's exact 'Admin' checks.
 function isAdminRole(role) {
   return String(role || '').trim().toLowerCase() === 'admin';
 }
@@ -198,10 +197,7 @@ document.addEventListener('visibilitychange', () => {
 function isPerformanceModeOn() {
   let pref = null;
   try { pref = localStorage.getItem('albayan_perf_mode'); } catch (_) {}
-  // Performance mode is the DEFAULT (user request): every device starts in
-  // lite mode; only an explicit 'full' choice in Settings restores the heavy
-  // glass/aurora effects. (Previously lite was only auto-enabled on weak
-  // hardware via a deviceMemory/cores heuristic.)
+  // Lite is the DEFAULT (user request): only an explicit 'full' in Settings restores the heavy effects.
   return pref !== 'full';
 }
 

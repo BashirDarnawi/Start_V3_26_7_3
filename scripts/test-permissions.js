@@ -4823,6 +4823,73 @@ check('Ads Studio reviewers cannot edit or submit customer drafts', () => {
   assert(sandbox.getAuthorizedServerSyncCollections(reviewer).includes('adCampaignRequests'), 'review queue was excluded from reviewer live sync');
 });
 
+// F-demo (owner decision, 2 October 2026): the app has ONE live database and no demo copy, so the account handed to
+// the App Store reviewer may see only the records it created itself. No older template was that narrow (the driver
+// template shows contacts, the others show everyone's records), so "App Review demo" is that exact grant and the
+// release guide (docs/store/IOS_APP_STORE_RELEASE.md, Step 7) names it. Read from src/: this suite's bundle is rebuilt later.
+check('F-demo: the "App Review demo" template shows the store reviewer only its own records (view-own plus Add Customers, nothing else), has Arabic text, and the guides name it', () => {
+  const fresh = require('./helpers/load-browser-source')();
+  const templates = fresh.run('PERMISSION_TEMPLATES');
+  const modules = fresh.run('PERMISSION_MODULES');
+  const demo = templates.appReviewDemo;
+  assert(demo && demo.name === 'App Review demo', 'before: there is no App Review demo template');
+  // The exact grant.
+  const expected = { customers: ['viewOwn', 'add'], receipts: ['viewOwn'], ads: ['viewOwn'], deliveries: ['viewOwn'] };
+  assert(JSON.stringify(demo.permissions) === JSON.stringify(expected), 'the grant changed: ' + JSON.stringify(demo.permissions));
+  const counter = fresh.sandbox.getPermissionSummary(demo.permissions);  // the "5/98" at the top of the Permissions Manager
+  assert(counter.granted === 5, 'the guide tells the owner to look for five ticks');
+  // Spelled out: only real permission names, only view-own and Add Customers, and no other section at all (no
+  // analytics, pages, users, settings, audit log, Clothes or Ads Studio). A page list is never "own", so no Pages.
+  for (const moduleKey of Object.keys(demo.permissions)) assert(modules[moduleKey], `unknown section ${moduleKey}`);
+  for (const [moduleKey, config] of Object.entries(modules)) {
+    const granted = demo.permissions[moduleKey] || [];
+    for (const action of granted) {
+      assert(Object.prototype.hasOwnProperty.call(config.permissions, action), `unknown permission ${moduleKey}.${action}`);
+      assert(action === 'viewOwn' || (moduleKey === 'customers' && action === 'add'), `the reviewer account may ${moduleKey}.${action}`);
+    }
+    if (!['customers', 'receipts', 'ads', 'deliveries'].includes(moduleKey)) assert(granted.length === 0, `the reviewer account reaches ${moduleKey}`);
+  }
+  // Signed in with it: Customers first; the four own-record screens open; nothing with totals, other people's
+  // records, users, settings or the wallet does.
+  const reviewer = { id: 'u-review', name: 'App Review', role: 'Employee', permissions: JSON.parse(JSON.stringify(demo.permissions)) };
+  fresh.state.currentUser = reviewer;
+  fresh.state.users = [reviewer];
+  assert(fresh.sandbox.getPostLoginLandingViewForUser(reviewer) === 'customers', 'the reviewer does not land on Customers');
+  for (const view of ['customers', 'receipts', 'ads', 'deliveries']) assert(fresh.sandbox.userCanAccessView(reviewer, view), `the reviewer cannot open ${view}`);
+  for (const view of ['control-center', 'analytics', 'pages', 'reconciliation', 'audit', 'settings', 'users', 'clothes-system', 'ads-studio']) {
+    assert(!fresh.sandbox.userCanAccessView(reviewer, view), `the reviewer can open ${view}`);
+  }
+  const adminOnly = fresh.run('PLATFORM_ADMIN_ONLY_VIEWS');
+  for (const view of ['services-hub', 'wallet', 'plans', 'charge-wallet']) {
+    assert(adminOnly.has(view) && !fresh.sandbox.userCanAccessView(reviewer, view), `the reviewer can open ${view}`);
+  }
+  const can = (moduleKey, action) => fresh.sandbox.hasPermission(reviewer.id, moduleKey, action);
+  assert(can('customers', 'viewOwn') && can('customers', 'add'), 'the reviewer cannot add its DEMO customers');
+  const denied = {
+    customers: ['view', 'viewContacts', 'viewBalance', 'edit', 'editOwn', 'delete', 'export'],
+    receipts: ['view', 'add', 'edit', 'editOwn', 'delete', 'markCollected', 'transfer', 'viewHistory', 'export'],
+    ads: ['view', 'add', 'edit', 'editOwn', 'delete', 'changeStatus', 'stopAd', 'assignDelivery', 'viewPhotos', 'uploadPhotos'],
+    deliveries: ['view', 'accept', 'complete', 'markCollected', 'assign', 'reassign', 'viewStats'],
+    pages: ['view', 'add'], analytics: ['view', 'viewFinancials', 'viewSensitive', 'export'],
+    users: ['view', 'add', 'managePermissions'], settings: ['view', 'edit', 'manageExchangeRate'], auditLogs: ['view', 'viewOwn']
+  };
+  for (const [moduleKey, actions] of Object.entries(denied)) {
+    for (const action of actions) assert(!can(moduleKey, action), `the reviewer account holds ${moduleKey}.${action}`);
+  }
+  // Arabic name and description (the lazy admin-tools.js text).
+  fresh.run(fs.readFileSync(path.join(__dirname, '..', 'src', '12b1-permission-text-ar.js'), 'utf8'));
+  const arabic = fresh.run('PERMISSION_TEXT_AR').templates.appReviewDemo;
+  assert(Array.isArray(arabic) && arabic.length === 2 && arabic.every(s => typeof s === 'string' && /[؀-ۿ]/.test(s) && !/[A-Za-z]{3,}/.test(s)),
+    'no Arabic name and description: ' + JSON.stringify(arabic));
+  // The guides name the template by the name on its button and no longer promise a separate demo workspace.
+  for (const file of ['IOS_APP_STORE_RELEASE.md', 'STORE_CHECKLIST.md']) {
+    const guide = fs.readFileSync(path.join(__dirname, '..', 'docs', 'store', file), 'utf8').replace(/\s+/g, ' ');
+    assert(guide.includes(`**${demo.name}**`), `${file} does not name the "${demo.name}" template`);
+    assert(!/demo workspace/i.test(guide), `${file} still promises a demo workspace: the app has one live database`);
+    if (file === 'IOS_APP_STORE_RELEASE.md') assert(guide.includes(`**${counter.granted}/${counter.total}**`), `the guide's check "counter must read ${counter.granted}/${counter.total}" is out of date`);
+  }
+});
+
 check('R6 ads-lifecycle-4: the Manager template can stop and reconcile ads (Stop and Reconciliation check ads.stopAd, not changeStatus)', () => {
   // Read from src/: this suite loads the generated bundle, which is rebuilt once after all parallel fixes land.
   const fresh = require('./helpers/load-browser-source')();
@@ -6703,7 +6770,7 @@ checkAsync('R5 i18n-arabic-sweep-1: the Permissions Manager reads Arabic in Arab
     ...permKeys.filter(k => !(text.perms[k] || []).every(arabic) || text.perms[k].length !== 2).map(k => 'perms.' + k),
     ...Object.keys(templates).filter(k => !(text.templates[k] || []).every(arabic) || text.templates[k].length !== 2).map(k => 'templates.' + k)
   ];
-  assert(Object.keys(modules).length === 14 && permKeys.length === 98 && Object.keys(templates).length === 9, 'the permission catalog changed size: update this check');
+  assert(Object.keys(modules).length === 14 && permKeys.length === 98 && Object.keys(templates).length === 10, 'the permission catalog changed size: update this check');
   assert(!missing.length, 'no Arabic for: ' + missing.join(', '));
   const stale = [...Object.keys(text.modules).filter(k => !modules[k]), ...Object.keys(text.perms).filter(k => !permKeys.includes(k)), ...Object.keys(text.templates).filter(k => !templates[k])];
   assert(!stale.length, 'Arabic keys 04-permissions.js lacks: ' + stale.join(', '));

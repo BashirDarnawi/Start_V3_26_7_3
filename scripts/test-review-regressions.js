@@ -2074,6 +2074,172 @@ async function main() {
     assert.ok(html.includes('hubOpenChargeWallet') && html.includes('Charge wallet') && html.includes('charge the wallet first'));
     assert.ok(!html.includes('Ask the office'));
   });
+  // F-iap-shell (owner decision, 2 October 2026): Apple allows only its own In-App Purchase for anything sold inside
+  // an iPhone app, so the iPhone app sells nothing. Every buy, subscribe and top-up button is hidden there (balances,
+  // plans in use and history stay) and one neutral line, naming no other way to pay, stands in its place. The website
+  // and the Android app must keep every button. The lazy screens (Clothes, Ads Studio) are covered separately.
+  {
+    const IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Albayan/1.0';
+    const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.0.0 Mobile Safari/537.36';
+    const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Albayan/1.0';
+    const NEUTRAL = { en: 'Purchases are not available in this app.', ar: 'الشراء غير متاح في هذا التطبيق.' };
+    // A sandbox posing as the website (no bridge), the packaged iPhone app or the packaged Android app, through the
+    // real platform detection (Capacitor bridge + user agent). Server mode, 75.00 LYD in the wallet, a priced catalog.
+    const shell = (userAgent, bridge, { role = 'Admin', language = 'en', subscribed = false, serverMode = true } = {}) => {
+      const fixture = loadBrowserSource();
+      const { sandbox, state, run } = fixture;
+      run('Security').escapeHtml = plainEscape;
+      if (userAgent) sandbox.navigator.userAgent = userAgent;
+      if (bridge) sandbox.window.Capacitor = bridge;
+      run('Platform._cache = null');
+      state.serverMode = serverMode;
+      state.language = language;
+      state.currentUser = { id: 'u1', role, name: 'Sara', permissions: {} };
+      state.users = [state.currentUser];
+      state.walletTransactions = [{ id: 'wtx_1', type: 'credit', fromUserId: 'system', toUserId: 'u1', amountMinor: 7500, currency: 'LYD', status: 'posted', createdAt: '2026-10-01T10:00:00.000Z', memo: 'Cash at the office' }];
+      state.serviceSubscriptions = subscribed
+        ? [{ id: 'sub_1', userId: 'u1', serviceId: 'clothes_system', status: 'active', expiresAt: new Date(Date.now() + 12 * 86400000 - 60000).toISOString() }]
+        : [];
+      state.subscriptionPlans = [
+        { id: 'svc:clothes_system', name: 'Clothes monthly', nameAr: 'الملابس شهرياً', serviceIds: ['clothes_system'], priceMinor: 5000, durationDays: 30, currency: 'LYD' },
+        { id: 'svc:smart_systems', name: 'Smart Systems monthly', nameAr: 'الأنظمة شهرياً', serviceIds: ['smart_systems'], priceMinor: 2500, durationDays: 30, currency: 'LYD' },
+        { id: 'bundle1', name: 'Everything', nameAr: 'كل شيء', serviceIds: ['clothes_system', 'ad_maker'], priceMinor: 9000, durationDays: 30, currency: 'LYD', savingsPct: 20, badge: 'best_value' }
+      ];
+      const asked = { methods: 0, prices: [], ledger: 0 };
+      sandbox.apiWalletPaymentMethods = async () => { asked.methods += 1; return { methods: [] }; };
+      sandbox.refreshSubscriptionPlans = async force => { asked.prices.push(force); };
+      sandbox.serverLiveSyncTick = async () => { asked.ledger += 1; };
+      // What renderModal() draws (the fake document keeps no tree).
+      const made = [];
+      const makeElement = sandbox.document.createElement;
+      sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+      const sheet = open => { made.length = 0; open(); return made.map(el => String(el.innerHTML || '')).join('\n'); };
+      return { ...fixture, asked, sheet };
+    };
+    const PLATFORMS = {
+      web: options => shell('', null, options),
+      iphone: options => shell(IPHONE_UA, { getPlatform: () => 'ios' }, options),
+      android: options => shell(ANDROID_UA, { getPlatform: () => 'android' }, options)
+    };
+    const has = (html, ...parts) => parts.filter(part => !html.includes(part));
+    const lacks = (html, ...parts) => parts.filter(part => html.includes(part));
+
+    await test('F-iap-shell: the iPhone app sells nothing: Services Hub, Smart Systems, Plans, Charge wallet and Wallet show no buy or top-up button and the neutral line; the website and the Android app keep every button', async () => {
+      // The one switch. Safari on an iPhone is the website; the same Apple build with a desktop user agent is hidden too.
+      assert.equal(PLATFORMS.web().sandbox.inAppPurchasingHidden(), false);
+      assert.equal(shell(IPHONE_UA, null).sandbox.inAppPurchasingHidden(), false, 'the website in Safari on an iPhone');
+      assert.equal(PLATFORMS.android().sandbox.inAppPurchasingHidden(), false);
+      assert.equal(shell(DESKTOP_UA, {}).sandbox.inAppPurchasingHidden(), false, 'an unknown shell is not the iPhone app');
+      assert.equal(PLATFORMS.iphone().sandbox.inAppPurchasingHidden(), true);
+      assert.equal(shell(DESKTOP_UA, { getPlatform: () => 'ios' }).sandbox.inAppPurchasingHidden(), true, 'the Apple build on an iPad or a Mac');
+
+      for (const language of ['en', 'ar']) {
+        const neutral = NEUTRAL[language];
+        // ---- the iPhone app ----
+        let f = PLATFORMS.iphone({ language });
+        let hub = String(f.sandbox.renderServicesHub());
+        assert.deepEqual(has(hub, neutral, '75.00 LYD', "navigateTo('wallet')"), [], `${language} hub keeps the balance and shows the neutral line`);
+        assert.deepEqual(lacks(hub, 'hubOpenChargeWallet', "navigateTo('plans')", 'Top up', 'Plans & bundles', 'الباقات والاشتراكات', 'Subscribe', 'اشترك', 'Renew'), [], `${language} hub`);
+        assert.deepEqual(lacks(String(f.sandbox.hubWalletCard({ topUp: true, plansLink: true })), 'hubOpenChargeWallet', "navigateTo('plans')"), [], `${language} wallet card, both buttons asked for`);
+        assert.deepEqual(lacks(String(f.sandbox.renderSmartSystems()), 'showSubscriptionModal(', '>Subscribe<', '>Renew<', '>اشترك<', '>جدّد<'), [], `${language} Smart Systems`);
+        const charge = String(f.sandbox.renderChargeWalletView());
+        assert.deepEqual(has(charge, neutral, "navigateTo('wallet')", "navigateTo('services-hub')"), [], `${language} Charge wallet is the neutral card with a way back`);
+        assert.deepEqual(lacks(charge, 'chargeWalletCreateRequest', 'charge-wallet-amount', 'chargeWalletPickMethod', 'Create charge request', 'Charge wallet', 'اشحن المحفظة', 'إنشاء طلب شحن'), [], `${language} Charge wallet`);
+        assert.equal(f.asked.methods, 0, 'the iPhone app never asks for the payment methods');
+        const wallet = String(f.sandbox.renderWalletView());
+        assert.deepEqual(has(wallet, neutral, '75.00 LYD', 'Cash at the office', 'walletTransferFromUi()'), [], `${language} Wallet keeps the balance, the history and transfers`);
+        assert.deepEqual(lacks(wallet, 'hubOpenChargeWallet', "navigateTo('plans')", 'walletTopUpFromUi', 'Charge wallet', 'اشحن المحفظة', 'Plans & bundles', 'external funding rails', 'قنوات التمويل'), [], `${language} Wallet`);
+        // A locked service reads "Not active": never a price to pay or "Subscribe".
+        f = PLATFORMS.iphone({ language, role: 'Employee', subscribed: true });
+        hub = String(f.sandbox.renderServicesHub());
+        assert.deepEqual(has(hub, neutral, language === 'ar' ? 'غير مفعّلة' : 'Not active', language === 'ar' ? 'نشط · 12 يوم' : 'Active · 12 d'), [], `${language} hub pills`);
+        assert.deepEqual(lacks(hub, '25 LYD', 'Subscribe', 'اشترك', "navigateTo('plans')", 'hubOpenChargeWallet'), [], `${language} hub pills`);
+        // Plans: read-only rows (name, services, days left) and no price, offer badge or button.
+        const plans = String(f.sandbox.renderPlansView());
+        assert.deepEqual(has(plans, neutral, '75.00 LYD', language === 'ar' ? 'كل شيء' : 'Everything', language === 'ar' ? 'الملابس شهرياً' : 'Clothes monthly',
+          language === 'ar' ? 'نشط · 12 يوم' : 'Active · 12 d', language === 'ar' ? 'غير مفعّلة' : 'Not active', "navigateTo('services-hub')"), [], `${language} Plans`);
+        assert.deepEqual(lacks(plans, 'openPlanPaywall', 'hubOpenChargeWallet', 'Subscribe', 'اشترك', 'Renew', 'جدّد', '50 LYD', '90 LYD', '25 LYD', 'Best value', 'الأفضل قيمة', 'Save 20%', 'وفّر 20%', 'Top up', 'Loading prices'), [], `${language} Plans`);
+        f.state.subscriptionPlans = [];  // the catalog has not arrived: nothing to wait for, no "Loading prices…"
+        assert.deepEqual(lacks(String(f.sandbox.renderPlansView()), 'Loading prices', 'جاري تحميل الأسعار', 'plansEnsureFresh();', 'animate-spin'), [], `${language} Plans without a catalog`);
+        f = PLATFORMS.iphone({ language, serverMode: false });  // local mode: no "subscribe from its card", no admin top-up form
+        assert.deepEqual(lacks(String(f.sandbox.renderPlansView()) + String(f.sandbox.renderWalletView()) + String(f.sandbox.renderChargeWalletView()),
+          'subscribe from its card', 'واشترك من بطاقتها', 'walletTopUpFromUi', 'wallet-topup-amount', 'Charge requests need', 'طلبات الشحن'), [], `${language} local mode`);
+
+        // ---- the website and the Android app: every button is still there, and no neutral line ----
+        for (const platform of ['web', 'android']) {
+          f = PLATFORMS[platform]({ language });
+          hub = String(f.sandbox.renderServicesHub());
+          assert.deepEqual(has(hub, 'onclick="hubOpenChargeWallet()"', "onclick=\"navigateTo('plans')\"", language === 'ar' ? '>شحن<' : '>Top up<', language === 'ar' ? '>الباقات والاشتراكات<' : '>Plans & bundles<'), [], `${platform} ${language} hub`);
+          assert.deepEqual(has(String(f.sandbox.hubWalletCard({ topUp: true, plansLink: true })), 'onclick="hubOpenChargeWallet()"', "onclick=\"navigateTo('plans')\"", language === 'ar' ? '>الباقات<' : '>Plans<'), [], `${platform} ${language} wallet card`);
+          assert.deepEqual(has(String(f.sandbox.renderSmartSystems()), "onclick=\"showSubscriptionModal('smart_systems', 'smart_systems')\"", language === 'ar' ? '>اشترك<' : '>Subscribe<'), [], `${platform} ${language} Smart Systems`);
+          const webCharge = String(f.sandbox.renderChargeWalletView());
+          assert.deepEqual(has(webCharge, 'onclick="chargeWalletCreateRequest()"', 'id="charge-wallet-amount"', language === 'ar' ? 'اشحن المحفظة' : 'Charge wallet'), [], `${platform} ${language} Charge wallet`);
+          assert.equal(f.asked.methods, 1, `${platform}: the payment methods are asked for`);
+          const webWallet = String(f.sandbox.renderWalletView());
+          assert.deepEqual(has(webWallet, 'onclick="hubOpenChargeWallet()"', "onclick=\"navigateTo('plans')\"", language === 'ar' ? 'اشحن المحفظة' : 'Charge wallet', language === 'ar' ? 'قنوات التمويل الخارجية' : 'external funding rails'), [], `${platform} ${language} Wallet`);
+          f = PLATFORMS[platform]({ language, role: 'Employee', subscribed: true });
+          const webHub = String(f.sandbox.renderServicesHub());
+          assert.deepEqual(has(webHub, language === 'ar' ? '25 LYD / شهر' : '25 LYD / month', language === 'ar' ? 'اشترك' : 'Subscribe'), [], `${platform} ${language} hub pills`);
+          const webPlans = String(f.sandbox.renderPlansView());
+          assert.deepEqual(has(webPlans, "onclick=\"openPlanPaywall('bundle1')\"", "onclick=\"openPlanPaywall('svc:clothes_system')\"", '90 LYD', '50 LYD',
+            language === 'ar' ? '>اشترك<' : '>Subscribe<', language === 'ar' ? '>جدّد<' : '>Renew<', language === 'ar' ? 'الأفضل قيمة' : 'Best value', language === 'ar' ? 'وفّر 20%' : 'Save 20%', 'onclick="hubOpenChargeWallet()"'), [], `${platform} ${language} Plans`);
+          assert.deepEqual(lacks(hub + webCharge + webWallet + webHub + webPlans, NEUTRAL.en, NEUTRAL.ar, 'Not active', 'غير مفعّلة'), [], `${platform} ${language}: nothing of the iPhone wording`);
+        }
+      }
+      // The App Review note tells Apple the same thing, and quotes the line the reviewer will see.
+      const reviewGuide = fs.readFileSync(path.join(__dirname, '..', 'docs', 'store', 'IOS_APP_STORE_RELEASE.md'), 'utf8').replace(/\n\s*>\s?/g, ' ').replace(/\s+/g, ' ');
+      assert.ok(reviewGuide.includes('Nothing can be bought in the iPhone app.') && reviewGuide.includes(`the iPhone app shows "${NEUTRAL.en}"`), 'the App Review note does not say what the iPhone app shows');
+    });
+
+    await test('F-iap-shell: in the iPhone app the subscribe sheet only says the service is not active (no price, no Subscribe, no Charge wallet) and loads no prices; on the website and in the Android app it still sells', async () => {
+      const SAYS = { en: 'This service is not active on your account.', ar: 'هذه الخدمة غير مفعّلة في حسابك.' };
+      const BUYING = ['handleSubscribePlan', 'handleSubscribe(', 'hubOpenChargeWallet', 'adsStudioOpenChargeForm', 'refreshSubscriptionPlans', 'Subscribe', 'اشترك', 'Charge wallet', 'اشحن المحفظة',
+        'Ask the office', 'اطلب من المكتب', 'Requires subscription', 'يتطلب اشتراكاً', 'Wallet balance', 'رصيد المحفظة', '50.00', '90.00', '75.00', 'LYD', 'Other plans', 'Best value', 'href='];
+      for (const language of ['en', 'ar']) {
+        for (const role of ['Employee', 'Admin']) {
+          for (const serverMode of [true, false]) {
+            const f = PLATFORMS.iphone({ language, role, serverMode });
+            const name = language === 'ar' ? 'نظام الملابس' : 'Clothes System';
+            // Every way in: a locked service, a plan row left over from an older screen, and a redraw of an open sheet.
+            const ways = [
+              () => f.sandbox.showSubscriptionModal('clothes_system', 'clothes_system'),
+              () => f.sandbox.openPlanPaywall('bundle1'),
+              () => { f.state.activeModal = 'subscription-lock'; f.state.modalData = { serviceId: 'clothes_system', serviceName: name, subscribeToId: 'clothes_system', planId: 'bundle1' }; f.sandbox.renderModal(); }
+            ];
+            for (const [index, open] of ways.entries()) {
+              const html = f.sheet(open);
+              const label = `iPhone ${language} ${role} ${serverMode ? 'server' : 'local'} way ${index + 1}`;
+              assert.equal(f.state.activeModal, 'subscription-lock', label);
+              assert.deepEqual(has(html, `<h2>${name}</h2>`, SAYS[language], NEUTRAL[language], 'onclick="closeModal()"'), [], label);
+              assert.deepEqual(lacks(html, ...BUYING), [], label);
+            }
+            await settle();
+            assert.deepEqual(f.asked.prices, [], 'no price catalog is fetched for a sheet that shows no price');
+            assert.equal(f.asked.ledger, 0);
+          }
+        }
+      }
+      // The website and the Android app: the paywall as before (the price, Subscribe, and where to get credit).
+      for (const platform of ['web', 'android']) {
+        let f = PLATFORMS[platform]({ role: 'Employee' });
+        let html = f.sheet(() => f.sandbox.showSubscriptionModal('clothes_system', 'clothes_system'));
+        assert.deepEqual(has(html, "handleSubscribePlan('svc:clothes_system', 'clothes_system', 5000)", 'Subscribe — 50.00 LYD', "handleSubscribePlan('bundle1', 'clothes_system', 9000)",
+          'Requires subscription', 'Wallet balance', '75.00 LYD', '>Ask the office to top up your wallet.</p>'), [], `${platform} member sheet`);
+        assert.deepEqual(lacks(html, NEUTRAL.en, SAYS.en), [], `${platform} member sheet`);
+        await settle();
+        assert.deepEqual(f.asked.prices, [true], `${platform}: the sheet forces a fresh price catalog`);
+        assert.equal(f.asked.ledger, 1);
+        html = f.sheet(() => f.sandbox.openPlanPaywall('bundle1'));
+        assert.deepEqual(has(html, "handleSubscribePlan('bundle1', 'clothes_system', 9000)", 'Subscribe — 90.00 LYD'), [], `${platform} plan paywall`);
+        f = PLATFORMS[platform]({ role: 'Admin' });
+        html = f.sheet(() => f.sandbox.showSubscriptionModal('clothes_system', 'clothes_system'));
+        assert.deepEqual(has(html, 'hubOpenChargeWallet()', '>Charge wallet</button>', 'Subscribe — 50.00 LYD'), [], `${platform} admin sheet`);
+        f = PLATFORMS[platform]({ role: 'Employee', serverMode: false });
+        html = f.sheet(() => f.sandbox.showSubscriptionModal('clothes_system', 'clothes_system'));
+        assert.deepEqual(has(html, "handleSubscribe('clothes_system', 'clothes_system')", 'You are not subscribed to'), [], `${platform} local sheet`);
+      }
+    });
+  }
   await test('r6 A n=15: a live Not-Paid ad the company partly covered can be switched to Paid with the customer\'s share', async () => {
     const { sandbox, state } = loadBrowserSource();
     state.pages = [{ id: 'p1', name: 'Page', customerId: 'c1' }];
@@ -5467,6 +5633,300 @@ async function main() {
     const local = String(run('renderLogin()'));
     assert.ok(local.includes('onclick="passkeySignIn()"') && local.includes('Sign in with a Passkey') && !/passkeySignIn\(\)"\s*disabled/.test(local), 'local mode keeps a working Passkey button');
   });
+
+  // ---- F-iap-lazy: the iPhone app sells nothing (inAppPurchasingHidden, 01-platform.js). There the
+  // lazy screens (Clothes paywall, Ads Studio) hide every subscribe, activate, renew and add-money
+  // control and show one neutral line; the web and the packaged Android app are unchanged.
+  {
+    const NO_BUY = { en: 'Purchases are not available in this app.', ar: 'الشراء غير متاح في هذا التطبيق.' };
+    const combos = ['web', 'android', 'ios'].flatMap(platform => ['en', 'ar'].map(language => [platform, language]));
+    // Draws as the web, the packaged Android app or the packaged iPhone app, in one language.
+    const drawAs = (fixture, platform, language) => {
+      const detected = fixture.run('Platform.detect()');
+      if (platform !== 'web') Object.assign(detected, { isCapacitor: true, isWeb: false, isMobile: true, platform, isIOS: platform === 'ios', isAndroid: platform === 'android' });
+      // The switch belongs to the platform (01-platform.js); a tree without it gets the agreed one.
+      if (fixture.run('typeof inAppPurchasingHidden') !== 'function') {
+        fixture.run("function inAppPurchasingHidden() { return !!(typeof Platform !== 'undefined' && Platform.isCapacitor && Platform.isIOS); }");
+      }
+      assert.equal(fixture.run('inAppPurchasingHidden()'), platform === 'ios', `${platform}: the switch`);
+      fixture.run('Security').escapeHtml = plainEscape;
+      fixture.state.language = language;
+    };
+    // Every neutral line of a studio screen: exactly the agreed words, no link and no other way to pay.
+    const neutralLines = html => Array.from(html.matchAll(/<p [^>]*data-testid="studio-no-purchase">([\s\S]*?)<\/p>/g), match => match[1]);
+    const onlyNeutral = (html, language, count, where) => {
+      const lines = neutralLines(html);
+      assert.ok(lines.length >= count && lines.every(text => text === NO_BUY[language]), `${where}: ${lines.length} neutral line(s) ${JSON.stringify(lines)}`);
+    };
+    const piece = (html, from, to) => {
+      const at = html.indexOf(from);
+      return at < 0 ? '' : html.slice(at, html.indexOf(to, at) + to.length);
+    };
+    // The words of the buying controls, as the screens write them.
+    const BUY_WORDS = { en: /Subscribe|Activate|Renew|Add money|Add dinars|Top up|Charge your wallet|Create charge request/, ar: /اشترك الآن|فعّل اشتراكك|فعّل الاشتراك|فعّل استوديو|فعّل الخدمة|تفعيل الخدمة|جدّد|أضف مالاً|أضف رصيداً|إضافة رصيد|أضف ديناراً|اشحن|إنشاء طلب شحن/ };
+    const BUY_CALLS = /showSubscriptionModal|studioWalletOpenAdd|studioBuilderAddMoney|adsStudioCreateWalletCharge|studioWalletCreate|AttachReceipt/;
+    const summary = (usd = {}, pendingPayments = null) => ({
+      usd: { addedMinor: 10000, adjustmentsMinor: 0, reservedMinor: 1000, inAdsMinor: 2000, metaUsedInAdsMinor: null, metaCheckedAt: null, beingReturnedMinor: 0, spentMinor: 500, availableMinor: 6500, ...usd },
+      reserved: [], inAds: [], chains: [], lyd: { balanceMinor: 5000 },
+      pendingPayments: pendingPayments || [
+        { reference: 'PAY-USDAAAA1', amountMinor: 2500, currency: 'USD', createdAt: '2026-09-25T08:00:00Z', dueAt: null },
+        { reference: 'PAY-LYDBBBB2', amountMinor: 15000, currency: 'LYD', createdAt: '2026-09-25T07:00:00Z', dueAt: null }
+      ]
+    });
+    const payments = [
+      { id: 'wpr_1', data: { reference: 'PAY-USDAAAA1', status: 'pending', currency: 'USD', amountMinor: 2500, amountMinorLYD: 17250, lydRate: 6.9, method: 'adfali', createdAt: '2026-09-25T08:00:00Z' } },
+      { id: 'wpr_2', data: { reference: 'PAY-LYDBBBB2', status: 'pending', currency: 'LYD', amountMinor: 15000, amountMinorLYD: 15000, method: 'bank_transfer', createdAt: '2026-09-25T07:00:00Z' } },
+      { id: 'wpr_3', data: { reference: 'PAY-DONECCC3', status: 'confirmed', currency: 'USD', amountMinor: 10000, method: 'adfali', createdAt: '2026-09-20T07:00:00Z', confirmedAt: '2026-09-20T09:00:00Z' } }
+    ];
+    const methods = [
+      { id: 'adfali', name: { en: 'Adfali', ar: 'ادفع لي' }, desc: { en: 'Pay from your phone balance', ar: 'ادفع من رصيد هاتفك' }, icon: 'smartphone', requiresReceiptPhoto: false,
+        instructions: { en: 'Pay {amountLYD} LYD via Adfali and keep the code {reference} in the payment note.', ar: 'ادفع {amountLYD} د.ل عبر ادفع لي واذكر الرمز {reference} في ملاحظة الدفع.' } },
+      { id: 'bank_transfer', name: { en: 'Bank transfer', ar: 'حوالة مصرفية' }, desc: { en: 'Transfer and attach the receipt photo', ar: 'حوّل وأرفق صورة الإيصال' }, icon: 'landmark', requiresReceiptPhoto: true,
+        instructions: { en: 'Transfer {amountLYD} LYD, write {reference} in the transfer note, then attach the receipt photo here.', ar: 'حوّل {amountLYD} د.ل واكتب {reference} في بيان الحوالة ثم أرفق صورة الإيصال هنا.' } }
+    ];
+    // An Ads Studio customer: plan 'active', 'ended' (their plan ran out) or 'none'.
+    const studioAs = (platform, language, plan, walletReply) => {
+      const fixture = studioFixture();
+      const { sandbox, state, run, replies } = fixture;
+      const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+      for (const file of manifest.lazy['studio-pages.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+      drawAs(fixture, platform, language);
+      state.currentUser = { id: 'cust1', name: 'Customer', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn', 'stopOwn'] } };
+      state.users = [state.currentUser];
+      state.adCampaignRequests = [];
+      state.walletTransactions = [];
+      state.serviceSubscriptions = plan === 'none' ? [] : [{ id: 'sub1', userId: 'cust1', serviceId: 'ad_maker', status: 'active',
+        expiresAt: new Date(Date.now() + (plan === 'active' ? 20 : -20) * 86400000).toISOString() }];
+      assert.equal(run('adsStudioCanUse()'), plan === 'active');
+      sandbox.refreshAdsStudioLimits = () => {};
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+      replies['/api/studio/wallet/summary'] = walletReply || summary();
+      replies['/api/wallet/payment-requests'] = { requests: payments };
+      replies['/api/wallet/payment-requests/methods'] = { methods, rate: { usdToLyd: 6.9, date: '2026-09-25' } };
+      replies['/api/studio/campaigns/summary'] = {};
+      replies['/api/studio/pages'] = { pages: [] };
+      const settled = async () => { for (let i = 0; i < 8; i++) await settle(); };
+      return { ...fixture, notes, settled };
+    };
+
+    await test('F-iap-lazy: the iPhone app draws the Clothes paywall without "Subscribe now" (one neutral line, no link, a way out for the subscriber and for staff) and never says "renew it"; the web and the Android app keep both', async () => {
+      for (const [platform, language] of combos) {
+        const fixture = clothesFixture();
+        const { sandbox, state, run } = fixture;
+        drawAs(fixture, platform, language);
+        const ios = platform === 'ios';
+        const permissions = JSON.parse(JSON.stringify(run('PERMISSION_TEMPLATES.clothesSubscriber.permissions')));
+        state.currentView = 'clothes-system';
+        sandbox.hasSubscription = () => false;
+        const drawFor = user => { state.currentUser = user; state.users = [user]; return String(run('renderMainApp()')); };
+        const subscriber = { id: 'sub1', name: 'Sub', role: 'Employee', permissions };
+        const staffUser = { id: 'emp', name: 'Emp', role: 'Employee', permissions: { ...permissions, customers: ['view'] } };
+        const alone = drawFor(subscriber);
+        const staff = drawFor(staffUser);
+        const buy = language === 'ar' ? 'اشترك الآن' : 'Subscribe now';
+        for (const [who, html] of [['subscriber', alone], ['staff', staff]]) {
+          const where = `${platform} ${language} ${who}`;
+          assert.equal(html.includes(buy), !ios, `${where}: before, the iPhone paywall offered "${buy}"`);
+          assert.equal(html.includes("onclick=\"showSubscriptionModal('clothes_system', 'clothes_system')\""), !ios, `${where}: the subscribe dialog`);
+          assert.equal(html.includes('data-testid="clothes-no-purchase"') && html.includes(NO_BUY[language]), ios, `${where}: the neutral line`);
+          if (!ios) continue;
+          assert.ok(!BUY_WORDS[language].test(html) && !BUY_CALLS.test(html), `${where}: nothing to buy`);
+          // The card names no other way or place to pay: no link, no button.
+          const card = piece(html, 'glass-panel rounded-2xl p-12 text-center', NO_BUY[language]);
+          assert.ok(card && !/<a\s|href=|<button|onclick=/.test(card), `${where}: ${card}`);
+        }
+        // A save refused because the subscription ran out: the reason, without "renew it" in the iPhone app.
+        const ended = language === 'ar' ? 'اشتراك نظام الملابس غير نشط أو انتهى.' : 'Your Clothes System subscription is not active or has ended.';
+        assert.equal(String(run("clothesServerDetailText('An active clothes_system subscription is required')")),
+          ios ? ended : `${ended} ${language === 'ar' ? 'جدّد الاشتراك ثم أعد المحاولة.' : 'Renew it, then try again.'}`, `${platform} ${language}: the refused save`);
+        assert.equal(String(run("clothesServerDetailText('Conflict: order has changed')")),
+          language === 'ar' ? 'تم تغييره من جهاز آخر. راجع أحدث نسخة ثم أعد المحاولة.' : 'It was changed on another device. Check the latest version, then try again.', `${platform} ${language}: the other refusals`);
+        if (ios) {
+          // Never a dead end: the subscriber keeps the account strip, staff get the way back.
+          for (const control of ['onclick="toggleLanguage()"', 'onclick="handleLogout()"', 'href="https://albayanhub.com/privacy"', 'href="https://albayanhub.com/delete-account"']) {
+            assert.ok(alone.includes(control), `${language} subscriber: ${control}`);
+          }
+          assert.ok(staff.includes("onclick=\"navigateTo('customers')\""), `${language} staff: the way back`);
+          // With the subscription the system itself opens, as everywhere.
+          sandbox.hasSubscription = id => id === 'clothes_system';
+          const open = drawFor(subscriber);
+          assert.ok(!open.includes('clothes-no-purchase') && !open.includes(NO_BUY[language]) && open.includes('data-testid="clothes-account-strip"'));
+        }
+      }
+    });
+
+    await test('F-iap-lazy: the iPhone app draws the studio wallet, Add money, Home, the request builder and Pages with nothing to buy (balances, the plan balance, waiting requests and history stay; one neutral line where a button was); the web and the Android app are unchanged', async () => {
+      for (const [platform, language] of combos) {
+        const ios = platform === 'ios';
+        const where = `${platform} ${language}`;
+        const en = language === 'en';
+        // ---- an active plan: the wallet, Add money, the builder's wallet lines
+        let f = studioAs(platform, language, 'active');
+        const wallet = id => String(f.run(`renderStudioWalletScreen({ tab: 'wallet', section: '', id: '${id}', step: 0 })`));
+        wallet('');  // asks for the summary, the payment requests and the methods
+        await f.settled();
+        const page = wallet('');
+        // What stays everywhere: the four numbers, the plan balance, the waiting requests with Cancel, the history, Refresh.
+        assert.ok(page.includes('data-testid="studio-wallet-available-amount"><bdi dir="ltr">$65.00</bdi>') && page.includes(`data-testid="studio-wallet-lyd-amount"><bdi dir="ltr">50.00 ${en ? 'LYD' : 'د.ل'}</bdi>`), `${where}: the balances`);
+        assert.equal((page.match(/data-testid="studio-wallet-pending-item"/g) || []).length, 2, `${where}: the waiting requests`);
+        assert.ok(page.includes('PAY-USDAAAA1') && page.includes("onclick=\"studioWalletAskCancel('wpr_1')\"") && page.includes('data-testid="studio-wallet-refresh"'), where);
+        assert.ok(piece(page, 'data-testid="studio-wallet-history"', '</section>').includes('PAY-DONECCC3'), `${where}: the history`);
+        // The buying controls: the web and Android only.
+        assert.equal(/data-testid="studio-wallet-add"[^>]*onclick="studioWalletOpenAdd\(\)"/.test(page), !ios, `${where}: before, the iPhone wallet offered Add money`);
+        assert.equal(page.includes(`data-testid="studio-wallet-renew" onclick="showSubscriptionModal('ad_maker', 'ad_maker')"`), !ios, `${where}: Renew or activate the plan`);
+        assert.equal(page.includes(`data-testid="studio-wallet-add-lyd" onclick="studioWalletOpenAdd('plan')"`), !ios, `${where}: Add dinars for the plan`);
+        assert.equal((page.match(/data-testid="studio-wallet-instruction"/g) || []).length, ios ? 0 : 2, `${where}: how to pay a waiting request`);
+        assert.equal(page.includes("studioWalletAttachReceipt('wpr_2', this)"), !ios, `${where}: the receipt upload`);
+        assert.equal(page.includes(en ? 'Adfali' : 'ادفع لي') && page.includes('172.50'), !ios, `${where}: the method and the dinars to pay`);
+        assert.equal(BUY_WORDS[language].test(page), !ios, `${where}: the buying words`);
+        assert.equal(neutralLines(page).length, ios ? 2 : 0, `${where}: the neutral lines (the top of the wallet, the plan card)`);
+        if (ios) {
+          onlyNeutral(page, language, 2, where);
+          assert.ok(!BUY_CALLS.test(page) && !page.includes('studioWalletCopy'), `${where}: no buying call`);
+          assert.ok(piece(page, 'data-testid="studio-wallet-lyd"', '</section>').includes(NO_BUY[language]), `${where}: the plan card says so`);
+        }
+        // ?tab=wallet&id=add-money (a link, or a leftover call such as the builder's "Add money").
+        const add = wallet('add-money');
+        f.run("studioWalletOpenAdd('plan', 12000)");
+        const addPlan = wallet('add-money');
+        for (const [label, html] of [['add', add], ['add for the plan', addPlan]]) {
+          assert.ok(html.includes('data-testid="studio-wallet-add-flow"'), `${where} ${label}: never an empty screen`);
+          assert.equal(html.includes('data-step="none"') && html.includes('data-testid="studio-wallet-done" onclick="studioWalletFinishAdd()"'), ios, `${where} ${label}: the neutral card with the way back`);
+          assert.equal(/studio-wallet-purpose-|studio-wallet-preset-|id="studio-wallet-amount"|studio-wallet-add-step/.test(html), !ios, `${where} ${label}: before, the iPhone app drew the Add money steps`);
+          if (ios) { onlyNeutral(html, language, 1, `${where} ${label}`); assert.ok(!BUY_WORDS[language].test(html) && !BUY_CALLS.test(html)); }
+        }
+        if (!ios) assert.ok(add.includes('data-step="1"') && add.includes('data-testid="studio-wallet-purpose-plan"') && addPlan.includes('data-step="2"'), `${where}: the steps as before`);
+        // Five waiting requests: the "pay or cancel one to add more" note belongs to the Add money button.
+        f.replies['/api/studio/wallet/summary'] = summary({}, [1, 2, 3, 4, 5].map(n => ({ reference: `PAY-FULL000${n}`, amountMinor: 1000, currency: 'USD', createdAt: '2026-09-25T08:00:00Z', dueAt: null })));
+        f.run("studioDataWant('wallet', true)");
+        await f.settled();
+        const full = wallet('');
+        assert.equal((full.match(/data-testid="studio-wallet-pending-item"/g) || []).length, 5, where);
+        assert.equal(full.includes('id="studio-wallet-full"') && /data-testid="studio-wallet-add"[^>]* disabled/.test(full), !ios, `${where}: the five-requests note`);
+        // The builder's wallet lines: the missing amount stays (the neutral explanation), "Add money" does not.
+        f.replies['/api/studio/wallet/summary'] = summary({ availableMinor: 1000, addedMinor: 0 });
+        f.run("studioDataWant('wallet', true)");
+        await f.settled();
+        const lines = String(f.run("studioBuilderWalletHtml({ draft: { budgetType: 'lifetime', budgetMinorUSD: 5000, durationDays: 5 } })"));
+        assert.ok(lines.includes('data-testid="studio-builder-wallet-short"') && lines.includes('<bdi dir="ltr">$40.00</bdi>') && lines.includes('PAY-USDAAAA1'), `${where}: short by $40.00, the payment being confirmed`);
+        assert.equal(lines.includes('data-testid="studio-builder-add-money" onclick="studioBuilderAddMoney()"'), !ios, `${where}: before, the iPhone builder offered Add money`);
+        assert.equal(neutralLines(lines).length, ios ? 1 : 0, where);
+        if (ios) { onlyNeutral(lines, language, 1, where); assert.ok(!BUY_WORDS[language].test(lines) && !/<button|onclick=/.test(lines), lines); }
+        const enough = String(f.run("studioBuilderWalletHtml({ draft: { budgetType: 'lifetime', budgetMinorUSD: 500, durationDays: 5 } })"));
+        assert.ok(!enough.includes('studio-no-purchase') && !enough.includes('studio-builder-add-money'), `${where}: enough money, nothing to say`);
+        // Home with a plan and no ad money yet: Getting started offers "Add money" on the web only.
+        f.run('renderStudioHomeBody()');
+        await f.settled();
+        const fresh = String(f.run('renderStudioHomeBody()'));
+        assert.equal(fresh.includes('data-testid="studio-start-plan"') && fresh.includes('data-testid="studio-start-money"'), !ios, `${where}: the plan and money steps`);
+        assert.equal(BUY_WORDS[language].test(fresh), !ios, `${where}: Home with a plan`);
+        assert.ok(fresh.includes('data-testid="studio-start-page"') && fresh.includes('data-testid="studio-start-first"') && fresh.includes("onclick=\"studioHomeGoal('messages')\""), `${where}: the other steps stay`);
+
+        // ---- a plan that ended: Home, the builder's banner, Pages
+        f = studioAs(platform, language, 'ended', summary({ addedMinor: 0 }, []));
+        f.run('renderStudioHomeBody()');
+        await f.settled();
+        const home = String(f.run('renderStudioHomeBody()'));
+        const need = piece(home, 'data-testid="studio-need-plan"', '</li>');
+        assert.ok(need.includes(en ? 'Your plan has ended' : 'انتهى اشتراكك'), `${where}: the plan-ended card stays`);
+        assert.equal(need.includes(`onclick="showSubscriptionModal('ad_maker', 'ad_maker')"`), !ios, `${where}: before, the iPhone Home offered Renew`);
+        assert.equal(need.includes(NO_BUY[language]) && !/<button/.test(need), ios, `${where}: ${need}`);
+        assert.equal(BUY_CALLS.test(String(f.run('JSON.stringify(studioHomeNeeds([], null))'))), !ios, `${where}: the card's own data`);
+        assert.equal(piece(home, 'data-testid="studio-start-plan"', '</li>').includes("showSubscriptionModal('ad_maker', 'ad_maker')"), !ios, `${where}: Activate in Getting started`);
+        assert.equal(piece(home, 'data-testid="studio-start-money"', '</li>').includes("studioV2Open('wallet')"), !ios, `${where}: Add money in Getting started`);
+        assert.equal(home.includes(en ? 'Activate your plan to start a new ad request.' : 'فعّل اشتراكك لتبدأ طلب إعلان جديد.'), !ios, where);
+        assert.equal(home.includes(en ? 'Activate Ads Studio' : 'فعّل استوديو الإعلانات') && home.includes(en ? 'Activate service' : 'تفعيل الخدمة'), !ios, `${where}: the activate card`);
+        assert.equal(BUY_WORDS[language].test(home) || BUY_CALLS.test(home), !ios, `${where}: Home after the plan ended`);
+        if (ios) {
+          onlyNeutral(home, language, 1, where);
+          // The two steps left are numbered 1 and 2, and the wallet (read only) stays one tap away.
+          assert.ok(/data-testid="studio-start-page"[^>]*>\s*<span class="studio-home-step-number" aria-hidden="true">1<\/span>/.test(home)
+            && /data-testid="studio-start-first"[^>]*>\s*<span class="studio-home-step-number" aria-hidden="true">2<\/span>/.test(home), `${where}: the steps`);
+          assert.ok(home.includes(en ? 'Your plan is not active.' : 'اشتراكك غير نشط.') && home.includes(en ? 'Ads Studio is not active on your account' : 'استوديو الإعلانات غير مفعّل في حسابك')
+            && home.includes("onclick=\"studioV2Open('wallet')\""), where);
+        }
+        const banner = String(f.run("studioBuilderBanners({ status: 'ready' })"));
+        assert.ok(banner.includes(en ? 'Your plan is not active.' : 'اشتراكك غير نشط.'), `${where}: the builder says why nothing is sent`);
+        assert.equal(banner.includes(`onclick="showSubscriptionModal('ad_maker', 'ad_maker')"`) && banner.includes(en ? 'Activate the plan' : 'فعّل الاشتراك'), !ios, `${where}: before, the iPhone builder offered Activate the plan`);
+        assert.equal(banner.includes(NO_BUY[language]) && !/<button|onclick=|<a\s/.test(banner), ios, `${where}: ${banner}`);
+        f.run("studioV2Frame = () => 'customer'");  // the v2 layout, where Pages offered "Renew from Wallet"
+        const pages = piece(String(f.run("renderStudioPagesBody({ tab: 'replies', section: 'pages', id: '', step: 0 })")), 'data-testid="studio-pg-plan-ended"', '</section>');
+        assert.ok(pages.includes(en ? 'Your plan has ended' : 'انتهى اشتراكك') && pages.includes(en ? 'Nothing of yours was removed.' : 'لم يُحذف شيء مما لديك.'), `${where}: Pages`);
+        assert.equal(pages.includes(`data-testid="studio-pg-renew" onclick="studioV2Open('wallet')"`), !ios, `${where}: before, the iPhone Pages screen offered Renew from Wallet`);
+        assert.equal(neutralLines(pages).length, ios ? 1 : 0, where);
+        if (ios) { onlyNeutral(pages, language, 1, where); assert.ok(!BUY_WORDS[language].test(pages) && !/<button|onclick=/.test(pages) && !/renew|تجديد/.test(pages), pages); }
+      }
+    });
+
+    await test('F-iap-lazy: the classic studio in the iPhone app has no activate card button, no Add money form and no receipt upload, and says "not enough balance" without "charge first"; admins keep the payments list; the web and the Android app are unchanged', async () => {
+      const adminRows = {};
+      for (const [platform, language] of combos) {
+        const ios = platform === 'ios';
+        const where = `${platform} ${language}`;
+        const en = language === 'en';
+        // ---- no plan: the activate card; with an old campaign: the banner above it
+        let f = studioAs(platform, language, 'ended');
+        f.sandbox.renderStudioV2View = () => '';  // the classic layout
+        const gate = String(f.run('renderAdsStudioView()'));
+        assert.equal(gate.includes(en ? 'Activate Ads Studio' : 'فعّل استوديو الإعلانات') && gate.includes(en ? 'Activate service' : 'تفعيل الخدمة')
+          && gate.includes(`onclick="showSubscriptionModal('ad_maker', 'ad_maker')"`), !ios, `${where}: before, the iPhone app drew "Activate service"`);
+        assert.equal(gate.includes(en ? 'Ads Studio is not active on your account' : 'استوديو الإعلانات غير مفعّل في حسابك') && neutralLines(gate).length === 1, ios, `${where}: the neutral card`);
+        assert.ok(gate.includes('onclick="handleLogout()"') && gate.includes('onclick="toggleLanguage()"'), `${where}: never a dead end`);
+        if (ios) { onlyNeutral(gate, language, 1, where); assert.ok(!BUY_WORDS[language].test(gate) && !BUY_CALLS.test(gate), `${where}: nothing to buy`); }
+        f.state.adCampaignRequests = [{ id: 'adreq_1', status: 'Approved', createdBy: 'cust1', name: 'Old campaign', budgetType: 'lifetime', budgetMinorUSD: 2000, paidMinorUSD: 2000 }];
+        const lapsed = String(f.run('renderAdsStudioView()'));
+        assert.ok(lapsed.includes(en ? 'Your subscription has ended. You can still see your campaigns' : 'انتهى اشتراكك. لا يزال بإمكانك رؤية حملاتك') && lapsed.includes('Old campaign'), `${where}: the campaigns stay`);
+        assert.equal(lapsed.includes(en ? 'to your wallet. Activate the service to create new campaigns.</span>' : 'إلى محفظتك. فعّل الخدمة لإنشاء حملات جديدة.</span>'), !ios, `${where}: the banner's last sentence`);
+        assert.equal(BUY_WORDS[language].test(lapsed) || /showSubscriptionModal/.test(lapsed), !ios, `${where}: the lapsed customer's screen`);
+        assert.equal(f.run("adsStudioRefusalText('Insufficient wallet balance')"), en ? 'Insufficient wallet balance'
+          : (ios ? 'رصيد المحفظة لا يكفي لهذه الميزانية' : 'رصيد المحفظة لا يكفي لهذه الميزانية — اشحن المحفظة أولاً'), `${where}: the server's balance refusal`);
+        // A send the server refuses for the balance ends in "charge the wallet first" (ad_campaign_actions.py), and English
+        // readers get the server's own words: the iPhone app drops that tail too, in the classic layout and in the builder.
+        const refusedSend = 'Insufficient wallet balance for this budget — charge the wallet first';
+        const refusedSays = en ? (ios ? 'Insufficient wallet balance for this budget' : refusedSend)
+          : (ios ? 'رصيد المحفظة لا يكفي لهذه الميزانية' : 'رصيد المحفظة لا يكفي لهذه الميزانية — اشحن المحفظة أولاً');
+        assert.ok(fs.readFileSync(path.join(__dirname, '..', 'server', 'systems', 'ads_studio', 'ad_campaign_actions.py'), 'utf8').includes(`detail="${refusedSend}"`), 'the server words this refusal differently now: update the iPhone rule in adsStudioRefusalText');
+        assert.equal(f.run(`adsStudioRefusalText(${JSON.stringify(refusedSend)})`), refusedSays, `${where}: before, the iPhone app told an English reader to charge the wallet first`);
+        assert.equal(f.run(`studioErrorInfo({ status: 409, message: ${JSON.stringify(refusedSend)}, payload: { detail: ${JSON.stringify(refusedSend)} } }, 'action').text`), refusedSays, `${where}: the same refusal in the request builder`);
+        assert.equal(f.run("adsStudioRefusalText('Stop the campaign first')"), en ? 'Stop the campaign first' : 'أوقف الحملة أولاً حتى تعود الميزانية غير المصروفة إلى المحفظة', `${where}: the other refusals`);
+
+        // ---- an active plan: the wallet on the Overview
+        f = studioAs(platform, language, 'active');
+        f.sandbox.renderStudioV2View = () => '';
+        f.run(`_adsStudioWalletForUser = 'cust1'; _adsStudioPayMethods = ${JSON.stringify(methods)}; _adsStudioPayRate = { usdToLyd: 6.9 };
+          _adsStudioWalletMine = ${JSON.stringify(payments)}; _adsStudioWalletPendingAll = [];`);
+        const classic = String(f.run('renderAdsStudioWallet()'));
+        assert.ok(classic.includes(en ? 'Wallet balance' : 'رصيد المحفظة') && classic.includes(en ? 'Available to spend' : 'متاح للصرف'), `${where}: the balances stay`);
+        assert.ok(['PAY-USDAAAA1', 'PAY-LYDBBBB2', 'PAY-DONECCC3'].every(code => classic.includes(code)) && classic.includes(`onclick="adsStudioDecideWalletCharge('wpr_1', 'cancel')"`), `${where}: the requests and Cancel stay`);
+        assert.equal(classic.includes('id="ads-studio-charge-amount"') && classic.includes('onclick="adsStudioCreateWalletCharge()"') && classic.includes(en ? 'Create charge request' : 'إنشاء طلب شحن'), !ios, `${where}: before, the iPhone app drew the Add money form`);
+        assert.equal(classic.includes(`onchange="adsStudioAttachReceipt('wpr_2', this)"`), !ios, `${where}: the receipt upload`);
+        assert.equal(classic.includes(`150.00 ${en ? 'LYD' : 'د.ل'} • ${en ? 'Bank transfer' : 'حوالة مصرفية'}`) && classic.includes('≈ 172.50 LYD'), !ios, `${where}: how a waiting request is paid`);
+        assert.ok(classic.includes(`$100.00 • ${en ? 'Adfali' : 'ادفع لي'}`), `${where}: a confirmed payment keeps its method (history)`);
+        assert.equal(neutralLines(classic).length, ios ? 1 : 0, where);
+        if (ios) { onlyNeutral(classic, language, 1, where); assert.ok(!BUY_WORDS[language].test(classic) && !BUY_CALLS.test(classic), `${where}: nothing to buy`); }
+        // An admin's list of everyone's payments (confirm, receipt) is the same on every platform.
+        const adminRow = String(f.run(`_adsStudioWalletRequestRow(${JSON.stringify(payments[1])}, true)`));
+        adminRows[language] = adminRows[language] || adminRow;
+        assert.ok(adminRow === adminRows[language] && adminRow.includes(`adsStudioDecideWalletCharge('wpr_2', 'confirm')`) && adminRow.includes(en ? 'Bank transfer' : 'حوالة مصرفية'), `${where}: the admin row`);
+        // The budget step's wallet line: what is missing, and "Add money before you send" on the web and Android only.
+        const missing = en ? 'Available in your wallet: $0.00 — short by $70.00.' : 'المتاح في محفظتك: $0.00 — ينقصك $70.00.';
+        assert.equal(String(f.run("adsStudioBudgetWalletText({ budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7 })")),
+          ios ? missing : `${missing} ${en ? 'Add money before you send.' : 'أضف رصيداً قبل الإرسال.'}`, `${where}: the budget step`);
+        // Sending a request the balance does not cover: the reason, and no "charge first" in the iPhone app.
+        f.state.adCampaignRequests = [{ id: 'short1', status: 'Draft', createdBy: 'cust1', name: 'Daily check', objective: 'messages', platforms: ['facebook'], pageName: 'Page',
+          primaryText: 'Copy', destination: '+218900000000', creativeImages: ['data:image/png;base64,AAAA'], locations: ['Libya'], ageMin: 18, ageMax: 65,
+          startDate: '2099-01-01', endDate: '2099-01-07', durationDays: 7, budgetType: 'daily', budgetMinorUSD: 1000, _lastModified: 5 }];
+        f.run('_adsStudioIntakeOpen = null;');
+        f.notes.length = 0;
+        assert.equal(await f.run("submitAdsStudioCampaignOnce('short1')"), false);
+        const expected = en
+          ? [`${ios ? 'Your balance is not enough for this request' : 'Charge your wallet first'} — the total budget ($70.00) is held from it when you submit.`, 'Not enough wallet balance']
+          : [`${ios ? 'رصيد محفظتك لا يكفي لهذا الطلب' : 'اشحن محفظتك أولاً'} — إجمالي الميزانية ($70.00) يُحجز منها عند الإرسال.`, 'رصيد المحفظة غير كافٍ'];
+        assert.deepEqual(f.notes.map(note => [note.message, note.title, note.type]), [[...expected, 'error']], `${where}: the balance check before sending`);
+      }
+    });
+  }
 
   await test('R4 xss-injection-sweep-1: a quote stored in a receipt payment row stays inside its attribute on every receipt editor', async () => {
     const { sandbox, state, run } = loadBrowserSource();

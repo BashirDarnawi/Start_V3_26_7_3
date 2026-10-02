@@ -796,7 +796,8 @@ function renderStudioHealthSection() {
 // The sections of the v2 Team desk frame (15h, tab=review&section=…), drawn through the loader in
 // studio.js (15o0 renderStudioStaffSection) once this bundle is here. Nothing runs at load time.
 // - requests: the review queue (Submitted requests, never the reviewer's own), 20 a page; a request
-//   opens (&id=) with the customer's texts, photos, budget (total, or daily × days), page and post;
+//   opens (&id=) with the customer's texts, photos, budget (total, or daily × days), page and post,
+//   the exact goal and the declared special ad category (flagged; the launch checklist repeats both);
 //   the decision box has the 7 reason codes (15c ADS_STUDIO_REVIEW_REASONS) and the note; approval
 //   confirms in an in-page sheet, then shows the studio name with Copy;
 // - launch: Approved requests not linked yet (checklist, the studio name with Copy, the classic
@@ -1221,6 +1222,36 @@ function renderStudioDeskRequests(route) {
           ${renderStudioDeskMoreButton('requests', queue.length)}`;
 }
 
+// The exact goal the customer chose (goalDetail: video views, page likes…) in the builder's words (15l
+// studioBuilderGoal, in studio.js), followed by the objective it runs under when that is another word:
+// "Video views (Engagement)". A request without one (the classic screens) shows its objective alone,
+// as before (goal: ''); a goal the builder does not know is shown by its key.
+function studioDeskGoal(request) {
+  const text = value => String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  const objective = typeof adsStudioObjectiveLabel === 'function' ? text(adsStudioObjectiveLabel(request.objective)) : text(request.objective);
+  const key = text(request.goalDetail).slice(0, 40);
+  if (!key) return { goal: '', label: objective };
+  const known = typeof studioBuilderGoal === 'function' ? studioBuilderGoal(key) : null;
+  const goal = (known && text(adsStudioText(known.en, known.ar))) || key;
+  const other = !!text(request.objective) && text(request.objective) !== key && objective !== goal;
+  return { goal, label: other ? `${goal} (${objective})` : goal };
+}
+
+// The special ad categories the customer declared (housing, jobs, credit, politics), in the builder's
+// words (15l STUDIO_BUILDER_SPECIAL, in studio.js): Meta rejects or restricts such an ad when it is not
+// declared at setup, so the brief and the launch checklist flag them. '' when there is none ("none" is
+// the classic screens' "no category"); a category the builder does not know is shown by its key.
+function studioDeskSpecial(request) {
+  const known = typeof STUDIO_BUILDER_SPECIAL !== 'undefined' && Array.isArray(STUDIO_BUILDER_SPECIAL) ? STUDIO_BUILDER_SPECIAL : [];
+  const keys = (Array.isArray(request.specialAdCategories) ? request.specialAdCategories : [])
+    .map(item => String(item || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 60))
+    .filter(key => key && key !== 'none');
+  return Array.from(new Set(keys)).slice(0, 4).map(key => {
+    const row = known.find(item => Array.isArray(item) && item[0] === key);
+    return (row && String(adsStudioText(row[1], row[2]) || '')) || key;
+  }).join(adsStudioIsAr() ? '، ' : ', ');
+}
+
 function renderStudioDeskBrief(request) {
   const text = value => String(value || '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ').trim();
   const list = value => (Array.isArray(value) ? value.map(item => text(item)).filter(Boolean).join(', ') : '');
@@ -1229,8 +1260,9 @@ function renderStudioDeskBrief(request) {
   const destination = link(request.destination) || text(request.destination);
   const photos = typeof getEntityPhotoCountHint === 'function' ? Number(getEntityPhotoCountHint('adCampaignRequests', request)) || 0 : 0;
   const total = studioDeskPaid(request);
+  const special = studioDeskSpecial(request);
   const rows = [
-    [adsStudioText('Goal', 'الهدف'), typeof adsStudioObjectiveLabel === 'function' ? text(adsStudioObjectiveLabel(request.objective)) : text(request.objective)],
+    [adsStudioText('Goal', 'الهدف'), studioDeskGoal(request).label],
     [adsStudioText('Budget', 'الميزانية'), `${typeof adsStudioBudgetLine === 'function' ? adsStudioBudgetLine(request) : ''}${total ? ` · ${adsStudioText('holds', 'محجوز')} ${studioUsd(total)}` : ''}`],
     [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} → ${adsStudioFormatDate(request.endDate)}` : ''],
     [adsStudioText('Page', 'الصفحة'), text(request.pageName)],
@@ -1240,6 +1272,7 @@ function renderStudioDeskBrief(request) {
     [adsStudioText('Headline', 'العنوان'), text(request.headline)],
     [adsStudioText('Description', 'الوصف'), text(request.description)],
     [adsStudioText('Button', 'الزر'), text(request.callToAction)],
+    [adsStudioText('Auto-reply', 'الرد التلقائي'), request.autoReply === true ? adsStudioText('On: set up an automatic reply for people who message from this ad (the reply text is in the notes).', 'مفعّل: جهّز رداً تلقائياً لمن يراسل من هذا الإعلان (نص الرد في الملاحظات).') : ''],
     [adsStudioText('Notes', 'ملاحظات'), text(request.notes)]
   ].filter(([, value]) => value);
   const links = [];
@@ -1250,6 +1283,7 @@ function renderStudioDeskBrief(request) {
   return `
           <section class="studio-desk-box" data-testid="studio-desk-brief" aria-labelledby="studio-desk-brief-title">
             <h3 id="studio-desk-brief-title" class="studio-desk-h3">${studioEsc(adsStudioText("The customer's request", 'طلب العميل'))}</h3>
+            ${special ? `<p class="studio-flag" data-testid="studio-desk-special">${studioEsc(adsStudioText(`Special ad category: ${special}. Meta may limit age, gender and interest targeting for such ads; declare it in Meta when you build the ad.`, `فئة إعلانية خاصة: ${special}. قد تقيّد ميتا استهداف العمر والجنس والاهتمامات لهذه الإعلانات؛ صرّح بها في ميتا عند إنشاء الإعلان.`))}</p>` : ''}
             <dl class="studio-desk-dl">${rows.map(([label, value]) => `<div><dt>${studioEsc(label)}</dt><dd dir="auto">${studioEsc(String(value).slice(0, 3000))}</dd></div>`).join('')}</dl>
             ${links.length ? `<div class="studio-desk-actions">${links.join('')}</div>` : ''}
             ${typeof renderAdsStudioReviewHistory === 'function' ? renderAdsStudioReviewHistory(request) : ''}
@@ -1449,17 +1483,23 @@ function renderStudioDeskLaunchCard(request) {
                 </div>
               </li>`;
   }
+  const special = studioDeskSpecial(request);
+  const goal = studioDeskGoal(request);
+  // The declared special ad category is a flagged step: Meta rejects or restricts an ad built without it.
+  const declare = special ? adsStudioText(`Declare the special ad category in Meta: ${special}.`, `صرّح بالفئة الإعلانية الخاصة في ميتا: ${special}.`) : '';
   const checklist = [
     adsStudioText('Create the ad in Meta on one of Albayan\'s ad accounts (any name).', 'أنشئ الإعلان في ميتا على أحد حسابات البيان الإعلانية (بأي اسم).'),
+    declare,
+    goal.goal ? adsStudioText(`Set the ad up for the customer's goal: ${goal.label}.`, `اضبط الإعلان على هدف العميل: ${goal.label}.`) : '',
     adsStudioText('Put the studio code in the campaign name, or let Albayan rename it at the link.', 'ضع رمز الاستوديو في اسم الحملة، أو دع البيان يغيّر الاسم عند الربط.'),
     adsStudioText(`Keep the budget in Meta within what was paid${paid ? ` (${studioUsd(paid)})` : ''}: ${String(request.budgetType || '') === 'daily' ? 'daily × days' : 'lifetime'}.`, `اجعل الميزانية في ميتا ضمن المدفوع${paid ? ` (${studioUsd(paid)})` : ''}: ${String(request.budgetType || '') === 'daily' ? 'يومي × الأيام' : 'إجمالي'}.`)
-  ];
+  ].filter(Boolean);
   return `
               <li class="studio-desk-box studio-desk-launch" data-testid="studio-desk-launch-${id}">
                 <h3 class="studio-desk-h3" dir="auto">${studioEsc(studioDeskName(request))}</h3>
                 ${renderStudioDeskMeta(request)}
                 ${renderStudioDeskNameRow(request)}
-                <ol class="studio-desk-checklist">${checklist.map(item => `<li>${studioEsc(item)}</li>`).join('')}</ol>
+                <ol class="studio-desk-checklist">${checklist.map(item => `<li>${item === declare ? `<span class="studio-flag" data-testid="studio-desk-special-${id}">${studioEsc(item)}</span>` : studioEsc(item)}</li>`).join('')}</ol>
                 ${studioDeskStopBeforeRun(request) && studioDeskOwnRequest(request) ? `<p class="studio-desk-note" data-testid="studio-desk-own-${id}">${studioEsc(adsStudioText('This is your own ad: another team member settles it.', 'هذا إعلانك أنت: يسوّيه عضو آخر من الفريق.'))}</p>` : ''}
                 <div class="studio-desk-actions">
                   <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-link-${id}" onclick="openAdsStudioLinkSheet('${id}')">${studioDeskIcon('link-2')}<span>${studioEsc(adsStudioText('Link Meta campaign', 'اربط حملة ميتا'))}</span></button>

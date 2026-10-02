@@ -155,7 +155,9 @@ function clothesServerDetailText(detail) {
     const found = m[1] && (state.clothesProducts || []).find(p => p && p.id === m[1]);
     const product = found && found.name ? `"${found.name}"` : (isAr ? 'هذا المنتج' : 'this product');
     // One pass, so a "$" inside a product name is never read as a placeholder.
-    const out = (isAr ? ar : en).replace(/\$(P|\d)/g, (_, key) => (key === 'P' ? product : String(m[key] || '').toLowerCase()));
+    let out = (isAr ? ar : en).replace(/\$(P|\d)/g, (_, key) => (key === 'P' ? product : String(m[key] || '').toLowerCase()));
+    // The iPhone app sells nothing (inAppPurchasingHidden, 01-platform.js): it never says "renew it".
+    if (typeof inAppPurchasingHidden === 'function' && inAppPurchasingHidden()) out = out.replace(/ (?:Renew it, then try again|جدّد الاشتراك ثم أعد المحاولة)\.$/, '');
     return out.charAt(0).toUpperCase() + out.slice(1);
   }
   return typeof _serverRefusalText === 'function' ? _serverRefusalText(text) : text;
@@ -640,6 +642,26 @@ function renderClothesSystemView() {
 
   // Subscription gate for non-admins (view access alone is not enough)
   if (!isAdmin && !hasSubscription('clothes_system')) {
+    // The iPhone app sells nothing (inAppPurchasingHidden, 01-platform.js): no Subscribe button there,
+    // one neutral line that names no other way to pay, and the way back for staff with other pages
+    // (that button was their only control on this screen).
+    if (typeof inAppPurchasingHidden === 'function' && inAppPurchasingHidden()) {
+      return `
+      <div class="max-w-2xl mx-auto" data-testid="clothes-no-purchase">
+        ${showBack ? `<button onclick="navigateTo('${backView}')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
+          <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
+          <span>${isAr ? 'العودة' : 'Back'}</span>
+        </button>` : accountStrip}
+        <div class="glass-panel rounded-2xl p-12 text-center">
+          <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mb-6 shadow-2xl">
+            <i data-lucide="lock" class="w-10 h-10 text-white"></i>
+          </div>
+          <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${isAr ? 'هذه الخدمة غير مفعّلة في حسابك' : 'This service is not active on your account'}</h3>
+          <p class="text-slate-500 dark:text-slate-400">${isAr ? 'الشراء غير متاح في هذا التطبيق.' : 'Purchases are not available in this app.'}</p>
+        </div>
+      </div>
+    `;
+    }
     return `
       <div class="max-w-2xl mx-auto">
         ${accountStrip}

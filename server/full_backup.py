@@ -12,6 +12,9 @@ Why this exists beside the encrypted server backup:
 This module streams gzip-compressed NDJSON: one line per record, media
 included, with memory bounded by one stored row and small encoding buffers.
 A truncated download is detectable because the trailing footer line is missing.
+A backup the server itself could not finish (time limit, database error) is
+aborted instead of ended: the browser shows a failed download, and the partial
+file is not a finished gzip (its last readable line says ``complete: false``).
 
 DELIBERATELY EXCLUDED, and it must stay that way:
   * ``users.password_hash`` / ``password_salt`` / ``password_algo`` /
@@ -43,6 +46,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 
 from .db import get_engine
+from .startup_support import read_env_int
 
 BACKUP_FORMAT = "albayan-full-backup/1"
 # Yield at least this often so an idle-timeout proxy always sees traffic.
@@ -52,9 +56,21 @@ FLUSH_EVERY_BYTES = 256 * 1024
 # memory bound: fetch one row and encode its JSON in bounded chunks instead.
 ROW_BATCH = 1
 JSON_CHUNK_CHARS = 64 * 1024
-# A stream that runs longer than this ends with complete:false rather than
-# being cut off silently mid-record.
-MAX_STREAM_SECONDS = 30 * 60
+
+
+def _max_stream_seconds() -> int:
+    # The clock starts with the request and includes the time the browser takes
+    # to receive the file, so a large backup on a slow line needs a longer limit
+    # (1 minute to 6 hours; the default stays 30 minutes).
+    return read_env_int("ALBAYAN_FULL_BACKUP_MAX_SECONDS", 30 * 60, lo=60, hi=6 * 60 * 60)
+
+
+# A stream that runs longer than this stops between records with a
+# complete:false footer and is then aborted as a failed download (generate()).
+MAX_STREAM_SECONDS = _max_stream_seconds()
+
+# The download route, as the server sees it (router prefix + "/full").
+FULL_BACKUP_PATH = "/api/admin/backup/full"
 
 _STREAM_SLOT = threading.Semaphore(1)
 
@@ -117,6 +133,42 @@ class _BackupStreamingResponse(StreamingResponse):
                     await anyio.to_thread.run_sync(self._backup_iterator.close)
                 finally:
                     await anyio.to_thread.run_sync(self._backup_cleanup)
+
+
+class AbortCutBackupDownload:
+    """ASGI wrapper: a backup that was cut reaches the browser as a FAILED download.
+
+    generate() raises when a backup is incomplete, and the server (uvicorn)
+    answers an app that fails mid-body by dropping the connection without the
+    closing chunk. But every ``@app.middleware("http")`` layer (Starlette's
+    BaseHTTPMiddleware) turns that failure into a normally ENDED response and
+    re-raises only afterwards, so the browser still showed a finished download.
+    For the download route only, the closing chunk waits until the app has
+    returned without an error.
+
+    Add it AFTER (= outside) every ``@app.middleware("http")``.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("path") != FULL_BACKUP_PATH:
+            await self.app(scope, receive, send)
+            return
+        closing: Any = None
+
+        async def hold_closing_chunk(message: Any) -> None:
+            nonlocal closing
+            if message.get("type") == "http.response.body" and not message.get("more_body", False):
+                closing = message
+                return
+            await send(message)
+
+        # Raises for a cut backup: the closing chunk is then never sent.
+        await self.app(scope, receive, hold_closing_chunk)
+        if closing is not None:
+            await send(closing)
 
 
 def create_full_backup_router(
@@ -304,6 +356,17 @@ def create_full_backup_router(
                 }))
                 if footer:
                     yield footer
+                if not complete:
+                    # A cut or failed backup must never arrive as a finished
+                    # download: the owner kept that .gz as his full copy. Leave
+                    # the gzip without its trailer and fail the response, so the
+                    # connection drops without the closing chunk and the browser
+                    # reports a failed download (AbortCutBackupDownload). The sync
+                    # flush keeps the error/footer lines readable in the part.
+                    tail = compressor.flush(zlib.Z_SYNC_FLUSH)
+                    if tail:
+                        yield tail
+                    raise RuntimeError("full backup incomplete")
                 tail = compressor.flush(zlib.Z_FINISH)
                 if tail:
                     yield tail

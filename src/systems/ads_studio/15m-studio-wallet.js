@@ -484,15 +484,16 @@ function studioWalletPendingRows(summary) {
 }
 
 function renderStudioWalletActions(summary) {
+  const noBuy = adsStudioBuyingHidden();  // the iPhone app sells nothing (15c): no Add money, the neutral line
   const open = studioWalletPendingRows(summary).length;
-  const full = open >= STUDIO_WALLET_MAX_OPEN;
+  const full = !noBuy && open >= STUDIO_WALLET_MAX_OPEN;
   const loading = studioWalletSummaryState().loading || !!_studioWallet.listLoading;
   return `
             <div class="studio-v2-wallet-actions">
-              <button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-add" onclick="studioWalletOpenAdd()"${full ? ' disabled aria-describedby="studio-wallet-full"' : ''}>${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add money', 'أضف مالاً'))}</span></button>
+              ${noBuy ? '' : `<button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-add" onclick="studioWalletOpenAdd()"${full ? ' disabled aria-describedby="studio-wallet-full"' : ''}>${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add money', 'أضف مالاً'))}</span></button>`}
               <button type="button" class="studio-v2-action" data-testid="studio-wallet-refresh" onclick="studioWalletRefresh()"${loading ? ' aria-busy="true"' : ''}>${studioWalletIcon('refresh-cw')}<span>${studioEsc(loading ? adsStudioText('Reading…', 'جارٍ القراءة…') : adsStudioText('Refresh', 'تحديث'))}</span></button>
             </div>
-            ${full ? `<p id="studio-wallet-full" class="studio-v2-wallet-note">${studioEsc(adsStudioText(`You have ${STUDIO_WALLET_MAX_OPEN} payment requests waiting. Pay or cancel one of them to add more money.`, `لديك ${STUDIO_WALLET_MAX_OPEN} طلبات دفع تنتظر. ادفع أحدها أو ألغِه لتضيف مالاً آخر.`))}</p>` : ''}`;
+            ${full ? `<p id="studio-wallet-full" class="studio-v2-wallet-note">${studioEsc(adsStudioText(`You have ${STUDIO_WALLET_MAX_OPEN} payment requests waiting. Pay or cancel one of them to add more money.`, `لديك ${STUDIO_WALLET_MAX_OPEN} طلبات دفع تنتظر. ادفع أحدها أو ألغِه لتضيف مالاً آخر.`))}</p>` : ''}${noBuy ? adsStudioNoBuyLine('studio-v2-wallet-note') : ''}`;
 }
 
 // How to pay: the method's own instruction with the request's code and dinar amount filled in.
@@ -538,6 +539,7 @@ function renderStudioWalletReceipt(request) {
 function renderStudioWalletPending(summary) {
   const rows = studioWalletPendingRows(summary);
   if (!rows.length) return '';
+  const noBuy = adsStudioBuyingHidden();  // the iPhone app (15c): the request and Cancel, never how to pay it
   const card = item => {
     const request = item.request;
     const purpose = item.currency === 'LYD' ? adsStudioText('For your plan', 'لاشتراكك') : adsStudioText('For your ads', 'لإعلاناتك');
@@ -559,12 +561,12 @@ function renderStudioWalletPending(summary) {
                 <p class="studio-v2-wallet-code" data-testid="studio-wallet-reference">${studioLtr(item.reference)}</p>
                 <dl class="studio-v2-wallet-kv">
                   <div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('Amount', 'المبلغ'))}</dt><dd data-testid="studio-wallet-pending-amount">${studioLtr(studioWalletMoney(item.amountMinor, item.currency))}</dd></div>
-                  ${dinars}${method}
+                  ${noBuy ? '' : dinars + method}
                 </dl>
-                <p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${renderStudioWalletInstruction(request, item.reference)}</p>
+                ${noBuy ? '' : `<p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${renderStudioWalletInstruction(request, item.reference)}</p>`}
                 <p class="studio-v2-wallet-note">${studioWalletIcon('calendar-clock')} ${studioEsc(due)}</p>
                 <div class="studio-v2-wallet-actions is-compact">
-                  ${renderStudioWalletCopy(item.reference)}${renderStudioWalletReceipt(request)}${cancel}
+                  ${noBuy ? '' : renderStudioWalletCopy(item.reference) + renderStudioWalletReceipt(request)}${cancel}
                 </div>
               </article>`;
   };
@@ -692,10 +694,10 @@ function renderStudioWalletPlanCard(lydMinor) {
               <p class="studio-v2-wallet-note">${studioEsc(adsStudioText(
     'Dinars pay for your Albayan plan only. They never pay for ads, and your ad dollars never pay for the plan.',
     'الدينار لاشتراكك في البيان فقط؛ لا يدفع ثمن الإعلانات، ولا تدفع دولارات إعلاناتك ثمن الاشتراك.'))}</p>
-              <div class="studio-v2-wallet-actions">
+              ${adsStudioBuyingHidden() ? adsStudioNoBuyLine('studio-v2-wallet-note') : `<div class="studio-v2-wallet-actions">
                 <button type="button" class="studio-v2-action" data-testid="studio-wallet-renew" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioWalletIcon('crown')}<span>${studioEsc(adsStudioText('Renew or activate the plan', 'جدّد الاشتراك أو فعّله'))}</span></button>
                 <button type="button" class="studio-v2-action" data-testid="studio-wallet-add-lyd" onclick="studioWalletOpenAdd('plan')">${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add dinars for the plan', 'أضف ديناراً للاشتراك'))}</span></button>
-              </div>
+              </div>`}
             </section>`;
 }
 
@@ -992,6 +994,14 @@ function renderStudioWalletFlowNav(flow, next) {
 }
 
 function renderStudioWalletAdd() {
+  // The iPhone app sells nothing (15c adsStudioBuyingHidden): a link here shows the neutral line and the way back.
+  if (adsStudioBuyingHidden()) {
+    return `
+          <div class="studio-v2-wallet is-flow" data-testid="studio-wallet-add-flow" data-step="none">
+            ${adsStudioNoBuyLine('studio-v2-wallet-note')}
+            <div class="studio-v2-wallet-actions"><button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-done" onclick="studioWalletFinishAdd()">${studioWalletIcon('wallet')}<span>${studioEsc(adsStudioText('Back to the wallet', 'العودة إلى المحفظة'))}</span></button></div>
+          </div>`;
+  }
   const flow = studioWalletFlow();
   if (!_studioWallet.methods) studioWalletLoadMethods();
   if (flow.created) return renderStudioWalletCreated(flow);

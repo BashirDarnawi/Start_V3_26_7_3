@@ -141,6 +141,19 @@ function adsStudioText(en, ar) {
   return adsStudioIsAr() ? ar : en;
 }
 
+// The iPhone app sells nothing (inAppPurchasingHidden, 01-platform.js): every buy, activate, renew
+// and add-money control of the studio is hidden there, and this neutral line (it names no other way
+// or place to pay) stands in its place. The web and the Android app are unchanged.
+function adsStudioBuyingHidden() {
+  return typeof inAppPurchasingHidden === 'function' && inAppPurchasingHidden();
+}
+function adsStudioNoBuyText() {
+  return adsStudioText('Purchases are not available in this app.', 'الشراء غير متاح في هذا التطبيق.');
+}
+function adsStudioNoBuyLine(cls) {
+  return `<p class="${cls}" data-testid="studio-no-purchase">${adsStudioNoBuyText()}</p>`;
+}
+
 function adsStudioCanReview() {
   return isCurrentUserAdmin() || currentUserHasPermission('adCampaignRequests', 'review');
 }
@@ -470,13 +483,14 @@ function renderAdsStudioTabBar() {
 
 function renderAdsStudioSubscriptionGate() {
   const isAr = adsStudioIsAr();
+  const noBuy = adsStudioBuyingHidden();
   return `
     <div class="max-w-2xl mx-auto py-8 sm:py-16">
       <div class="glass-panel rounded-3xl p-6 sm:p-10 text-center border border-blue-100 dark:border-blue-900/40">
         <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center mb-6 shadow-xl"><i data-lucide="lock-keyhole" class="w-9 h-9 text-white"></i></div>
-        <h2 class="text-2xl font-black text-slate-900 dark:text-white mb-3">${isAr ? 'فعّل استوديو الإعلانات' : 'Activate Ads Studio'}</h2>
+        <h2 class="text-2xl font-black text-slate-900 dark:text-white mb-3">${noBuy ? adsStudioText('Ads Studio is not active on your account', 'استوديو الإعلانات غير مفعّل في حسابك') : (isAr ? 'فعّل استوديو الإعلانات' : 'Activate Ads Studio')}</h2>
         <p class="text-slate-500 dark:text-slate-400 mb-6">${isAr ? 'تحتاج إلى اشتراك نشط لإنشاء حملاتك وحفظها بأمان.' : 'An active subscription is required to create and securely save campaigns.'}</p>
-        <button type="button" onclick="showSubscriptionModal('ad_maker', 'ad_maker')" class="touch-target w-full sm:w-auto min-h-12 px-8 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold shadow-lg">${isAr ? 'تفعيل الخدمة' : 'Activate service'}</button>
+        ${noBuy ? adsStudioNoBuyLine('text-sm font-bold text-slate-600 dark:text-slate-300') : `<button type="button" onclick="showSubscriptionModal('ad_maker', 'ad_maker')" class="touch-target w-full sm:w-auto min-h-12 px-8 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold shadow-lg">${isAr ? 'تفعيل الخدمة' : 'Activate service'}</button>`}
       </div>
     </div>
   `;
@@ -498,8 +512,8 @@ function renderAdsStudioView() {
           <div class="mb-5 rounded-2xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200 flex items-start gap-3">
             <i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
             <span>${isAr
-              ? 'انتهى اشتراكك. لا يزال بإمكانك رؤية حملاتك وإيقاف أي حملة لاسترداد ما لم يُصرف إلى محفظتك. فعّل الخدمة لإنشاء حملات جديدة.'
-              : 'Your subscription has ended. You can still see your campaigns and stop any of them to return the unspent budget to your wallet. Activate the service to create new campaigns.'}</span>
+              ? 'انتهى اشتراكك. لا يزال بإمكانك رؤية حملاتك وإيقاف أي حملة لاسترداد ما لم يُصرف إلى محفظتك.'
+              : 'Your subscription has ended. You can still see your campaigns and stop any of them to return the unspent budget to your wallet.'}${adsStudioBuyingHidden() ? '' : (isAr ? ' فعّل الخدمة لإنشاء حملات جديدة.' : ' Activate the service to create new campaigns.')}</span>
           </div>
           ${renderAdsStudioCampaigns()}
           <div class="mt-6">${renderAdsStudioSubscriptionGate()}</div>
@@ -743,9 +757,17 @@ function renderAdsStudioCampaignCard(campaign) {
       ${renderAdsStudioResultsCard(campaign)}
       ${campaign.boostType === 'boost_post' && adsStudioIsValidBoostRef(campaign.sourcePostRef) ? `<div class="mt-3 text-xs"><a href="${Security.escapeHtml(String(campaign.sourcePostRef))}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 font-bold text-blue-600 hover:text-blue-700"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>${isAr ? 'فتح المنشور الأصلي' : 'Open the boosted post'}</a></div>` : ''}
       ${renderAdsStudioReviewFeedback(campaign)}
-      <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">
+      <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3"${adsStudioCanReview() && Array.isArray(campaign.specialAdCategories) && campaign.specialAdCategories.some(key => key && key !== 'none') ? ' open' : ''}>
         <summary class="touch-target min-h-11 cursor-pointer select-none text-sm font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i>${isAr ? 'عرض الملخص' : 'View brief'}</summary>
         <div class="grid gap-3 pt-3 sm:grid-cols-2 text-sm">
+          ${adsStudioCanReview() ? (() => {
+            // Staff only: the declared special ad category (it opens the brief) and the exact goal, in the builder's words (15l).
+            const special = (Array.isArray(campaign.specialAdCategories) ? campaign.specialAdCategories : []).filter(key => key && key !== 'none')
+              .map(key => { const row = typeof STUDIO_BUILDER_SPECIAL !== 'undefined' && STUDIO_BUILDER_SPECIAL.find(item => item[0] === key); return row ? row[isAr ? 2 : 1] : String(key); }).join(isAr ? '، ' : ', ');
+            const goal = campaign.goalDetail && typeof studioBuilderGoal === 'function' ? studioBuilderGoal(String(campaign.goalDetail)) : null;
+            return (special ? `<div class="sm:col-span-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 font-bold text-amber-800 dark:text-amber-200" data-ads-studio-special="1">${isAr ? 'فئة إعلانية خاصة (صرّح بها في ميتا):' : 'Special ad category (declare it in Meta):'} ${Security.escapeHtml(special)}</div>` : '')
+              + (goal ? `<div><span class="text-slate-500">${isAr ? 'الهدف الدقيق:' : 'Exact goal:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml(isAr ? goal.ar : goal.en)}</span></div>` : '');
+          })() : ''}
           <div><span class="text-slate-500">${isAr ? 'الصفحة:' : 'Page:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml(campaign.pageName || '—')}</span></div>
           <div><span class="text-slate-500">${isAr ? 'المنصات:' : 'Platforms:'}</span> <span class="font-semibold capitalize text-slate-800 dark:text-slate-100">${Security.escapeHtml(platforms || '—')}</span></div>
           <div><span class="text-slate-500">${isAr ? 'الموقع:' : 'Location:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml((campaign.locations || []).join(', ') || '—')}</span></div>
@@ -1281,9 +1303,10 @@ function adsStudioRefusalText(detail) {
   const text = Array.isArray(detail) ? detail.map(item => String(typeof item === 'string' ? item : (item?.msg || ''))).filter(Boolean).join('; ')
     : detail && typeof detail === 'object' ? String(detail.message || '') : String(detail || '');
   const hit = adsStudioRefusalEntry(text);
-  if (!adsStudioIsAr()) return hit && hit[3] ? hit[3] : text;
+  // No "charge the wallet first" where nothing is sold (the iPhone app): the server's English tail, and the Arabic one below.
+  if (!adsStudioIsAr()) return hit && hit[3] ? hit[3] : (adsStudioBuyingHidden() ? text.replace(/ — charge the wallet first$/, '') : text);
   if (!hit) return text;
-  if (!hit[2]) return hit[1];
+  if (!hit[2]) return adsStudioBuyingHidden() ? hit[1].split(' — اشحن')[0] : hit[1];
   const tail = text.slice(text.indexOf(hit[0]) + hit[0].length);
   if (hit[2] === 'days') {
     const days = tail.match(/\d+/);
@@ -3202,8 +3225,8 @@ function adsStudioBudgetWalletText(draft) {
   return available >= total
     ? adsStudioText(`Available in your wallet: ${adsStudioMoney(available)} — enough.`, `المتاح في محفظتك: ${adsStudioMoney(available)} — يكفي.`)
     : adsStudioText(
-      `Available in your wallet: ${adsStudioMoney(Math.max(0, available))} — short by ${adsStudioMoney(total - Math.max(0, available))}. Add money before you send.`,
-      `المتاح في محفظتك: ${adsStudioMoney(Math.max(0, available))} — ينقصك ${adsStudioMoney(total - Math.max(0, available))}. أضف رصيداً قبل الإرسال.`
+      `Available in your wallet: ${adsStudioMoney(Math.max(0, available))} — short by ${adsStudioMoney(total - Math.max(0, available))}.${adsStudioBuyingHidden() ? '' : ' Add money before you send.'}`,
+      `المتاح في محفظتك: ${adsStudioMoney(Math.max(0, available))} — ينقصك ${adsStudioMoney(total - Math.max(0, available))}.${adsStudioBuyingHidden() ? '' : ' أضف رصيداً قبل الإرسال.'}`
     );
 }
 
@@ -3581,8 +3604,8 @@ async function submitAdsStudioCampaignOnce(id) {
     showNotification(
       adsStudioText('Not enough wallet balance', 'رصيد المحفظة غير كافٍ'),
       adsStudioText(
-        `Charge your wallet first — the total budget (${adsStudioMoney(_budgetMinor)}) is held from it when you submit.`,
-        `اشحن محفظتك أولاً — إجمالي الميزانية (${adsStudioMoney(_budgetMinor)}) يُحجز منها عند الإرسال.`
+        `${adsStudioBuyingHidden() ? 'Your balance is not enough for this request' : 'Charge your wallet first'} — the total budget (${adsStudioMoney(_budgetMinor)}) is held from it when you submit.`,
+        `${adsStudioBuyingHidden() ? 'رصيد محفظتك لا يكفي لهذا الطلب' : 'اشحن محفظتك أولاً'} — إجمالي الميزانية (${adsStudioMoney(_budgetMinor)}) يُحجز منها عند الإرسال.`
       ),
       'error'
     );
@@ -4123,15 +4146,16 @@ function _adsStudioWalletRequestRow(entity, adminView) {
   // An LYD request (plan money) IS the cash: shown in LYD, never "$", and with no "≈" line (P1-08a).
   const currency = String(d.currency || 'USD').trim().toUpperCase() === 'LYD' ? 'LYD' : 'USD';
   const lyd = currency === 'USD' && d.amountMinorLYD ? ` • ≈ ${(d.amountMinorLYD / 100).toFixed(2)} LYD` : '';
+  const quiet = isPending && !adminView && adsStudioBuyingHidden();  // the iPhone app: their waiting request shows no way to pay it
   return `
     <div class="studio-wallet-request flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
       <div class="min-w-0">
         <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))} ${hasPhoto ? '<i data-lucide="paperclip" class="inline w-3.5 h-3.5 text-emerald-600"></i>' : ''}</div>
-        <div class="text-xs text-slate-500">${adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)}${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}</div>
+        <div class="text-xs text-slate-500">${adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)}${quiet ? '' : `${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}`}</div>
       </div>
       <div class="studio-wallet-request-actions flex flex-wrap items-center gap-2">
         <span class="text-xs font-bold ${statusColor}" data-status="${Security.escapeHtml(String(d.status || ''))}">${Security.escapeHtml(Object.prototype.hasOwnProperty.call(ADS_STUDIO_PAY_STATUS, String(d.status || '')) ? adsStudioText(...ADS_STUDIO_PAY_STATUS[String(d.status)]) : String(d.status || ''))}</span>
-        ${isPending && !adminView && entry && entry.requiresReceiptPhoto ? `
+        ${isPending && !adminView && entry && entry.requiresReceiptPhoto && !quiet ? `
           <label class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 cursor-pointer">
             <input type="file" accept="image/*" class="hidden" onchange="adsStudioAttachReceipt('${rid}', this)" />
             ${hasPhoto ? adsStudioText('Replace receipt', 'استبدال الإيصال') : adsStudioText('Attach receipt', 'إرفاق الإيصال')}
@@ -4178,7 +4202,7 @@ function renderAdsStudioWallet() {
         <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="workspace-money-value text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
       </div>
 
-      <div class="glass-panel rounded-2xl p-6">
+      ${adsStudioBuyingHidden() ? `<div class="glass-panel rounded-2xl p-6">${adsStudioNoBuyLine('text-sm text-slate-500')}</div>` : `<div class="glass-panel rounded-2xl p-6">
         <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
         <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
         <div class="mb-4">
@@ -4213,7 +4237,7 @@ function renderAdsStudioWallet() {
         <div class="rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
           ${adsStudioText('Payment methods did not load — check your connection and tap Refresh below.', 'لم يتم تحميل طرق الدفع — تأكد من الاتصال ثم اضغط "تحديث" بالأسفل.')}
         </div>`}
-      </div>
+      </div>`}
 
       ${isCurrentUserAdmin() && pendingAll.length ? `
       <div class="glass-panel rounded-2xl p-6">

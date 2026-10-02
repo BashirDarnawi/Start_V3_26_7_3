@@ -27,9 +27,8 @@ const Platform = {
     const ua = navigator.userAgent || '';
     const uaLower = ua.toLowerCase();
     
-    // Check for Capacitor (mobile app). document.URL is read defensively:
-    // headless test sandboxes stub document without it, and detect() is now
-    // reachable from routing paths (browser Back/overlay history model).
+    // Capacitor (mobile app). document.URL is read defensively: test sandboxes stub document
+    // without it, and routing paths reach detect().
     const docUrl = String((typeof document !== 'undefined' && document.URL) || '');
     const isCapacitor = typeof window.Capacitor !== 'undefined' ||
                         docUrl.startsWith('capacitor://') ||
@@ -71,23 +70,18 @@ const Platform = {
     if (!isCapacitor) {
       try {
         if (/FBAN|FBAV|FB_IAB|FBIOS/i.test(ua)) {
-          // Facebook family. Messenger ships the same FB tokens plus its own
-          // app names (MessengerForiOS / Orca-Android), so the sub-check is
-          // safe — it only runs once an FB token already matched.
+          // Facebook family; Messenger adds its own app names to the same FB tokens.
           isInAppBrowser = true;
           inAppBrowserKind = /messenger|orca/i.test(ua) ? 'messenger' : 'facebook';
         } else if (/instagram/i.test(ua)) {
           isInAppBrowser = true;
           inAppBrowserKind = 'instagram';
         } else if (/android/i.test(ua) && /; wv\)/.test(ua)) {
-          // Stock Android WebView marker (Chrome's "; wv)" token) — covers
-          // FB Lite, Gmail, and any other app hosting a bare WebView.
+          // Stock Android WebView ("; wv)"): FB Lite, Gmail, any app hosting a bare WebView.
           isInAppBrowser = true;
           inAppBrowserKind = 'android-webview';
         } else if (/\bLine\/|MicroMessenger|Snapchat|TikTok|musical_ly|BytedanceWebview|\bGSA\//i.test(ua)) {
-          // Other well-known in-app shells (LINE, WeChat, Snapchat, TikTok,
-          // the Google app). Same degraded capabilities; no finer branding
-          // is needed by any consumer.
+          // Other in-app shells (LINE, WeChat, Snapchat, TikTok, the Google app): same limits.
           isInAppBrowser = true;
           inAppBrowserKind = 'other';
         }
@@ -127,9 +121,7 @@ const Platform = {
   get supportsHover() { return this.detect().supportsHover; },
   get isMobile() { return this.detect().isMobile; },
   get isMobileBrowser() { return this.detect().isMobileBrowser; },
-  // In-app webview shells (Facebook/Instagram/Messenger, bare Android
-  // WebViews, other known app browsers). Consumers use this to degrade
-  // gracefully where those shells silently break downloads/printing.
+  // In-app webview shells: consumers degrade where those silently break downloads/printing.
   get isInAppBrowser() { return this.detect().isInAppBrowser; },
   // 'facebook' | 'instagram' | 'messenger' | 'android-webview' | 'other' | null
   get inAppBrowserKind() { return this.detect().inAppBrowserKind; },
@@ -164,14 +156,21 @@ if (document.readyState === 'loading') {
   Platform.applyBodyClasses();
 }
 
+// IPHONE APP: Apple allows only its own In-App Purchase for anything sold inside an app, so the owner
+// sells nothing there. True = hide every buy, subscribe and top-up button (balances, plans in use and
+// history stay). The web and the Android app are unchanged.
+function inAppPurchasingHidden() {
+  if (typeof Platform === 'undefined' || !Platform.isCapacitor) return false;
+  if (Platform.isIOS) return true;
+  // The same Apple build on an iPad, Mac or Vision Pro can send a desktop user agent: ask the shell.
+  try { return window.Capacitor.getPlatform() === 'ios'; } catch (_) { return false; }
+}
+
 // ==========================================
 // ROLE HELPERS
 // ==========================================
-// The server compares roles case-insensitively (server/main.py lowercases),
-// but the client used to do exact-case checks like role === 'Admin'. A role
-// stored as 'admin' would then pass ALL server permission checks while
-// failing the client's UI checks — half-privileged, inconsistent behavior.
-// These helpers make the client tolerant of case the same way the server is.
+// Case-insensitive like the server (main.py lowercases): a role stored as 'admin' passed every
+// server check while failing the UI's exact 'Admin' checks.
 function isAdminRole(role) {
   return String(role || '').trim().toLowerCase() === 'admin';
 }
@@ -198,10 +197,7 @@ document.addEventListener('visibilitychange', () => {
 function isPerformanceModeOn() {
   let pref = null;
   try { pref = localStorage.getItem('albayan_perf_mode'); } catch (_) {}
-  // Performance mode is the DEFAULT (user request): every device starts in
-  // lite mode; only an explicit 'full' choice in Settings restores the heavy
-  // glass/aurora effects. (Previously lite was only auto-enabled on weak
-  // hardware via a deviceMemory/cores heuristic.)
+  // Lite is the DEFAULT (user request): only an explicit 'full' in Settings restores the heavy effects.
   return pref !== 'full';
 }
 
@@ -3339,13 +3335,10 @@ async function clearIndexedDBLogs() {
     }
   });
 }
-// ==========================================
-// CONSTANTS & ENUMS
-// ==========================================
+// ===== CONSTANTS & ENUMS =====
 
-// The generic 'Bank Transfer' was removed — it duplicated the explicit
-// LYD/USD variants. LEGACY_PAYMENT_METHODS keeps it selectable ONLY on
-// receipts that already carry it, so old records still display/save correctly.
+// The generic 'Bank Transfer' duplicated the LYD/USD variants: LEGACY_PAYMENT_METHODS keeps it
+// selectable ONLY on receipts that already carry it, so old records still display and save.
 const PAYMENT_METHODS = [
   'Cash (LYD)', 'Cash (USD)', 'Libyana', 'Madar', 'LTT',
   'Transfer Office', 'Bank Transfer (LYD)',
@@ -3353,9 +3346,8 @@ const PAYMENT_METHODS = [
 ];
 const LEGACY_PAYMENT_METHODS = ['Bank Transfer'];
 
-// Payment methods for a given select: the current list, plus the record's own
-// legacy method when it is no longer offered (so editing an old receipt does
-// not silently switch its payment method).
+// Payment methods for a select: the current list plus the record's own legacy method, so editing
+// an old receipt never silently switches its payment method.
 function paymentMethodOptions(currentMethod) {
   const m = String(currentMethod || '').trim();
   if (m && !PAYMENT_METHODS.includes(m)) return [...PAYMENT_METHODS, m];
@@ -3374,9 +3366,7 @@ const BUSINESS_CONFIG = {
   RECEIPT_PROCESSING_FEE_LYD: 0, // Set to 0 - was 2.00 as placeholder; make configurable in settings if needed
 };
 
-// ==========================================
-// ADVANCED PERMISSIONS SYSTEM
-// ==========================================
+// ===== ADVANCED PERMISSIONS SYSTEM =====
 
 const PERMISSION_MODULES = {
   analytics: {
@@ -3708,6 +3698,19 @@ const PERMISSION_TEMPLATES = {
       // Reviewers see and decide every request; never rewrite or submit a customer's draft.
       adCampaignRequests: ['view', 'review']
     }
+  },
+  // The store reviewer's account (docs/store): it sees ONLY the records it created itself.
+  appReviewDemo: {
+    name: 'App Review demo',
+    description: 'Store reviewer: only the records this account created',
+    icon: 'smartphone',
+    color: 'violet',
+    permissions: {
+      customers: ['viewOwn', 'add'],
+      receipts: ['viewOwn'],
+      ads: ['viewOwn'],
+      deliveries: ['viewOwn']
+    }
   }
 };
 
@@ -3903,18 +3906,15 @@ function canActOnRecord(module, action, recordCreatorId) {
   return false;
 }
 
-// ==========================================
-// SUBSCRIPTION HELPERS (Services Hub)
-// ==========================================
+// ===== SUBSCRIPTION HELPERS (Services Hub) =====
 
 function hasSubscription(serviceId) {
   if (!state.currentUser) return false;
   if (isAdminRole(state.currentUser.role)) return true; // Admin gets all
   const uid = String(state.currentUser.id || '');
   if (uid && SUBSCRIPTIONS.isActive(uid, serviceId)) return true;
-  // In server mode only the server-owned subscription ledger is authoritative.
-  // The legacy array can be stale after cancellation (and is mutable client
-  // state), so it must never grant server-backed access.
+  // Server mode: only the server-owned subscription ledger grants access. The legacy array is
+  // mutable client state and can be stale after a cancellation.
   if (isServerModeEnabled()) return false;
   const subs = state.currentUser.subscriptions || [];
   return subs.includes(serviceId);
@@ -4023,6 +4023,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
   const idem = Security.generateSecureId('idem');
   state.modalData = { serviceId, serviceName, subscribeToId, planId: String(planId || ''), idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
+  if (inAppPurchasingHidden()) return;  // iPhone app: the sheet shows no price or balance to refresh
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
     // FORCE a fresh catalog: the shown price is the one the server checks (expectedPriceMinor).
     refreshSubscriptionPlans(true).then(() => {
@@ -4114,9 +4115,7 @@ async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
   }
 }
 
-// ==========================================
-// PASSWORD RESET (Advanced, Safe)
-// ==========================================
+// ===== PASSWORD RESET (Advanced, Safe) =====
 
 function generateRecoveryKeyPlain() {
   const bytes = new Uint8Array(32);
@@ -4342,9 +4341,7 @@ async function passwordResetConfirmLocal() {
   }
 }
 
-// ==========================================
-// PASSKEYS (WebAuthn) - Local-first, Safe Verification
-// ==========================================
+// ===== PASSKEYS (WebAuthn) - Local-first, Safe Verification =====
 
 function _bufToB64url(buf) {
   const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -22234,10 +22231,9 @@ function renderSettingsView() {
     </div>
   `;
 }
-// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS (split
-// out of 12-views.js). One responsive phone-first layout for web/iOS/Android;
-// every old action is kept. Prices come ONLY from the server plan catalog
-// (state.subscriptionPlans); purchases go through SUBSCRIPTIONS.purchasePlan.
+// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS: one phone-first layout for
+// web/iOS/Android. Prices come ONLY from the server plan catalog (state.subscriptionPlans); purchases
+// go through SUBSCRIPTIONS.purchasePlan. The iPhone app sells nothing (inAppPurchasingHidden).
 
 // ---------- shared helpers ----------
 
@@ -22249,9 +22245,13 @@ function hubEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
 }
 
-// Days left on the current user's real subscription rows for a service
-// (null when there is no dated active row — e.g. an Admin, who is granted
-// everything without buying it).
+// iPhone app: stands where a buy or top-up button was. Names no other way to pay; no link.
+function hubNoPurchaseLine(cls = 'text-center') {
+  return `<p class="text-xs text-slate-500 dark:text-slate-400 ${cls}">${hubText('Purchases are not available in this app.', 'الشراء غير متاح في هذا التطبيق.')}</p>`;
+}
+
+// Days left on the current user's subscription rows for a service (null with no dated active row,
+// e.g. an Admin, who is granted everything).
 function hubDaysLeft(serviceId) {
   const expiry = typeof getSubscriptionExpiryForCurrentUser === 'function'
     ? getSubscriptionExpiryForCurrentUser(serviceId)
@@ -22260,9 +22260,8 @@ function hubDaysLeft(serviceId) {
   return Math.max(0, Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
 }
 
-// Server plan that sells exactly this one service (the implicit `svc:<id>`
-// row, or any active single-service plan for it). Null until the catalog is
-// loaded — the hub then shows "Subscribe" instead of inventing a price.
+// The server plan selling exactly this one service (`svc:<id>`, or a single-service plan). Null until
+// the catalog loads: the hub then shows "Subscribe", never an invented price.
 function hubPlanForService(serviceId) {
   const sid = String(serviceId || '');
   const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
@@ -22295,15 +22294,14 @@ function hubPriceLabel(serviceId) {
   return `${hubMoney(price, plan.currency || 'LYD')} ${hubPeriodLabel(plan.durationDays)}`;
 }
 
-// One status object drives every pill on these screens:
-//   coming  -> "Coming soon"
-//   active  -> "Active · N d" (amber "Expires in N d" once ≤ 7 days remain)
-//   admin   -> "Included" (Admin is granted every service)
-//   locked  -> price from the server catalog, or "Subscribe"
+// One status object drives every pill: coming -> "Coming soon"; active -> "Active · N d" (amber
+// "Expires in N d" at ≤ 7 days); admin -> "Included" (an Admin is granted every service); locked ->
+// the catalog price or "Subscribe" ("Not active" in the iPhone app: no price to pay).
 function hubServiceStatus(serviceId) {
   const sid = String(serviceId || '');
   const svc = SERVICES[sid] || SMART_SYSTEMS_CHILDREN[sid];
-  if (!svc) return { kind: 'locked', label: hubText('Subscribe', 'اشترك'), tone: 'blue', days: null };
+  const locked = price => ({ kind: 'locked', label: inAppPurchasingHidden() ? hubText('Not active', 'غير مفعّلة') : (price || hubText('Subscribe', 'اشترك')), tone: 'blue', days: null });
+  if (!svc) return locked('');
   if (svc.comingSoon) return { kind: 'coming', label: hubText('Coming soon', 'قريباً'), tone: 'slate', days: null };
   const required = Array.isArray(svc.requiredSubscriptions) && svc.requiredSubscriptions.length
     ? svc.requiredSubscriptions
@@ -22327,8 +22325,7 @@ function hubServiceStatus(serviceId) {
   }
   if (!svc.requiresSubscription) return { kind: 'admin', label: hubText('Open', 'فتح'), tone: 'emerald', days: null };
   if (isCurrentUserAdmin()) return { kind: 'admin', label: hubText('Included', 'ضمن حسابك'), tone: 'emerald', days: null };
-  const price = hubPriceLabel(required[0] || sid);
-  return { kind: 'locked', label: price || hubText('Subscribe', 'اشترك'), tone: 'blue', days: null };
+  return locked(hubPriceLabel(required[0] || sid));
 }
 
 function hubPill(label, tone = 'slate', extraClass = '') {
@@ -22360,12 +22357,13 @@ function hubPageHeader(title, { backTo = 'services-hub', trailing = '' } = {}) {
     </div>`;
 }
 
-// Wallet balance card shared by the hub, plans and wallet screens.
+// Wallet balance card (hub, plans). iPhone app: the balance, then the neutral line.
 function hubWalletCard({ topUp = true, plansLink = false } = {}) {
   const uid = String(state.currentUser?.id || '');
   const balanceMinor = uid ? WALLET.getBalanceMinor(uid, 'LYD') : 0;
+  const noBuy = inAppPurchasingHidden();
   return `
-    <div class="hub-card flex items-center gap-3 p-3.5 mb-5">
+    <div class="hub-card flex items-center gap-3 p-3.5 ${noBuy ? 'mb-2' : 'mb-5'}">
       <button type="button" onclick="navigateTo('wallet')" class="flex flex-1 min-w-0 items-center gap-3 text-start touch-target">
         <span class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 flex items-center justify-center flex-shrink-0"><i data-lucide="wallet" class="w-5 h-5"></i></span>
         <span class="min-w-0">
@@ -22373,13 +22371,12 @@ function hubWalletCard({ topUp = true, plansLink = false } = {}) {
           <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, 'LYD'))}</span>
         </span>
       </button>
-      ${plansLink ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
-      ${topUp ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target min-h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 text-xs font-bold text-blue-700 dark:text-blue-300">${hubText('Top up', 'شحن')}</button>` : ''}
-    </div>`;
+      ${plansLink && !noBuy ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
+      ${topUp && !noBuy ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target min-h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 text-xs font-bold text-blue-700 dark:text-blue-300">${hubText('Top up', 'شحن')}</button>` : ''}
+    </div>${noBuy ? hubNoPurchaseLine('text-center mb-5') : ''}`;
 }
 
-// Load the server plan catalog once per session for price pills. Never
-// authoritative for money — the paywall forces a fresh fetch before buying.
+// The plan catalog once per session, for price pills only: the paywall fetches afresh before buying.
 let _hubPlansRequested = false;
 function hubEnsurePlansLoaded() {
   if (!isServerModeEnabled() || _hubPlansRequested) return;
@@ -22410,8 +22407,7 @@ function renderServicesHub() {
     .filter(s => s && s.id && s.id !== 'placeholder_coming_soon')
     .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
 
-  // Smart Systems children that are sold as their own product (clothes, Ads
-  // Studio) show as "your services" rows once bought, so they are one tap away.
+  // Smart Systems children sold on their own (clothes, Ads Studio) are "Your services" rows once bought.
   const ownedChildren = Object.values(SMART_SYSTEMS_CHILDREN)
     .filter(c => c && !c.comingSoon && Array.isArray(c.requiredSubscriptions) && !c.requiredSubscriptions.includes('smart_systems'))
     .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
@@ -22460,7 +22456,6 @@ function renderServicesHub() {
 
   return `
     <div class="hub-shell">
-      <!-- Header: avatar, greeting, quick actions (all pre-existing actions kept) -->
       <div class="flex items-center gap-3 mb-4">
         <div class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
           ${hubEsc(userName.charAt(0).toUpperCase())}
@@ -22480,7 +22475,6 @@ function renderServicesHub() {
 
       ${hubWalletCard({ topUp: true, plansLink: false })}
 
-      <!-- Hero -->
       <div class="hub-hero relative overflow-hidden rounded-3xl p-5 mb-6 text-white">
         <div class="absolute -top-10 -end-6 w-40 h-40 rounded-full bg-white/10"></div>
         <div class="relative flex items-center justify-between gap-4">
@@ -22500,7 +22494,7 @@ function renderServicesHub() {
 
       <div class="flex items-center justify-between mb-2.5">
         <div class="hub-section-title mb-0">${hubText('Explore', 'استكشف')}</div>
-        <button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 px-2 text-[13px] font-semibold text-blue-600 dark:text-blue-300">${hubText('Plans & bundles', 'الباقات والاشتراكات')}</button>
+        ${inAppPurchasingHidden() ? '' : `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 px-2 text-[13px] font-semibold text-blue-600 dark:text-blue-300">${hubText('Plans & bundles', 'الباقات والاشتراكات')}</button>`}
       </div>
       <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         ${exploreHtml}
@@ -22559,7 +22553,7 @@ function renderSmartSystems() {
           <div class="mt-2 text-2xl font-black">${hubText('Smart Systems', 'الأنظمة الذكية')}</div>
           <div class="mt-2 flex items-center justify-between gap-3">
             <span class="text-xs text-white/70">${children.length} ${hubText('systems', 'أنظمة')}</span>
-            <button type="button" onclick="showSubscriptionModal('smart_systems', 'smart_systems')" class="touch-target min-h-10 rounded-full bg-white/20 px-4 text-xs font-bold text-white hover:bg-white/30">${headerCta}</button>
+            ${inAppPurchasingHidden() ? '' : `<button type="button" onclick="showSubscriptionModal('smart_systems', 'smart_systems')" class="touch-target min-h-10 rounded-full bg-white/20 px-4 text-xs font-bold text-white hover:bg-white/30">${headerCta}</button>`}
           </div>
         </div>
       </div>
@@ -22599,7 +22593,9 @@ function hubPlanIsActive(plan) {
 function renderPlanRow(plan) {
   const isRTL = state.language === 'ar';
   const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
-  const bestValue = plan.badge === 'best_value' || isBundle;
+  // iPhone app: a read-only row, with no price, offer badge or buy button.
+  const noBuy = inAppPurchasingHidden();
+  const bestValue = !noBuy && (plan.badge === 'best_value' || isBundle);
   const price = Math.max(0, Number(plan.priceMinor) || 0);
   const { active, days } = hubPlanIsActive(plan);
   const soon = active && days !== null && days <= 7;
@@ -22612,12 +22608,12 @@ function renderPlanRow(plan) {
         ${bestValue ? `<span class="rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2.5 py-1 text-[10px] font-extrabold text-white">${hubText('Best value', 'الأفضل قيمة')}</span>` : ''}
       </div>
       ${isBundle ? `<div class="flex flex-wrap gap-1.5 my-1.5">${includes}</div>` : `<div class="text-xs text-slate-500 dark:text-slate-400">${hubText('Single service', 'خدمة واحدة')}</div>`}
-      ${Number(plan.savingsPct) > 0 ? `<div class="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${hubText(`Save ${Number(plan.savingsPct)}%`, `وفّر ${Number(plan.savingsPct)}%`)}</div>` : ''}
+      ${!noBuy && Number(plan.savingsPct) > 0 ? `<div class="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${hubText(`Save ${Number(plan.savingsPct)}%`, `وفّر ${Number(plan.savingsPct)}%`)}</div>` : ''}
       <div class="mt-2.5 flex items-center justify-between gap-3">
-        <span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>
-        ${active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : ''}
+        ${noBuy ? '' : `<span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>`}
+        ${active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : noBuy ? hubPill(hubText('Not active', 'غير مفعّلة')) : ''}
       </div>
-      <button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>
+      ${noBuy ? '' : `<button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>`}
     </div>`;
 }
 
@@ -22633,7 +22629,9 @@ function renderPlansView() {
     });
 
   let body = '';
-  if (!isServerModeEnabled()) {
+  if (inAppPurchasingHidden() && (!plans.length || !isServerModeEnabled())) {
+    // iPhone app: no price catalog to wait for, no "subscribe" hint.
+  } else if (!isServerModeEnabled()) {
     body = `
       <div class="hub-card p-5 text-sm text-slate-600 dark:text-slate-300">
         <div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Plans need the server connection', 'الباقات تحتاج إلى اتصال الخادم')}</div>
@@ -22664,8 +22662,7 @@ function renderPlansView() {
   `;
 }
 
-// Opens the paywall sheet with this plan pre-selected. The modal fetches a
-// fresh catalog before any purchase — the row on screen is never trusted.
+// Opens the paywall sheet on this plan; it fetches a fresh catalog before any purchase.
 function openPlanPaywall(planId) {
   const pid = String(planId || '');
   const plan = (Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : []).find(p => p && String(p.id) === pid);
@@ -22791,15 +22788,17 @@ async function chargeWalletCreateRequest() {
 
 function renderChargeWalletView() {
   const isRTL = state.language === 'ar';
-  ensureWalletPayMethods();
+  // iPhone app: a leftover link gets the neutral card and a way back; nothing is fetched.
+  const noBuy = inAppPurchasingHidden();
+  if (!noBuy) ensureWalletPayMethods();
 
-  if (!isServerModeEnabled()) {
+  if (noBuy || !isServerModeEnabled()) {
     return `
       <div class="hub-shell">
-        ${hubPageHeader(hubText('Charge wallet', 'اشحن المحفظة'))}
+        ${hubPageHeader(noBuy ? t('wallet') : hubText('Charge wallet', 'اشحن المحفظة'))}
         <div class="hub-card p-5 text-sm text-slate-600 dark:text-slate-300">
-          <div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Local mode', 'الوضع المحلي')}</div>
-          ${hubText('Charge requests need the server connection. In local mode an Admin can add balance from the Wallet screen.', 'طلبات الشحن تحتاج إلى اتصال الخادم. في الوضع المحلي يمكن للمدير إضافة رصيد من شاشة المحفظة.')}
+          ${noBuy ? hubNoPurchaseLine() : `<div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Local mode', 'الوضع المحلي')}</div>
+          ${hubText('Charge requests need the server connection. In local mode an Admin can add balance from the Wallet screen.', 'طلبات الشحن تحتاج إلى اتصال الخادم. في الوضع المحلي يمكن للمدير إضافة رصيد من شاشة المحفظة.')}`}
           <button type="button" onclick="navigateTo('wallet')" class="touch-target mt-4 w-full min-h-12 rounded-xl bg-slate-200 dark:bg-slate-700 font-bold text-slate-800 dark:text-white">${t('wallet')}</button>
         </div>
       </div>`;
@@ -22958,6 +22957,7 @@ function renderWalletView() {
   const isRTL = state.language === 'ar';
   const uid = String(state.currentUser?.id || '');
   const isAdmin = isAdminRole(state.currentUser?.role);
+  const noBuy = inAppPurchasingHidden();  // iPhone app: no Charge wallet, Plans or Top Up
 
   const balances = [];
   if (uid) {
@@ -23056,10 +23056,10 @@ function renderWalletView() {
           <div class="text-xs text-slate-500 dark:text-slate-400">${t('balance')}</div>
           <div class="space-y-0.5 mt-0.5">${balancesHtml}</div>
         </div>
-        <div class="flex w-full sm:w-auto gap-2">
+        ${noBuy ? hubNoPurchaseLine('w-full') : `<div class="flex w-full sm:w-auto gap-2">
           ${isServerModeEnabled() ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target flex-1 sm:flex-none min-h-11 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 text-sm font-bold text-white btn-shine">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>` : ''}
           <button type="button" onclick="navigateTo('plans')" class="touch-target flex-1 sm:flex-none min-h-11 rounded-xl bg-slate-100 dark:bg-slate-800 px-4 text-sm font-bold text-slate-700 dark:text-slate-200">${isRTL ? 'الباقات' : 'Plans & bundles'}</button>
-        </div>
+        </div>`}
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -23095,7 +23095,7 @@ function renderWalletView() {
           </div>
         </div>
 
-        ${isAdmin ? (isServerModeEnabled() ? `
+        ${isAdmin ? (noBuy ? '' : isServerModeEnabled() ? `
           <div class="hub-card p-6">
             <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-2">${t('topUp')}</h3>
             <p class="text-sm text-slate-500 dark:text-slate-400">
@@ -23178,10 +23178,8 @@ function handleServiceClick(serviceId) {
     }
   }
 
-  // Navigate to service
   const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
-  // Through the router: address, history entry, scroll reset and in-flight
-  // request cancellation, like every other navigation.
+  // Through the router like every other navigation: address, history, scroll reset, request cancellation.
   state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
   navigateToInternal(targetView, true);
 }
@@ -23202,9 +23200,8 @@ function handleSmartSystemClick(systemId) {
   const access = checkServiceAccess(systemId);
   if (!access.allowed) {
     if (access.reason === 'not_subscribed') {
-      // An expired Ads Studio customer whose campaigns still hold money must
-      // reach the read-only view (and its Stop & refund button) — the view
-      // shows the activate card itself. Everyone else sees the paywall.
+      // An expired Ads Studio customer whose campaigns still hold money must reach the read-only view
+      // (Stop & refund); it shows the activate card itself. Everyone else sees the paywall.
       const moneyRecovery = systemId === 'ad_maker'
         && typeof adsStudioCanViewOwn === 'function' && adsStudioCanViewOwn()
         && typeof adsStudioHasRecoverableCampaigns === 'function' && adsStudioHasRecoverableCampaigns();
@@ -23215,7 +23212,6 @@ function handleSmartSystemClick(systemId) {
     }
   }
 
-  // Navigate to system
   const targetView = system.openView || (systemId === 'albayan_manager' ? 'analytics' : 'service-placeholder');
   state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
   navigateToInternal(targetView, true);
@@ -37846,13 +37842,11 @@ function renderModal() {
           ${state.language === 'ar' ? (isEdit ? 'تعديل عميل' : 'إضافة عميل') : `${isEdit ? 'Edit' : 'Add'} Customer`}
         </h2>
         <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
-          <!-- Name -->
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'الاسم *' : 'Name *'}</label>
             <input type="text" id="customer-name" value="${Security.escapeHtml(custData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${state.language === 'ar' ? 'اسم العميل' : 'Customer name'}" />
           </div>
 
-          <!-- Platform -->
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'المنصة *' : 'Platform *'}</label>
             <select id="customer-platform" class="w-full glass-input px-4 py-2 rounded-xl">
@@ -37860,13 +37854,12 @@ function renderModal() {
             </select>
           </div>
 
-          <!-- Join Date -->
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'تاريخ الانضمام' : 'Join Date'}</label>
             <input type="date" id="customer-joindate" value="${Security.escapeHtml(custData.joinDate ? custData.joinDate.split('T')[0] : getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
 
-          ${hideContacts ? `<p class="text-sm text-slate-500">${state.language === 'ar' ? 'بيانات الاتصال مخفية عن دورك وستبقى كما هي.' : 'Contact details are hidden for your role and stay as they are.'}</p>` : `<!-- Phone Numbers -->
+          ${hideContacts ? `<p class="text-sm text-slate-500">${state.language === 'ar' ? 'بيانات الاتصال مخفية عن دورك وستبقى كما هي.' : 'Contact details are hidden for your role and stay as they are.'}</p>` : `
           <div>
             <div class="flex justify-between items-center mb-2">
               <label class="block text-sm font-medium">${state.language === 'ar' ? 'أرقام الهاتف *' : 'Phone Numbers *'}</label>
@@ -37889,7 +37882,6 @@ function renderModal() {
             </div>
           </div>
 
-          <!-- Profile Links -->
           <div>
             <div class="flex justify-between items-center mb-2">
               <label class="block text-sm font-medium">${state.language === 'ar' ? 'روابط الملف الشخصي' : 'Profile Links'}</label>
@@ -38190,7 +38182,6 @@ function renderModal() {
                 ${isArAd ? 'معلومات أساسية' : 'Basic Info'}
               </div>
               
-              <!-- Creator -->
               <div class="flex items-center justify-between p-2 bg-white dark:bg-slate-900 rounded-lg">
                 <div class="flex items-center space-x-2">
                   <div class="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 font-bold text-xs">
@@ -38204,7 +38195,6 @@ function renderModal() {
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
               
-              <!-- Page Selection -->
               <div>
                 <label for="ad-page-search" class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 ${metaPageLocked ? `
@@ -38270,7 +38260,6 @@ function renderModal() {
                 `}
               </div>
               
-              <!-- Customer -->
               <div id="ad-customer-section" class="${(adData.pageId || metaLockedPage) ? '' : 'hidden'}">
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'العميل' : 'Customer'} <span class="text-slate-400" id="ad-customer-hint">${isArAd ? '(يُختار تلقائياً)' : '(auto-selected)'}</span></label>
                 <div id="ad-customer-display" class="bg-white dark:bg-slate-900 rounded-lg p-2"></div>
@@ -38644,7 +38633,6 @@ function renderModal() {
             </div>
           ` : ''}
 
-          <!-- Role Info -->
           <div id="role-info" class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="flex items-center space-x-3">
               <div id="role-icon" class="w-10 h-10 rounded-xl flex items-center justify-center ${isAdminRole(userData.role) ? 'bg-amber-100 dark:bg-amber-900/30' : isDeliveryRole(userData.role) ? 'bg-cyan-100 dark:bg-cyan-900/30' : 'bg-emerald-100 dark:bg-emerald-900/30'}">
@@ -38665,7 +38653,6 @@ function renderModal() {
           </div>
           
           ${isEdit && !isAdminRole(userData.role) && userPermSummary ? `
-            <!-- Current Permissions Summary -->
             <div class="p-4 rounded-xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
@@ -38689,7 +38676,6 @@ function renderModal() {
               `}
             </div>
           ` : !isEdit ? `
-            <!-- New User Permission Info -->
             <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
               <div class="flex items-start space-x-3">
                 <i data-lucide="info" class="w-5 h-5 text-blue-600 mt-0.5"></i>
@@ -38756,7 +38742,6 @@ function renderModal() {
             })()}
           </div>
 
-            <!-- Customer Linking Section -->
             <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
               <div class="flex items-center space-x-2 mb-3">
                 <i data-lucide="users" class="w-4 h-4 text-blue-600"></i>
@@ -38881,7 +38866,6 @@ function renderModal() {
               </div>
             </div>
             ` : ''}
-            <!-- Phone Search Section -->
             <div class="receipt-phone-search grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2 flex items-center">
@@ -38912,7 +38896,6 @@ function renderModal() {
               </div>
             </div>
 
-            <!-- Receipt Number -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'رقم الوصل' : 'Receipt Number'}</label>
               <input type="text" id="receipt-serial" value="${Security.escapeHtml(String(receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''))}" 
@@ -38924,7 +38907,6 @@ function renderModal() {
               <div id="receipt-temp-hint" class="hidden mt-1 text-xs text-indigo-600 font-medium"></div>
             </div>
 
-            <!-- Status Tabs -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5" id="receipt-status-tabs">
@@ -39208,7 +39190,6 @@ function renderModal() {
                 </button>
               </div>
 
-              <!-- Payment Methods Label -->
               <div class="mb-2">
                 <label class="text-[10px] font-bold text-slate-500 uppercase">${isArR ? 'طرق الدفع' : 'Payment Methods'}</label>
                 </div>
@@ -39219,7 +39200,6 @@ function renderModal() {
                 </div>
             </div>
 
-            <!-- Photos -->
             <div class="px-1">
               <div data-photo-paste-target="receipt" tabindex="0" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -39245,7 +39225,6 @@ function renderModal() {
               </div>
             </div>
 
-            <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
               <button type="button" id="receipt-save-btn" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
                 <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
@@ -39733,6 +39712,16 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
+      // iPhone app: nothing is sold in it, so the sheet has no price, Subscribe or Charge wallet.
+      if (inAppPurchasingHidden()) {
+        const isArLock = state.language === 'ar';
+        modalContent = `
+          <h2>${Security.escapeHtml(String(state.modalData?.serviceName || ''))}</h2>
+          <p class="text-sm">${isArLock ? 'هذه الخدمة غير مفعّلة في حسابك.' : 'This service is not active on your account.'}</p>
+          ${hubNoPurchaseLine('mt-2')}
+          <button type="button" onclick="closeModal()" class="touch-target mt-4 w-full font-bold">${isArLock ? 'إغلاق' : 'Close'}</button>`;
+        break;
+      }
       // Paywall: server-catalog plans only, bought via handleSubscribePlan; a short wallet goes to
       // Charge wallet (the shortfall).
       const lockServiceId = state.modalData?.serviceId || '';
@@ -39962,16 +39951,15 @@ function renderModal() {
   const modal = document.createElement('div');
   modal.id = 'app-modal';
   modal.className = 'mobile-dialog-overlay app-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
-  // Smaller, more compact modal sizes
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
     modalSize = 'max-w-4xl';
   } else if (state.activeModal === 'customer-merge') {
     modalSize = 'max-w-3xl';
   } else if (state.activeModal === 'ad') {
-    modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
+    modalSize = 'max-w-xl';
   } else if (state.activeModal === 'receipt') {
-    modalSize = 'max-w-lg'; // Compact size for receipts
+    modalSize = 'max-w-lg';
   } else if (state.activeModal === 'clothes-product') {
     modalSize = 'max-w-xl'; // Room for the color/size/qty rows
   } else if (state.activeModal === 'clothes-shipment') {
@@ -40043,7 +40031,6 @@ function renderModal() {
     }, 0);
   }
   
-  // Initialize receipt totals if it's a receipt modal
   if (state.activeModal === 'receipt') {
     setTimeout(() => {
       updateReceiptTotals();
@@ -40051,9 +40038,8 @@ function renderModal() {
       // such a method (editing too); opening the form never renumbers an existing receipt.
       initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
-      // Pre-populate customer if editing. Use the RECEIPT's own stored phone —
-      // seeding the customer's first phone rewrote receipt.phoneNumber on save
-      // for any receipt taken on a second number.
+      // Editing: pre-fill the customer with the RECEIPT's own stored phone (the customer's first
+      // phone rewrote receipt.phoneNumber on save for a receipt taken on a second number).
       if (state.modalData && state.modalData.customerId) {
         const customer = state.customers.find(c => c.id === state.modalData.customerId);
         if (customer && Array.isArray(customer.phones) && customer.phones.length > 0) {
@@ -40087,7 +40073,6 @@ function renderModal() {
       if (initAdPageId) {
         const preserveFunding = state.modalData !== null; // keep existing allocations during edit init
         selectAdPage(initAdPageId, preserveFunding);
-        // If there's already a customer, select it
         if (adData.customerId) {
           selectAdCustomer(adData.customerId, true);
         }
@@ -40794,7 +40779,6 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
       const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
       // A blank phone passes `required` but is filtered out above: without this the customer had no
@@ -40806,7 +40790,6 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Check for duplicate phone numbers with other customers
       const currentCustomerId = isEdit ? state.modalData.id : null;
       const duplicatePhone = !hideContacts && checkDuplicatePhone(phones, currentCustomerId);
       if (duplicatePhone) {
@@ -40820,11 +40803,9 @@ async function handleModalSubmit() {
         return; // Stop here, don't close modal
       }
 
-      // Collect all profile links
       const linkInputs = document.querySelectorAll('.customer-link');
       const profileLinks = Array.from(linkInputs).map(input => input.value.trim()).filter(l => l);
 
-      // Get join date
       const joinDateValue = document.getElementById('customer-joindate').value;
       const joinDate = joinDateValue ? new Date(joinDateValue).toISOString() : new Date().toISOString();
 
@@ -41731,7 +41712,6 @@ async function handleModalSubmit() {
         }
       }
 
-      // Get default permissions based on role
       const getDefaultPermissions = (role) => {
         switch (role) {
           case 'Admin':
@@ -41771,7 +41751,6 @@ async function handleModalSubmit() {
             }
           }
 
-          // Role-based permissions defaults
           const oldRole = state.modalData.role;
           if (oldRole !== userRole) {
             if (isAdminRole(userRole)) {
@@ -41888,7 +41867,6 @@ async function handleModalSubmit() {
         if (!userSaved) return;
         showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
         
-        // Show permission modal for non-admin users
         if (!isAdminRole(userRole)) {
           setTimeout(() => {
             showPermissionsModal(user.id);
@@ -41941,11 +41919,9 @@ async function handleModalSubmit() {
         }
       }
 
-      // Get selected customer IDs
       const selectedCustomers = Array.from(document.querySelectorAll('.page-customer-item'))
         .map(item => item.getAttribute('data-customer-id'));
 
-      // Validate at least one customer
       if (selectedCustomers.length === 0) {
         showNotification(
           isArPage ? 'خطأ في الإدخال' : 'Validation Error',
@@ -42070,22 +42046,19 @@ function closeModal() {
   // Clean the URL when nothing was consumed: a ?modal= surviving a closed dialog reopens it on refresh.
   if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
-  // Force remove ALL modals - be very aggressive
+  // Aggressive on purpose: every modal, the duplicate warning and any lingering overlay go; then re-render.
   document.querySelectorAll('#app-modal').forEach(el => {
     el.style.display = 'none';
     el.remove();
   });
   
-  // Also remove any lingering modals (duplicate warning, etc.)
   const duplicateWarning = document.getElementById('duplicate-receipt-warning');
   if (duplicateWarning) {
     duplicateWarning.remove();
   }
   
-  // Remove any modal overlays that might be lingering
   document.querySelectorAll('.fixed.inset-0.bg-slate-900\\/60').forEach(el => el.remove());
   
-  // Force re-render to ensure UI is updated
   setTimeout(() => {
     render();
     lucide.createIcons();

@@ -425,11 +425,13 @@ function renderStudioPgSections(view) {
 }
 
 function renderStudioPgPlanEnded() {
+  // The iPhone app sells nothing (15c, studio.js): no Renew there, the neutral line instead.
+  const noBuy = typeof adsStudioBuyingHidden === 'function' && adsStudioBuyingHidden();
   return `
           <section class="studio-pg-card" data-testid="studio-pg-plan-ended">
             <h2 class="studio-pg-h2">${studioEsc(studioPgText('Your plan has ended', 'انتهى اشتراكك'))}</h2>
-            <p class="studio-pg-note">${studioEsc(studioPgText('Pages, reply rules and posts come back as soon as you renew your plan. Nothing of yours was removed.', 'تعود الصفحات وقواعد الرد والمنشورات فور تجديد اشتراكك. لم يُحذف شيء مما لديك.'))}</p>
-            ${studioPgInV2() ? `<button type="button" class="studio-v2-action is-primary" data-testid="studio-pg-renew" onclick="studioV2Open('wallet')">${studioPgIcon('wallet')}<span>${studioEsc(studioPgText('Renew from Wallet', 'جدّد من المحفظة'))}</span></button>` : ''}
+            <p class="studio-pg-note">${studioEsc(noBuy ? studioPgText('Pages, reply rules and posts need an active plan. Nothing of yours was removed.', 'الصفحات وقواعد الرد والمنشورات تحتاج اشتراكاً نشطاً. لم يُحذف شيء مما لديك.') : studioPgText('Pages, reply rules and posts come back as soon as you renew your plan. Nothing of yours was removed.', 'تعود الصفحات وقواعد الرد والمنشورات فور تجديد اشتراكك. لم يُحذف شيء مما لديك.'))}</p>
+            ${noBuy ? adsStudioNoBuyLine('studio-pg-note') : (studioPgInV2() ? `<button type="button" class="studio-v2-action is-primary" data-testid="studio-pg-renew" onclick="studioV2Open('wallet')">${studioPgIcon('wallet')}<span>${studioEsc(studioPgText('Renew from Wallet', 'جدّد من المحفظة'))}</span></button>` : '')}
           </section>`;
 }
 

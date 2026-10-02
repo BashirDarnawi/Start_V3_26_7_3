@@ -135,7 +135,7 @@ from .auth_limits import (
     _setup_rate_check,
 )
 from .app_links import WELL_KNOWN_PATHS, create_app_links_router
-from .full_backup import create_full_backup_router
+from .full_backup import AbortCutBackupDownload, create_full_backup_router
 from .subscription_plans import (
     PLAN_SETTINGS_KEY,
     create_subscription_plans_router,
@@ -239,7 +239,7 @@ from .schemas import (
 )
 from .security import (
     PBKDF2_ITERATIONS_DEFAULT, constant_time_equal, hash_password, hash_token, new_id,
-    new_session_cookie_value, normalize_signin_email, parse_session_cookie_value, verify_password,
+    new_session_cookie_value, normalize_signin_email, parse_session_cookie_value, signin_email_or_400, verify_password,
 )
 from .auth_security import upgrade_password_hash_after_login
 from .user_audit import user_create_audit_metadata, user_update_audit
@@ -1004,7 +1004,7 @@ def _get_user_by_email(email: str) -> Optional[dict[str, Any]]:
         row = (
             conn.execute(
                 text("SELECT * FROM users WHERE lower(email)=lower(:email) AND deleted = false LIMIT 1"),
-                {"email": email},
+                {"email": str(email).lower()},  # lower-cased as it was stored: the database's lower() skips or differs on non-ASCII letters
             )
             .mappings()
             .first()
@@ -2416,7 +2416,7 @@ def _bootstrap_first_admin_if_empty():
 
     This avoids needing to exec into the container for initial setup.
     """
-    email = (os.getenv("ALBAYAN_BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
+    email = (os.getenv("ALBAYAN_BOOTSTRAP_ADMIN_EMAIL") or "").strip()  # normalize_signin_email lower-cases it, after its own checks
     password = os.getenv("ALBAYAN_BOOTSTRAP_ADMIN_PASSWORD") or ""
     name = (os.getenv("ALBAYAN_BOOTSTRAP_ADMIN_NAME") or "Admin").strip() or "Admin"
 
@@ -3288,7 +3288,7 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
     if not secrets.compare_digest(submitted_token.encode("utf-8"), SETUP_TOKEN.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Invalid setup token")
 
-    email = str(payload.email).strip().lower()
+    email = signin_email_or_400(payload.email)  # the stored form must itself be a valid sign-in address
     name = (payload.name or "").strip() or "Admin"
     password = payload.password or ""
     if len(password) < 8:
@@ -13222,8 +13222,8 @@ def _free_email_if_soft_deleted(email: str, now: int) -> bool:
 def _privacy_anonymized_email(user_id: str) -> str:
     """Stable, non-identifying address for a retained user tombstone."""
     opaque_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
-    # Use an application-owned domain because UserPublic validates addresses
-    # and intentionally rejects reserved ``.invalid`` domains.
+    # Use an application-owned domain: the API's address rule (EmailStr)
+    # intentionally rejects reserved ``.invalid`` domains.
     return f"deleted-{opaque_id}@privacy.albayanhub.com"
 
 
@@ -13565,6 +13565,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
             raise HTTPException(status_code=403, detail="Only an Admin can create Admin accounts")
         if requested_role != "Employee" and not user_has_permission(admin, "users", "changeRole"):
             raise HTTPException(status_code=403, detail="users.changeRole is required to create this role")
+    email = signin_email_or_400(body.email)  # the stored form must itself be a valid sign-in address
     now = now_ms()
     pw = hash_password(body.password, iterations=PBKDF2_ITERATIONS_DEFAULT)
 
@@ -13591,7 +13592,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
                 {
                     "id": user_id,
                     "name": sanitize_str(body.name),
-                    "email": str(body.email).lower(),
+                    "email": email,
                     "role": requested_role,
                     "permissions_json": permissions_json,
                     "password_hash": pw.hash_hex,
@@ -13697,7 +13698,7 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     if body.name is not None:
         update_fields["name"] = sanitize_str(body.name)
     if body.email is not None:
-        update_fields["email"] = str(body.email).lower()
+        update_fields["email"] = signin_email_or_400(body.email)  # 400 before anything is written (was a 500 after the commit)
     if requested_role is not None:
         update_fields["role"] = requested_role
     if requested_permissions is not None:
@@ -13953,6 +13954,7 @@ app.include_router(
         release_sha=RELEASE_SHA,
     )
 )
+app.add_middleware(AbortCutBackupDownload)  # the last one added = outside every @app.middleware("http") layer
 app.include_router(create_audit_router(  # /api/audit, /cleanup, /stats (server/audit_routes.py)
     current_user_dependency=current_user, require_same_origin=require_same_origin,
     ctx={"user_has_permission": lambda *a, **k: user_has_permission(*a, **k),

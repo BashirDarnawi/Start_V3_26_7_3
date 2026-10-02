@@ -253,13 +253,11 @@ function renderModal() {
           ${state.language === 'ar' ? (isEdit ? 'تعديل عميل' : 'إضافة عميل') : `${isEdit ? 'Edit' : 'Add'} Customer`}
         </h2>
         <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
-          <!-- Name -->
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'الاسم *' : 'Name *'}</label>
             <input type="text" id="customer-name" value="${Security.escapeHtml(custData.name || '')}" required class="w-full glass-input px-4 py-2 rounded-xl" placeholder="${state.language === 'ar' ? 'اسم العميل' : 'Customer name'}" />
           </div>
 
-          <!-- Platform -->
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'المنصة *' : 'Platform *'}</label>
             <select id="customer-platform" class="w-full glass-input px-4 py-2 rounded-xl">
@@ -267,13 +265,12 @@ function renderModal() {
             </select>
           </div>
 
-          <!-- Join Date -->
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'تاريخ الانضمام' : 'Join Date'}</label>
             <input type="date" id="customer-joindate" value="${Security.escapeHtml(custData.joinDate ? custData.joinDate.split('T')[0] : getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
 
-          ${hideContacts ? `<p class="text-sm text-slate-500">${state.language === 'ar' ? 'بيانات الاتصال مخفية عن دورك وستبقى كما هي.' : 'Contact details are hidden for your role and stay as they are.'}</p>` : `<!-- Phone Numbers -->
+          ${hideContacts ? `<p class="text-sm text-slate-500">${state.language === 'ar' ? 'بيانات الاتصال مخفية عن دورك وستبقى كما هي.' : 'Contact details are hidden for your role and stay as they are.'}</p>` : `
           <div>
             <div class="flex justify-between items-center mb-2">
               <label class="block text-sm font-medium">${state.language === 'ar' ? 'أرقام الهاتف *' : 'Phone Numbers *'}</label>
@@ -296,7 +293,6 @@ function renderModal() {
             </div>
           </div>
 
-          <!-- Profile Links -->
           <div>
             <div class="flex justify-between items-center mb-2">
               <label class="block text-sm font-medium">${state.language === 'ar' ? 'روابط الملف الشخصي' : 'Profile Links'}</label>
@@ -597,7 +593,6 @@ function renderModal() {
                 ${isArAd ? 'معلومات أساسية' : 'Basic Info'}
               </div>
               
-              <!-- Creator -->
               <div class="flex items-center justify-between p-2 bg-white dark:bg-slate-900 rounded-lg">
                 <div class="flex items-center space-x-2">
                   <div class="w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 font-bold text-xs">
@@ -611,7 +606,6 @@ function renderModal() {
               </div>
               <input type="hidden" id="ad-creator-id" value="${adCreator?.id || state.currentUser?.id || ''}" />
               
-              <!-- Page Selection -->
               <div>
                 <label for="ad-page-search" class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 ${metaPageLocked ? `
@@ -677,7 +671,6 @@ function renderModal() {
                 `}
               </div>
               
-              <!-- Customer -->
               <div id="ad-customer-section" class="${(adData.pageId || metaLockedPage) ? '' : 'hidden'}">
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'العميل' : 'Customer'} <span class="text-slate-400" id="ad-customer-hint">${isArAd ? '(يُختار تلقائياً)' : '(auto-selected)'}</span></label>
                 <div id="ad-customer-display" class="bg-white dark:bg-slate-900 rounded-lg p-2"></div>
@@ -1051,7 +1044,6 @@ function renderModal() {
             </div>
           ` : ''}
 
-          <!-- Role Info -->
           <div id="role-info" class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="flex items-center space-x-3">
               <div id="role-icon" class="w-10 h-10 rounded-xl flex items-center justify-center ${isAdminRole(userData.role) ? 'bg-amber-100 dark:bg-amber-900/30' : isDeliveryRole(userData.role) ? 'bg-cyan-100 dark:bg-cyan-900/30' : 'bg-emerald-100 dark:bg-emerald-900/30'}">
@@ -1072,7 +1064,6 @@ function renderModal() {
           </div>
           
           ${isEdit && !isAdminRole(userData.role) && userPermSummary ? `
-            <!-- Current Permissions Summary -->
             <div class="p-4 rounded-xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center space-x-2">
@@ -1096,7 +1087,6 @@ function renderModal() {
               `}
             </div>
           ` : !isEdit ? `
-            <!-- New User Permission Info -->
             <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
               <div class="flex items-start space-x-3">
                 <i data-lucide="info" class="w-5 h-5 text-blue-600 mt-0.5"></i>
@@ -1163,7 +1153,6 @@ function renderModal() {
             })()}
           </div>
 
-            <!-- Customer Linking Section -->
             <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
               <div class="flex items-center space-x-2 mb-3">
                 <i data-lucide="users" class="w-4 h-4 text-blue-600"></i>
@@ -1288,7 +1277,6 @@ function renderModal() {
               </div>
             </div>
             ` : ''}
-            <!-- Phone Search Section -->
             <div class="receipt-phone-search grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-2 flex items-center">
@@ -1319,7 +1307,6 @@ function renderModal() {
               </div>
             </div>
 
-            <!-- Receipt Number -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'رقم الوصل' : 'Receipt Number'}</label>
               <input type="text" id="receipt-serial" value="${Security.escapeHtml(String(receiptData.serialNumber || receiptData.finalReceiptNo || receiptData.tempReceiptNo || ''))}" 
@@ -1331,7 +1318,6 @@ function renderModal() {
               <div id="receipt-temp-hint" class="hidden mt-1 text-xs text-indigo-600 font-medium"></div>
             </div>
 
-            <!-- Status Tabs -->
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5" id="receipt-status-tabs">
@@ -1615,7 +1601,6 @@ function renderModal() {
                 </button>
               </div>
 
-              <!-- Payment Methods Label -->
               <div class="mb-2">
                 <label class="text-[10px] font-bold text-slate-500 uppercase">${isArR ? 'طرق الدفع' : 'Payment Methods'}</label>
                 </div>
@@ -1626,7 +1611,6 @@ function renderModal() {
                 </div>
             </div>
 
-            <!-- Photos -->
             <div class="px-1">
               <div data-photo-paste-target="receipt" tabindex="0" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -1652,7 +1636,6 @@ function renderModal() {
               </div>
             </div>
 
-            <!-- Action Buttons -->
             <div class="flex space-x-2 px-1 pt-3 border-t border-slate-200 dark:border-slate-700">
               <button type="button" id="receipt-save-btn" onclick="saveReceiptFromModal()" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-purple-700">
                 <i data-lucide="check" class="w-4 h-4 inline mr-1.5"></i>${isArR ? (isEdit ? 'حفظ' : 'إنشاء') : (isEdit ? 'Save' : 'Create')}
@@ -2140,6 +2123,16 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
+      // iPhone app: nothing is sold in it, so the sheet has no price, Subscribe or Charge wallet.
+      if (inAppPurchasingHidden()) {
+        const isArLock = state.language === 'ar';
+        modalContent = `
+          <h2>${Security.escapeHtml(String(state.modalData?.serviceName || ''))}</h2>
+          <p class="text-sm">${isArLock ? 'هذه الخدمة غير مفعّلة في حسابك.' : 'This service is not active on your account.'}</p>
+          ${hubNoPurchaseLine('mt-2')}
+          <button type="button" onclick="closeModal()" class="touch-target mt-4 w-full font-bold">${isArLock ? 'إغلاق' : 'Close'}</button>`;
+        break;
+      }
       // Paywall: server-catalog plans only, bought via handleSubscribePlan; a short wallet goes to
       // Charge wallet (the shortfall).
       const lockServiceId = state.modalData?.serviceId || '';
@@ -2369,16 +2362,15 @@ function renderModal() {
   const modal = document.createElement('div');
   modal.id = 'app-modal';
   modal.className = 'mobile-dialog-overlay app-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
-  // Smaller, more compact modal sizes
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
     modalSize = 'max-w-4xl';
   } else if (state.activeModal === 'customer-merge') {
     modalSize = 'max-w-3xl';
   } else if (state.activeModal === 'ad') {
-    modalSize = 'max-w-xl'; // Wider modal for new Ad design with sections
+    modalSize = 'max-w-xl';
   } else if (state.activeModal === 'receipt') {
-    modalSize = 'max-w-lg'; // Compact size for receipts
+    modalSize = 'max-w-lg';
   } else if (state.activeModal === 'clothes-product') {
     modalSize = 'max-w-xl'; // Room for the color/size/qty rows
   } else if (state.activeModal === 'clothes-shipment') {
@@ -2450,7 +2442,6 @@ function renderModal() {
     }, 0);
   }
   
-  // Initialize receipt totals if it's a receipt modal
   if (state.activeModal === 'receipt') {
     setTimeout(() => {
       updateReceiptTotals();
@@ -2458,9 +2449,8 @@ function renderModal() {
       // such a method (editing too); opening the form never renumbers an existing receipt.
       initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
-      // Pre-populate customer if editing. Use the RECEIPT's own stored phone —
-      // seeding the customer's first phone rewrote receipt.phoneNumber on save
-      // for any receipt taken on a second number.
+      // Editing: pre-fill the customer with the RECEIPT's own stored phone (the customer's first
+      // phone rewrote receipt.phoneNumber on save for a receipt taken on a second number).
       if (state.modalData && state.modalData.customerId) {
         const customer = state.customers.find(c => c.id === state.modalData.customerId);
         if (customer && Array.isArray(customer.phones) && customer.phones.length > 0) {
@@ -2494,7 +2484,6 @@ function renderModal() {
       if (initAdPageId) {
         const preserveFunding = state.modalData !== null; // keep existing allocations during edit init
         selectAdPage(initAdPageId, preserveFunding);
-        // If there's already a customer, select it
         if (adData.customerId) {
           selectAdCustomer(adData.customerId, true);
         }
@@ -3201,7 +3190,6 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
       const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
       // A blank phone passes `required` but is filtered out above: without this the customer had no
@@ -3213,7 +3201,6 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Check for duplicate phone numbers with other customers
       const currentCustomerId = isEdit ? state.modalData.id : null;
       const duplicatePhone = !hideContacts && checkDuplicatePhone(phones, currentCustomerId);
       if (duplicatePhone) {
@@ -3227,11 +3214,9 @@ async function handleModalSubmit() {
         return; // Stop here, don't close modal
       }
 
-      // Collect all profile links
       const linkInputs = document.querySelectorAll('.customer-link');
       const profileLinks = Array.from(linkInputs).map(input => input.value.trim()).filter(l => l);
 
-      // Get join date
       const joinDateValue = document.getElementById('customer-joindate').value;
       const joinDate = joinDateValue ? new Date(joinDateValue).toISOString() : new Date().toISOString();
 
@@ -4138,7 +4123,6 @@ async function handleModalSubmit() {
         }
       }
 
-      // Get default permissions based on role
       const getDefaultPermissions = (role) => {
         switch (role) {
           case 'Admin':
@@ -4178,7 +4162,6 @@ async function handleModalSubmit() {
             }
           }
 
-          // Role-based permissions defaults
           const oldRole = state.modalData.role;
           if (oldRole !== userRole) {
             if (isAdminRole(userRole)) {
@@ -4295,7 +4278,6 @@ async function handleModalSubmit() {
         if (!userSaved) return;
         showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
         
-        // Show permission modal for non-admin users
         if (!isAdminRole(userRole)) {
           setTimeout(() => {
             showPermissionsModal(user.id);
@@ -4348,11 +4330,9 @@ async function handleModalSubmit() {
         }
       }
 
-      // Get selected customer IDs
       const selectedCustomers = Array.from(document.querySelectorAll('.page-customer-item'))
         .map(item => item.getAttribute('data-customer-id'));
 
-      // Validate at least one customer
       if (selectedCustomers.length === 0) {
         showNotification(
           isArPage ? 'خطأ في الإدخال' : 'Validation Error',
@@ -4477,22 +4457,19 @@ function closeModal() {
   // Clean the URL when nothing was consumed: a ?modal= surviving a closed dialog reopens it on refresh.
   if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
-  // Force remove ALL modals - be very aggressive
+  // Aggressive on purpose: every modal, the duplicate warning and any lingering overlay go; then re-render.
   document.querySelectorAll('#app-modal').forEach(el => {
     el.style.display = 'none';
     el.remove();
   });
   
-  // Also remove any lingering modals (duplicate warning, etc.)
   const duplicateWarning = document.getElementById('duplicate-receipt-warning');
   if (duplicateWarning) {
     duplicateWarning.remove();
   }
   
-  // Remove any modal overlays that might be lingering
   document.querySelectorAll('.fixed.inset-0.bg-slate-900\\/60').forEach(el => el.remove());
   
-  // Force re-render to ensure UI is updated
   setTimeout(() => {
     render();
     lucide.createIcons();

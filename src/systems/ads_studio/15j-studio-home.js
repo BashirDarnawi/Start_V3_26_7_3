@@ -436,11 +436,13 @@ function studioHomeNeeds(requests, wallet) {
   const usd = wallet && wallet.usd && typeof wallet.usd === 'object' ? wallet.usd : null;
   const available = usd ? studioDataMinor(usd.availableMinor) : null;
   if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded() && !adsStudioStartupLoading()) {
+    const noBuy = adsStudioBuyingHidden();  // the iPhone app sells nothing (15c): no Renew there
     items.push({
       key: 'plan', icon: 'badge-alert', tone: 'orange',
       title: adsStudioText('Your plan has ended', 'انتهى اشتراكك'),
-      text: adsStudioText('Renew it to send new requests. Your money and your ads stay safe meanwhile.', 'جدّده لترسل طلبات جديدة. أموالك وإعلاناتك تبقى محفوظة في الأثناء.'),
-      button: adsStudioText('Renew', 'جدّد'), onclick: "showSubscriptionModal('ad_maker', 'ad_maker')"
+      text: noBuy ? `${adsStudioText('Your money and your ads stay safe.', 'أموالك وإعلاناتك تبقى محفوظة.')} ${adsStudioNoBuyText()}`
+        : adsStudioText('Renew it to send new requests. Your money and your ads stay safe meanwhile.', 'جدّده لترسل طلبات جديدة. أموالك وإعلاناتك تبقى محفوظة في الأثناء.'),
+      button: noBuy ? '' : adsStudioText('Renew', 'جدّد'), onclick: noBuy ? '' : "showSubscriptionModal('ad_maker', 'ad_maker')"
     });
   }
   for (const request of requests.filter(row => String(row.status || '') === 'Changes Requested')) {
@@ -501,7 +503,7 @@ function renderStudioHomeNeeds(items, loading) {
                   <p class="studio-home-need-title">${studioEsc(item.title)}</p>
                   ${item.text ? `<p class="studio-home-need-note"${item.textAuto ? ' dir="auto"' : ''}>${studioEsc(item.text)}</p>` : ''}
                 </div>
-                <button type="button" class="studio-v2-action" onclick="${item.onclick}">${studioEsc(item.button)}</button>
+                ${item.button ? `<button type="button" class="studio-v2-action" onclick="${item.onclick}">${studioEsc(item.button)}</button>` : ''}
               </li>`).join('');
   const empty = loading
     ? adsStudioText('Checking what needs you…', 'نتحقق مما يحتاجك…')
@@ -531,7 +533,7 @@ function renderStudioHomeStart(requests, wallet) {
       "studioV2Open('wallet')", 'Add money', 'أضف مالاً'],
     ['first', requests.some(row => String(row.status || 'Draft') !== 'Draft'), 'Send your first ad request', 'أرسل أول طلب إعلان', 'Our team reviews it before anything is charged', 'يراجعه فريقنا قبل خصم أي مبلغ',
       "studioHomeGoal('messages')", 'Start', 'ابدأ']
-  ];
+  ].filter(step => !(adsStudioBuyingHidden() && ['plan', 'money'].includes(step[0])));  // the iPhone app sells nothing (15c)
   const nextIndex = steps.findIndex(step => step[1] !== true);
   const rows = steps.map(([key, done, en, ar, hintEn, hintAr, onclick, buttonEn, buttonAr], index) => {
     const status = done === true
@@ -604,7 +606,7 @@ function renderStudioHomeGoals(paused) {
               </li>`;
   }).join('');
   let note = '';
-  if (!canAsk && adsStudioCanCreate() && !adsStudioStartupLoading()) note =adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
+  if (!canAsk && adsStudioCanCreate() && !adsStudioStartupLoading()) note = adsStudioBuyingHidden() ? adsStudioText('Your plan is not active.', 'اشتراكك غير نشط.') : adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
   else if (paused) note = adsStudioText('Sending is paused for now: your request is saved as a draft until we open again.', 'الإرسال متوقف مؤقتاً: يُحفظ طلبك مسودةً حتى نستأنف.');
   return `
           <section class="studio-home-block" data-testid="studio-home-goals" aria-labelledby="studio-home-goals-title">

@@ -4,6 +4,7 @@ import re
 import secrets
 from dataclasses import dataclass
 
+from fastapi import HTTPException
 from pydantic import EmailStr, TypeAdapter
 
 
@@ -20,8 +21,25 @@ def normalize_signin_email(raw: object) -> str:
     Raises ValueError (pydantic's ValidationError) for an address the API
     refuses: an admin stored as e.g. owner@albayan could never sign in, and
     its row made GET /api/users answer 500 for every user manager.
+
+    The STORED form is the one that must be valid, and lower-casing can break
+    it: "\u0130" (a dotted capital I) becomes two characters, so 33 of them pass
+    the 64-character rule, were stored as 66 and broke that same list; a single
+    one was stored as an address its owner could never sign in with again.
     """
-    return str(_SIGNIN_EMAIL.validate_python(str(raw or "").strip())).lower()
+    value = str(_SIGNIN_EMAIL.validate_python(str(raw or "").strip()))
+    stored = value.lower()
+    if any(len(char.lower()) != 1 for char in value) or str(_SIGNIN_EMAIL.validate_python(stored)) != stored:
+        raise ValueError("Not a valid sign-in email")
+    return stored
+
+
+def signin_email_or_400(raw: object) -> str:
+    """normalize_signin_email for a request: a refused address answers HTTP 400."""
+    try:
+        return normalize_signin_email(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Not a valid sign-in email") from None
 
 
 def new_id(prefix: str) -> str:

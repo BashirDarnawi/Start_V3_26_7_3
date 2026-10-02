@@ -141,6 +141,19 @@ function adsStudioText(en, ar) {
   return adsStudioIsAr() ? ar : en;
 }
 
+// The iPhone app sells nothing (inAppPurchasingHidden, 01-platform.js): every buy, activate, renew
+// and add-money control of the studio is hidden there, and this neutral line (it names no other way
+// or place to pay) stands in its place. The web and the Android app are unchanged.
+function adsStudioBuyingHidden() {
+  return typeof inAppPurchasingHidden === 'function' && inAppPurchasingHidden();
+}
+function adsStudioNoBuyText() {
+  return adsStudioText('Purchases are not available in this app.', 'الشراء غير متاح في هذا التطبيق.');
+}
+function adsStudioNoBuyLine(cls) {
+  return `<p class="${cls}" data-testid="studio-no-purchase">${adsStudioNoBuyText()}</p>`;
+}
+
 function adsStudioCanReview() {
   return isCurrentUserAdmin() || currentUserHasPermission('adCampaignRequests', 'review');
 }
@@ -470,13 +483,14 @@ function renderAdsStudioTabBar() {
 
 function renderAdsStudioSubscriptionGate() {
   const isAr = adsStudioIsAr();
+  const noBuy = adsStudioBuyingHidden();
   return `
     <div class="max-w-2xl mx-auto py-8 sm:py-16">
       <div class="glass-panel rounded-3xl p-6 sm:p-10 text-center border border-blue-100 dark:border-blue-900/40">
         <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center mb-6 shadow-xl"><i data-lucide="lock-keyhole" class="w-9 h-9 text-white"></i></div>
-        <h2 class="text-2xl font-black text-slate-900 dark:text-white mb-3">${isAr ? 'فعّل استوديو الإعلانات' : 'Activate Ads Studio'}</h2>
+        <h2 class="text-2xl font-black text-slate-900 dark:text-white mb-3">${noBuy ? adsStudioText('Ads Studio is not active on your account', 'استوديو الإعلانات غير مفعّل في حسابك') : (isAr ? 'فعّل استوديو الإعلانات' : 'Activate Ads Studio')}</h2>
         <p class="text-slate-500 dark:text-slate-400 mb-6">${isAr ? 'تحتاج إلى اشتراك نشط لإنشاء حملاتك وحفظها بأمان.' : 'An active subscription is required to create and securely save campaigns.'}</p>
-        <button type="button" onclick="showSubscriptionModal('ad_maker', 'ad_maker')" class="touch-target w-full sm:w-auto min-h-12 px-8 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold shadow-lg">${isAr ? 'تفعيل الخدمة' : 'Activate service'}</button>
+        ${noBuy ? adsStudioNoBuyLine('text-sm font-bold text-slate-600 dark:text-slate-300') : `<button type="button" onclick="showSubscriptionModal('ad_maker', 'ad_maker')" class="touch-target w-full sm:w-auto min-h-12 px-8 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-bold shadow-lg">${isAr ? 'تفعيل الخدمة' : 'Activate service'}</button>`}
       </div>
     </div>
   `;
@@ -498,8 +512,8 @@ function renderAdsStudioView() {
           <div class="mb-5 rounded-2xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200 flex items-start gap-3">
             <i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
             <span>${isAr
-              ? 'انتهى اشتراكك. لا يزال بإمكانك رؤية حملاتك وإيقاف أي حملة لاسترداد ما لم يُصرف إلى محفظتك. فعّل الخدمة لإنشاء حملات جديدة.'
-              : 'Your subscription has ended. You can still see your campaigns and stop any of them to return the unspent budget to your wallet. Activate the service to create new campaigns.'}</span>
+              ? 'انتهى اشتراكك. لا يزال بإمكانك رؤية حملاتك وإيقاف أي حملة لاسترداد ما لم يُصرف إلى محفظتك.'
+              : 'Your subscription has ended. You can still see your campaigns and stop any of them to return the unspent budget to your wallet.'}${adsStudioBuyingHidden() ? '' : (isAr ? ' فعّل الخدمة لإنشاء حملات جديدة.' : ' Activate the service to create new campaigns.')}</span>
           </div>
           ${renderAdsStudioCampaigns()}
           <div class="mt-6">${renderAdsStudioSubscriptionGate()}</div>
@@ -743,9 +757,17 @@ function renderAdsStudioCampaignCard(campaign) {
       ${renderAdsStudioResultsCard(campaign)}
       ${campaign.boostType === 'boost_post' && adsStudioIsValidBoostRef(campaign.sourcePostRef) ? `<div class="mt-3 text-xs"><a href="${Security.escapeHtml(String(campaign.sourcePostRef))}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 font-bold text-blue-600 hover:text-blue-700"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>${isAr ? 'فتح المنشور الأصلي' : 'Open the boosted post'}</a></div>` : ''}
       ${renderAdsStudioReviewFeedback(campaign)}
-      <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">
+      <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3"${adsStudioCanReview() && Array.isArray(campaign.specialAdCategories) && campaign.specialAdCategories.some(key => key && key !== 'none') ? ' open' : ''}>
         <summary class="touch-target min-h-11 cursor-pointer select-none text-sm font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i>${isAr ? 'عرض الملخص' : 'View brief'}</summary>
         <div class="grid gap-3 pt-3 sm:grid-cols-2 text-sm">
+          ${adsStudioCanReview() ? (() => {
+            // Staff only: the declared special ad category (it opens the brief) and the exact goal, in the builder's words (15l).
+            const special = (Array.isArray(campaign.specialAdCategories) ? campaign.specialAdCategories : []).filter(key => key && key !== 'none')
+              .map(key => { const row = typeof STUDIO_BUILDER_SPECIAL !== 'undefined' && STUDIO_BUILDER_SPECIAL.find(item => item[0] === key); return row ? row[isAr ? 2 : 1] : String(key); }).join(isAr ? '، ' : ', ');
+            const goal = campaign.goalDetail && typeof studioBuilderGoal === 'function' ? studioBuilderGoal(String(campaign.goalDetail)) : null;
+            return (special ? `<div class="sm:col-span-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 font-bold text-amber-800 dark:text-amber-200" data-ads-studio-special="1">${isAr ? 'فئة إعلانية خاصة (صرّح بها في ميتا):' : 'Special ad category (declare it in Meta):'} ${Security.escapeHtml(special)}</div>` : '')
+              + (goal ? `<div><span class="text-slate-500">${isAr ? 'الهدف الدقيق:' : 'Exact goal:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml(isAr ? goal.ar : goal.en)}</span></div>` : '');
+          })() : ''}
           <div><span class="text-slate-500">${isAr ? 'الصفحة:' : 'Page:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml(campaign.pageName || '—')}</span></div>
           <div><span class="text-slate-500">${isAr ? 'المنصات:' : 'Platforms:'}</span> <span class="font-semibold capitalize text-slate-800 dark:text-slate-100">${Security.escapeHtml(platforms || '—')}</span></div>
           <div><span class="text-slate-500">${isAr ? 'الموقع:' : 'Location:'}</span> <span class="font-semibold text-slate-800 dark:text-slate-100">${Security.escapeHtml((campaign.locations || []).join(', ') || '—')}</span></div>
@@ -1281,9 +1303,10 @@ function adsStudioRefusalText(detail) {
   const text = Array.isArray(detail) ? detail.map(item => String(typeof item === 'string' ? item : (item?.msg || ''))).filter(Boolean).join('; ')
     : detail && typeof detail === 'object' ? String(detail.message || '') : String(detail || '');
   const hit = adsStudioRefusalEntry(text);
-  if (!adsStudioIsAr()) return hit && hit[3] ? hit[3] : text;
+  // No "charge the wallet first" where nothing is sold (the iPhone app): the server's English tail, and the Arabic one below.
+  if (!adsStudioIsAr()) return hit && hit[3] ? hit[3] : (adsStudioBuyingHidden() ? text.replace(/ — charge the wallet first$/, '') : text);
   if (!hit) return text;
-  if (!hit[2]) return hit[1];
+  if (!hit[2]) return adsStudioBuyingHidden() ? hit[1].split(' — اشحن')[0] : hit[1];
   const tail = text.slice(text.indexOf(hit[0]) + hit[0].length);
   if (hit[2] === 'days') {
     const days = tail.match(/\d+/);
@@ -3202,8 +3225,8 @@ function adsStudioBudgetWalletText(draft) {
   return available >= total
     ? adsStudioText(`Available in your wallet: ${adsStudioMoney(available)} — enough.`, `المتاح في محفظتك: ${adsStudioMoney(available)} — يكفي.`)
     : adsStudioText(
-      `Available in your wallet: ${adsStudioMoney(Math.max(0, available))} — short by ${adsStudioMoney(total - Math.max(0, available))}. Add money before you send.`,
-      `المتاح في محفظتك: ${adsStudioMoney(Math.max(0, available))} — ينقصك ${adsStudioMoney(total - Math.max(0, available))}. أضف رصيداً قبل الإرسال.`
+      `Available in your wallet: ${adsStudioMoney(Math.max(0, available))} — short by ${adsStudioMoney(total - Math.max(0, available))}.${adsStudioBuyingHidden() ? '' : ' Add money before you send.'}`,
+      `المتاح في محفظتك: ${adsStudioMoney(Math.max(0, available))} — ينقصك ${adsStudioMoney(total - Math.max(0, available))}.${adsStudioBuyingHidden() ? '' : ' أضف رصيداً قبل الإرسال.'}`
     );
 }
 
@@ -3581,8 +3604,8 @@ async function submitAdsStudioCampaignOnce(id) {
     showNotification(
       adsStudioText('Not enough wallet balance', 'رصيد المحفظة غير كافٍ'),
       adsStudioText(
-        `Charge your wallet first — the total budget (${adsStudioMoney(_budgetMinor)}) is held from it when you submit.`,
-        `اشحن محفظتك أولاً — إجمالي الميزانية (${adsStudioMoney(_budgetMinor)}) يُحجز منها عند الإرسال.`
+        `${adsStudioBuyingHidden() ? 'Your balance is not enough for this request' : 'Charge your wallet first'} — the total budget (${adsStudioMoney(_budgetMinor)}) is held from it when you submit.`,
+        `${adsStudioBuyingHidden() ? 'رصيد محفظتك لا يكفي لهذا الطلب' : 'اشحن محفظتك أولاً'} — إجمالي الميزانية (${adsStudioMoney(_budgetMinor)}) يُحجز منها عند الإرسال.`
       ),
       'error'
     );
@@ -4123,15 +4146,16 @@ function _adsStudioWalletRequestRow(entity, adminView) {
   // An LYD request (plan money) IS the cash: shown in LYD, never "$", and with no "≈" line (P1-08a).
   const currency = String(d.currency || 'USD').trim().toUpperCase() === 'LYD' ? 'LYD' : 'USD';
   const lyd = currency === 'USD' && d.amountMinorLYD ? ` • ≈ ${(d.amountMinorLYD / 100).toFixed(2)} LYD` : '';
+  const quiet = isPending && !adminView && adsStudioBuyingHidden();  // the iPhone app: their waiting request shows no way to pay it
   return `
     <div class="studio-wallet-request flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
       <div class="min-w-0">
         <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))} ${hasPhoto ? '<i data-lucide="paperclip" class="inline w-3.5 h-3.5 text-emerald-600"></i>' : ''}</div>
-        <div class="text-xs text-slate-500">${adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)}${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}</div>
+        <div class="text-xs text-slate-500">${adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)}${quiet ? '' : `${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}`}</div>
       </div>
       <div class="studio-wallet-request-actions flex flex-wrap items-center gap-2">
         <span class="text-xs font-bold ${statusColor}" data-status="${Security.escapeHtml(String(d.status || ''))}">${Security.escapeHtml(Object.prototype.hasOwnProperty.call(ADS_STUDIO_PAY_STATUS, String(d.status || '')) ? adsStudioText(...ADS_STUDIO_PAY_STATUS[String(d.status)]) : String(d.status || ''))}</span>
-        ${isPending && !adminView && entry && entry.requiresReceiptPhoto ? `
+        ${isPending && !adminView && entry && entry.requiresReceiptPhoto && !quiet ? `
           <label class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 cursor-pointer">
             <input type="file" accept="image/*" class="hidden" onchange="adsStudioAttachReceipt('${rid}', this)" />
             ${hasPhoto ? adsStudioText('Replace receipt', 'استبدال الإيصال') : adsStudioText('Attach receipt', 'إرفاق الإيصال')}
@@ -4178,7 +4202,7 @@ function renderAdsStudioWallet() {
         <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="workspace-money-value text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
       </div>
 
-      <div class="glass-panel rounded-2xl p-6">
+      ${adsStudioBuyingHidden() ? `<div class="glass-panel rounded-2xl p-6">${adsStudioNoBuyLine('text-sm text-slate-500')}</div>` : `<div class="glass-panel rounded-2xl p-6">
         <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
         <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
         <div class="mb-4">
@@ -4213,7 +4237,7 @@ function renderAdsStudioWallet() {
         <div class="rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
           ${adsStudioText('Payment methods did not load — check your connection and tap Refresh below.', 'لم يتم تحميل طرق الدفع — تأكد من الاتصال ثم اضغط "تحديث" بالأسفل.')}
         </div>`}
-      </div>
+      </div>`}
 
       ${isCurrentUserAdmin() && pendingAll.length ? `
       <div class="glass-panel rounded-2xl p-6">
@@ -7544,11 +7568,13 @@ function studioHomeNeeds(requests, wallet) {
   const usd = wallet && wallet.usd && typeof wallet.usd === 'object' ? wallet.usd : null;
   const available = usd ? studioDataMinor(usd.availableMinor) : null;
   if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded() && !adsStudioStartupLoading()) {
+    const noBuy = adsStudioBuyingHidden();  // the iPhone app sells nothing (15c): no Renew there
     items.push({
       key: 'plan', icon: 'badge-alert', tone: 'orange',
       title: adsStudioText('Your plan has ended', 'انتهى اشتراكك'),
-      text: adsStudioText('Renew it to send new requests. Your money and your ads stay safe meanwhile.', 'جدّده لترسل طلبات جديدة. أموالك وإعلاناتك تبقى محفوظة في الأثناء.'),
-      button: adsStudioText('Renew', 'جدّد'), onclick: "showSubscriptionModal('ad_maker', 'ad_maker')"
+      text: noBuy ? `${adsStudioText('Your money and your ads stay safe.', 'أموالك وإعلاناتك تبقى محفوظة.')} ${adsStudioNoBuyText()}`
+        : adsStudioText('Renew it to send new requests. Your money and your ads stay safe meanwhile.', 'جدّده لترسل طلبات جديدة. أموالك وإعلاناتك تبقى محفوظة في الأثناء.'),
+      button: noBuy ? '' : adsStudioText('Renew', 'جدّد'), onclick: noBuy ? '' : "showSubscriptionModal('ad_maker', 'ad_maker')"
     });
   }
   for (const request of requests.filter(row => String(row.status || '') === 'Changes Requested')) {
@@ -7609,7 +7635,7 @@ function renderStudioHomeNeeds(items, loading) {
                   <p class="studio-home-need-title">${studioEsc(item.title)}</p>
                   ${item.text ? `<p class="studio-home-need-note"${item.textAuto ? ' dir="auto"' : ''}>${studioEsc(item.text)}</p>` : ''}
                 </div>
-                <button type="button" class="studio-v2-action" onclick="${item.onclick}">${studioEsc(item.button)}</button>
+                ${item.button ? `<button type="button" class="studio-v2-action" onclick="${item.onclick}">${studioEsc(item.button)}</button>` : ''}
               </li>`).join('');
   const empty = loading
     ? adsStudioText('Checking what needs you…', 'نتحقق مما يحتاجك…')
@@ -7639,7 +7665,7 @@ function renderStudioHomeStart(requests, wallet) {
       "studioV2Open('wallet')", 'Add money', 'أضف مالاً'],
     ['first', requests.some(row => String(row.status || 'Draft') !== 'Draft'), 'Send your first ad request', 'أرسل أول طلب إعلان', 'Our team reviews it before anything is charged', 'يراجعه فريقنا قبل خصم أي مبلغ',
       "studioHomeGoal('messages')", 'Start', 'ابدأ']
-  ];
+  ].filter(step => !(adsStudioBuyingHidden() && ['plan', 'money'].includes(step[0])));  // the iPhone app sells nothing (15c)
   const nextIndex = steps.findIndex(step => step[1] !== true);
   const rows = steps.map(([key, done, en, ar, hintEn, hintAr, onclick, buttonEn, buttonAr], index) => {
     const status = done === true
@@ -7712,7 +7738,7 @@ function renderStudioHomeGoals(paused) {
               </li>`;
   }).join('');
   let note = '';
-  if (!canAsk && adsStudioCanCreate() && !adsStudioStartupLoading()) note =adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
+  if (!canAsk && adsStudioCanCreate() && !adsStudioStartupLoading()) note = adsStudioBuyingHidden() ? adsStudioText('Your plan is not active.', 'اشتراكك غير نشط.') : adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
   else if (paused) note = adsStudioText('Sending is paused for now: your request is saved as a draft until we open again.', 'الإرسال متوقف مؤقتاً: يُحفظ طلبك مسودةً حتى نستأنف.');
   return `
           <section class="studio-home-block" data-testid="studio-home-goals" aria-labelledby="studio-home-goals-title">
@@ -10492,7 +10518,8 @@ function studioBuilderWalletHtml(session) {
       const amount = pending.amountMinor !== null ? ` (${studioLtr(studioUsd(pending.amountMinor))})` : '';
       html += `<p class="studio-b-wallet-line is-pending" data-testid="studio-builder-pending">${studioBuilderT(`Waiting for your payment ${studioLtr(pending.reference)}${amount} to be confirmed. You can send once it is.`, `بانتظار تأكيد دفعتك ${studioLtr(pending.reference)}${amount}. يمكنك الإرسال بعد تأكيدها.`)}</p>`;
     }
-    html += `<button type="button" class="studio-b-link is-strong" data-testid="studio-builder-add-money" onclick="studioBuilderAddMoney()">${studioV2Icon('wallet')}<span>${studioEsc(studioBuilderT('Add money', 'أضف رصيداً'))}</span></button>`;
+    html += adsStudioBuyingHidden() ? adsStudioNoBuyLine('studio-b-wallet-line')  // the iPhone app sells nothing (15c)
+      : `<button type="button" class="studio-b-link is-strong" data-testid="studio-builder-add-money" onclick="studioBuilderAddMoney()">${studioV2Icon('wallet')}<span>${studioEsc(studioBuilderT('Add money', 'أضف رصيداً'))}</span></button>`;
   }
   return html;
 }
@@ -10772,8 +10799,11 @@ function studioBuilderBanners(session) {
             <button type="button" class="studio-b-link is-strong" onclick="studioBuilderStartOver()">${studioEsc(studioBuilderT('Start a new request', 'ابدأ طلباً جديداً'))}</button></div>`);
   }
   if (!adsStudioCanUse() && !adsStudioStartupLoading()) {  // a renewed plan may not be in the cache yet
-    out.push(`<div class="studio-b-banner is-warn" role="status">${studioV2Icon('badge-alert')}<span>${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept; activate the plan to save changes and send.', 'اشتراكك غير نشط. مسودتك محفوظة؛ فعّل الاشتراك لحفظ التعديلات والإرسال.'))}</span>
-            <button type="button" class="studio-b-link is-strong" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioEsc(studioBuilderT('Activate the plan', 'فعّل الاشتراك'))}</button></div>`);
+    // The iPhone app sells nothing (15c adsStudioBuyingHidden): the neutral line, no Activate button.
+    out.push(`<div class="studio-b-banner is-warn" role="status">${studioV2Icon('badge-alert')}<span>${adsStudioBuyingHidden()
+      ? `${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept, but changes cannot be saved or sent.', 'اشتراكك غير نشط. مسودتك محفوظة، لكن لا يمكن حفظ التعديلات أو إرسالها.'))} ${adsStudioNoBuyText()}</span>`
+      : `${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept; activate the plan to save changes and send.', 'اشتراكك غير نشط. مسودتك محفوظة؛ فعّل الاشتراك لحفظ التعديلات والإرسال.'))}</span>
+            <button type="button" class="studio-b-link is-strong" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioEsc(studioBuilderT('Activate the plan', 'فعّل الاشتراك'))}</button>`}</div>`);
   }
   return out.join('');
 }
@@ -11483,15 +11513,16 @@ function studioWalletPendingRows(summary) {
 }
 
 function renderStudioWalletActions(summary) {
+  const noBuy = adsStudioBuyingHidden();  // the iPhone app sells nothing (15c): no Add money, the neutral line
   const open = studioWalletPendingRows(summary).length;
-  const full = open >= STUDIO_WALLET_MAX_OPEN;
+  const full = !noBuy && open >= STUDIO_WALLET_MAX_OPEN;
   const loading = studioWalletSummaryState().loading || !!_studioWallet.listLoading;
   return `
             <div class="studio-v2-wallet-actions">
-              <button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-add" onclick="studioWalletOpenAdd()"${full ? ' disabled aria-describedby="studio-wallet-full"' : ''}>${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add money', 'أضف مالاً'))}</span></button>
+              ${noBuy ? '' : `<button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-add" onclick="studioWalletOpenAdd()"${full ? ' disabled aria-describedby="studio-wallet-full"' : ''}>${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add money', 'أضف مالاً'))}</span></button>`}
               <button type="button" class="studio-v2-action" data-testid="studio-wallet-refresh" onclick="studioWalletRefresh()"${loading ? ' aria-busy="true"' : ''}>${studioWalletIcon('refresh-cw')}<span>${studioEsc(loading ? adsStudioText('Reading…', 'جارٍ القراءة…') : adsStudioText('Refresh', 'تحديث'))}</span></button>
             </div>
-            ${full ? `<p id="studio-wallet-full" class="studio-v2-wallet-note">${studioEsc(adsStudioText(`You have ${STUDIO_WALLET_MAX_OPEN} payment requests waiting. Pay or cancel one of them to add more money.`, `لديك ${STUDIO_WALLET_MAX_OPEN} طلبات دفع تنتظر. ادفع أحدها أو ألغِه لتضيف مالاً آخر.`))}</p>` : ''}`;
+            ${full ? `<p id="studio-wallet-full" class="studio-v2-wallet-note">${studioEsc(adsStudioText(`You have ${STUDIO_WALLET_MAX_OPEN} payment requests waiting. Pay or cancel one of them to add more money.`, `لديك ${STUDIO_WALLET_MAX_OPEN} طلبات دفع تنتظر. ادفع أحدها أو ألغِه لتضيف مالاً آخر.`))}</p>` : ''}${noBuy ? adsStudioNoBuyLine('studio-v2-wallet-note') : ''}`;
 }
 
 // How to pay: the method's own instruction with the request's code and dinar amount filled in.
@@ -11537,6 +11568,7 @@ function renderStudioWalletReceipt(request) {
 function renderStudioWalletPending(summary) {
   const rows = studioWalletPendingRows(summary);
   if (!rows.length) return '';
+  const noBuy = adsStudioBuyingHidden();  // the iPhone app (15c): the request and Cancel, never how to pay it
   const card = item => {
     const request = item.request;
     const purpose = item.currency === 'LYD' ? adsStudioText('For your plan', 'لاشتراكك') : adsStudioText('For your ads', 'لإعلاناتك');
@@ -11558,12 +11590,12 @@ function renderStudioWalletPending(summary) {
                 <p class="studio-v2-wallet-code" data-testid="studio-wallet-reference">${studioLtr(item.reference)}</p>
                 <dl class="studio-v2-wallet-kv">
                   <div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('Amount', 'المبلغ'))}</dt><dd data-testid="studio-wallet-pending-amount">${studioLtr(studioWalletMoney(item.amountMinor, item.currency))}</dd></div>
-                  ${dinars}${method}
+                  ${noBuy ? '' : dinars + method}
                 </dl>
-                <p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${renderStudioWalletInstruction(request, item.reference)}</p>
+                ${noBuy ? '' : `<p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${renderStudioWalletInstruction(request, item.reference)}</p>`}
                 <p class="studio-v2-wallet-note">${studioWalletIcon('calendar-clock')} ${studioEsc(due)}</p>
                 <div class="studio-v2-wallet-actions is-compact">
-                  ${renderStudioWalletCopy(item.reference)}${renderStudioWalletReceipt(request)}${cancel}
+                  ${noBuy ? '' : renderStudioWalletCopy(item.reference) + renderStudioWalletReceipt(request)}${cancel}
                 </div>
               </article>`;
   };
@@ -11691,10 +11723,10 @@ function renderStudioWalletPlanCard(lydMinor) {
               <p class="studio-v2-wallet-note">${studioEsc(adsStudioText(
     'Dinars pay for your Albayan plan only. They never pay for ads, and your ad dollars never pay for the plan.',
     'الدينار لاشتراكك في البيان فقط؛ لا يدفع ثمن الإعلانات، ولا تدفع دولارات إعلاناتك ثمن الاشتراك.'))}</p>
-              <div class="studio-v2-wallet-actions">
+              ${adsStudioBuyingHidden() ? adsStudioNoBuyLine('studio-v2-wallet-note') : `<div class="studio-v2-wallet-actions">
                 <button type="button" class="studio-v2-action" data-testid="studio-wallet-renew" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioWalletIcon('crown')}<span>${studioEsc(adsStudioText('Renew or activate the plan', 'جدّد الاشتراك أو فعّله'))}</span></button>
                 <button type="button" class="studio-v2-action" data-testid="studio-wallet-add-lyd" onclick="studioWalletOpenAdd('plan')">${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add dinars for the plan', 'أضف ديناراً للاشتراك'))}</span></button>
-              </div>
+              </div>`}
             </section>`;
 }
 
@@ -11991,6 +12023,14 @@ function renderStudioWalletFlowNav(flow, next) {
 }
 
 function renderStudioWalletAdd() {
+  // The iPhone app sells nothing (15c adsStudioBuyingHidden): a link here shows the neutral line and the way back.
+  if (adsStudioBuyingHidden()) {
+    return `
+          <div class="studio-v2-wallet is-flow" data-testid="studio-wallet-add-flow" data-step="none">
+            ${adsStudioNoBuyLine('studio-v2-wallet-note')}
+            <div class="studio-v2-wallet-actions"><button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-done" onclick="studioWalletFinishAdd()">${studioWalletIcon('wallet')}<span>${studioEsc(adsStudioText('Back to the wallet', 'العودة إلى المحفظة'))}</span></button></div>
+          </div>`;
+  }
   const flow = studioWalletFlow();
   if (!_studioWallet.methods) studioWalletLoadMethods();
   if (flow.created) return renderStudioWalletCreated(flow);

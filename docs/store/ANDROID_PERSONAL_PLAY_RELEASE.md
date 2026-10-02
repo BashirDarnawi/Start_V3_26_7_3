@@ -36,7 +36,10 @@ SDK location: `C:\Users\bashi\AppData\Local\Android\Sdk`.
    [account-deletion requirements](https://support.google.com/googleplay/android-developer/answer/13327111?hl=en).
 4. Verify the Data safety inventory in `STORE_CHECKLIST.md` against the actual
    production code, server logs, providers, and retention rules.
-5. Create a dedicated reviewer login using fictional data.
+5. Create a dedicated reviewer login the safe way. The app has one live
+   database and no separate copy with fake data, so the login must be the
+   limited **App Review demo** account with made-up DEMO customers: follow
+   Step 7 of [IOS_APP_STORE_RELEASE.md](IOS_APP_STORE_RELEASE.md).
 6. Test on at least one real Android phone: login/logout, Arabic/RTL, small
    screens, receipt/ad photos, forms, printing/sharing if exposed, connection
    loss and recovery, Android Back, and session expiry.

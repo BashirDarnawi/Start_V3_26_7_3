@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 import sys
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -13,8 +14,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from server import full_backup
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.main import app
+from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 
 client = TestClient(app, headers={"Origin": "http://testserver"})
@@ -167,3 +170,58 @@ class TestFullBackup:
         assert stored and stored["password_hash"] not in body
         # ...while the user's readable identity IS present.
         assert ADMIN_EMAIL in body
+
+    def test_a_cut_backup_is_a_failed_download_through_the_real_app(self, actors, monkeypatch):
+        """A backup cut by the time limit ended as a normal, finished .gz and the owner
+        kept it as his full copy. Through the real middleware stack the reply is now
+        aborted: no closing chunk (the server then drops the connection and the browser
+        shows a failed download) and no gzip trailer."""
+        quota = f"full-backup:{_ensure_admin()}"
+        reset_rate_limit(quota)  # three a day, and the tests above used two
+        wire = []  # every message the whole app hands the server
+
+        async def recorded(scope, receive, send):
+            async def record(message):
+                wire.append(message)
+                await send(message)
+
+            await app(scope, receive, record)
+
+        probe = TestClient(recorded, headers={"Origin": "http://testserver"})
+
+        def incomplete_audits() -> int:
+            with db_conn() as conn:
+                return int(conn.execute(text(
+                    "SELECT COUNT(*) FROM audit_logs WHERE action='backup_download_completed' "
+                    "AND message LIKE '%INCOMPLETE%'"
+                )).scalar() or 0)
+
+        audits_before = incomplete_audits()
+        monkeypatch.setattr(full_backup, "MAX_STREAM_SECONDS", -1)
+        try:
+            with pytest.raises(RuntimeError, match="^full backup incomplete$"):
+                probe.get("/api/admin/backup/full", cookies=actors["admin"])
+            assert wire[0]["type"] == "http.response.start" and wire[0]["status"] == 200
+            bodies = wire[1:]
+            assert bodies and all(m["type"] == "http.response.body" and m.get("more_body") is True for m in bodies)
+            sent = b"".join(m["body"] for m in bodies)
+            with pytest.raises(EOFError):  # before: this opened like any finished backup
+                gzip.decompress(sent)
+            inflater = zlib.decompressobj(31)
+            lines = inflater.decompress(sent).splitlines()
+            assert inflater.eof is False
+            assert json.loads(lines[0])["_type"] == "header"
+            footer = json.loads(lines[-1])
+            assert footer["_type"] == "footer" and footer["complete"] is False
+            assert incomplete_audits() == audits_before + 1
+
+            # Nothing stays held, and a backup that finishes still ends properly.
+            monkeypatch.setattr(full_backup, "MAX_STREAM_SECONDS", 30 * 60)
+            del wire[:]
+            response = probe.get("/api/admin/backup/full", cookies=actors["admin"])
+            assert response.status_code == 200
+            assert wire[-1]["type"] == "http.response.body" and not wire[-1].get("more_body", False)
+            assert json.loads(gzip.decompress(response.content).splitlines()[-1])["complete"] is True
+            assert incomplete_audits() == audits_before + 1
+        finally:
+            reset_rate_limit(quota)

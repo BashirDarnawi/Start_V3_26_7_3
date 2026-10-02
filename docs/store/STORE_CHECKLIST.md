@@ -54,7 +54,10 @@ cannot be renamed; changing it later creates a different app.
 - [ ] Confirm the exact Personal Play Console developer/operator name and make
   the privacy policy identify that same person or legal entity. Do not guess or
   publish a placeholder.
-- [ ] Create a permanent reviewer demo account with fake business data.
+- [ ] Create the reviewer account the safe way: a non-admin user with the
+  **App Review demo** permission template and a few made-up customers whose
+  names start with DEMO. The app has one live database and no separate copy
+  with fake data; see "Reviewer access" below.
 - [ ] Prepare the store listing and graphics.
 - [ ] Finish Internal testing, the required Closed test, and the production
   access application for a new Personal developer account.
@@ -114,8 +117,10 @@ only on that track. See the official
 - [ ] Public account-deletion URL after it is implemented and deployed.
 - [ ] Business category, content rating, countries/regions, and pricing.
 
-Useful screenshots: dashboard/analytics, customers, receipt photo viewing,
-ads, deliveries, and a mobile Arabic/RTL view. Use invented demo information.
+Useful screenshots: customers, receipts, deliveries, the More page, and a
+mobile Arabic/RTL view. Take them signed in as the reviewer account, which
+sees only its own made-up DEMO records. The app has no separate copy with
+fake data, so a screenshot taken as an admin would publish real customers.
 
 ## Play Console declarations that are easy to misunderstand
 
@@ -142,28 +147,53 @@ subscriptions, or content, Google Play's payments/billing policy needs a
 separate review. Do not finalize the financial or payments declarations merely
 because the current catalog price is zero or payment is recorded by an admin.
 
+Decided for the iPhone app on 2 October 2026: nothing is sold in it. Every
+button that buys, subscribes, renews or adds money to your own wallet is
+hidden there and the line "Purchases are not available in this app." takes
+its place (see [IOS_APP_STORE_RELEASE.md](IOS_APP_STORE_RELEASE.md)). The
+Android app still shows those buttons, so this question is still open for
+Google Play.
+
 ## Reviewer access
 
-Albayan is login-gated, so the Google reviewer must be able to reach all main
-features without contacting you.
+Albayan is login-gated, so the Google reviewer must be able to reach the
+app without contacting you.
 
-- [ ] Create a dedicated reviewer account that will stay active throughout
-  review.
-- [ ] Give it enough permissions to test the submitted features.
-- [ ] Fill it with fake, non-sensitive customers, receipts, ads, and photos.
+There is no demo copy of the data. Every account uses the one live system
+at `https://albayanhub.com`, with your real customers, receipts and ads. So
+the reviewer account must be limited, exactly as for Apple. The step-by-step
+instructions are in [IOS_APP_STORE_RELEASE.md](IOS_APP_STORE_RELEASE.md),
+Step 7; the same account serves both stores.
+
+- [ ] Create a dedicated, non-admin reviewer account that will stay active
+  throughout review.
+- [ ] Give it the **App Review demo** permission template and nothing more.
+  It then sees only the records it created itself. Never hand over an admin
+  account, and never one with the "Sales employee" preset or the "Sales
+  Agent", "Manager", "Accountant" or "Read Only" template: each of those
+  sees every real customer.
+- [ ] Signed in as that account, add two or three made-up customers whose
+  names start with DEMO. A DEMO receipt is optional and better skipped: it
+  takes a real receipt number and counts in your real totals until you
+  delete it.
 - [ ] Do not require an OTP, expiring password, internal network, or manual
   approval unless exact working instructions are supplied.
 - [ ] Put the username, password, and short navigation instructions in Play
   Console's **App access** section. Do not put production administrator
   credentials in the public store description.
 - [ ] Re-test the credentials immediately before every submission.
+- [ ] After the review: delete the DEMO receipt if you made one, lock the
+  account (clear its permissions and change its password), and delete the
+  DEMO customers and any customer the reviewer added.
 
 Suggested review note:
 
 > Albayan is a business-management tool for advertising-office teams. Accounts
-> are created by a workspace administrator; there is no public sign-up. Use the
-> provided dedicated demo account to test customers, receipts, ads, photos and
-> deliveries. All records in the demo workspace are fictional.
+> are created by the office's administrator; there is no public sign-up. The
+> app has no demo mode: it always connects to the office's live system. The
+> provided account is a limited staff account that sees only the records it
+> created itself. Those records are fictional and their names start with
+> "DEMO". The account can add customers; it cannot create receipts or ads.
 
 ## Version numbers
 
@@ -188,5 +218,6 @@ step by step for a beginner, is in
 [IOS_APP_STORE_RELEASE.md](IOS_APP_STORE_RELEASE.md): Apple account, iPad
 decision, App Store Connect record and privacy answers, version numbers (kept
 in step with Android by `npm run test:mobile-config`), the exact build and
-upload commands, screenshots, the App Review demo account and notes,
-TestFlight, submission.
+upload commands, screenshots, the limited App Review account and its notes,
+TestFlight, submission. Nothing is sold in the iPhone app; that guide says
+what it shows instead.

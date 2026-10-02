@@ -2033,7 +2033,8 @@ function studioBuilderWalletHtml(session) {
       const amount = pending.amountMinor !== null ? ` (${studioLtr(studioUsd(pending.amountMinor))})` : '';
       html += `<p class="studio-b-wallet-line is-pending" data-testid="studio-builder-pending">${studioBuilderT(`Waiting for your payment ${studioLtr(pending.reference)}${amount} to be confirmed. You can send once it is.`, `بانتظار تأكيد دفعتك ${studioLtr(pending.reference)}${amount}. يمكنك الإرسال بعد تأكيدها.`)}</p>`;
     }
-    html += `<button type="button" class="studio-b-link is-strong" data-testid="studio-builder-add-money" onclick="studioBuilderAddMoney()">${studioV2Icon('wallet')}<span>${studioEsc(studioBuilderT('Add money', 'أضف رصيداً'))}</span></button>`;
+    html += adsStudioBuyingHidden() ? adsStudioNoBuyLine('studio-b-wallet-line')  // the iPhone app sells nothing (15c)
+      : `<button type="button" class="studio-b-link is-strong" data-testid="studio-builder-add-money" onclick="studioBuilderAddMoney()">${studioV2Icon('wallet')}<span>${studioEsc(studioBuilderT('Add money', 'أضف رصيداً'))}</span></button>`;
   }
   return html;
 }
@@ -2313,8 +2314,11 @@ function studioBuilderBanners(session) {
             <button type="button" class="studio-b-link is-strong" onclick="studioBuilderStartOver()">${studioEsc(studioBuilderT('Start a new request', 'ابدأ طلباً جديداً'))}</button></div>`);
   }
   if (!adsStudioCanUse() && !adsStudioStartupLoading()) {  // a renewed plan may not be in the cache yet
-    out.push(`<div class="studio-b-banner is-warn" role="status">${studioV2Icon('badge-alert')}<span>${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept; activate the plan to save changes and send.', 'اشتراكك غير نشط. مسودتك محفوظة؛ فعّل الاشتراك لحفظ التعديلات والإرسال.'))}</span>
-            <button type="button" class="studio-b-link is-strong" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioEsc(studioBuilderT('Activate the plan', 'فعّل الاشتراك'))}</button></div>`);
+    // The iPhone app sells nothing (15c adsStudioBuyingHidden): the neutral line, no Activate button.
+    out.push(`<div class="studio-b-banner is-warn" role="status">${studioV2Icon('badge-alert')}<span>${adsStudioBuyingHidden()
+      ? `${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept, but changes cannot be saved or sent.', 'اشتراكك غير نشط. مسودتك محفوظة، لكن لا يمكن حفظ التعديلات أو إرسالها.'))} ${adsStudioNoBuyText()}</span>`
+      : `${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept; activate the plan to save changes and send.', 'اشتراكك غير نشط. مسودتك محفوظة؛ فعّل الاشتراك لحفظ التعديلات والإرسال.'))}</span>
+            <button type="button" class="studio-b-link is-strong" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioEsc(studioBuilderT('Activate the plan', 'فعّل الاشتراك'))}</button>`}</div>`);
   }
   return out.join('');
 }

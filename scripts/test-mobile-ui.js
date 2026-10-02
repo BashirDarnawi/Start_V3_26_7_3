@@ -1568,6 +1568,12 @@ check('ads use their original table and phone summary while deliveries retain jo
 const securitySrc = read('src/02-security.js');
 const controlCenterSrc = read('src/12b-control-center.js');
 
+check('F-iap (owner decision): the admin office tool "Top up wallet" stays in the iPhone app as bookkeeping; it is admin-only at the button and at the dialog, and the App Review demo account has no access to Users',
+  /\$\{isAdmin \? `\s*<button onclick="showWalletTopupModal\('\$\{u\.id\}'\)"/.test(views) &&
+  modals.includes("function showWalletTopupModal(userId) {\n  if (!isCurrentUserAdmin()) return;") &&
+  /appReviewDemo: \{[\s\S]*?permissions: \{\s*customers: \['viewOwn', 'add'\],\s*receipts: \['viewOwn'\],\s*ads: \['viewOwn'\],\s*deliveries: \['viewOwn'\]\s*\}\s*\}/.test(permissionsSrc) &&
+  read('docs/store/IOS_APP_STORE_RELEASE.md').includes('One button is expected and is not a problem: the banknote icon'));
+
 check('R6 review: every early return of init() still settles start-up, so bundle loaders and queued deep links can draw',
   (init.match(/window\.__albayanInitSettled = true; return;/g) || []).length === 3 &&
   !init.includes("if (error?.code === 'SERVER_SESSION_CHANGED') return;") &&
@@ -7172,6 +7178,148 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Team desk tickets (review loop r8 n6): a stop request\'s ticket resolved by hand while the stop request is open stays counted in the Tickets heading (the server keeps it in the Active list, marked stopOpen), also after its thread is read',
     heldCases.every(Boolean), `cases ${failed(heldCases)}; ${heldHtml.slice(heldHtml.indexOf('studio-staff-tickets'), heldHtml.indexOf('studio-staff-tickets') + 600)}`);
+}
+
+{
+  // F-brief (owner-approved 2026-10-02): the customer's special ad category (housing, jobs, credit, politics) and
+  // exact goal (video views or page likes, which run under "Engagement") never reached a staff screen, though the
+  // builder says "the team checks them": the reviewer approved and the launcher built a plain Engagement campaign,
+  // which Meta rejects or flags when the category is not declared. The real 15c, 15g, 15h, 15j, 15l and 15p run in
+  // a sandbox: the Team desk brief and launch card, and the classic staff card's "View brief", show both in the
+  // builder's own words (EN and AR), the category flagged; a request without them is drawn as before; without the
+  // builder (15l not loaded) the stored keys are shown and nothing throws.
+  const vm = require('vm');
+  const briefSources = withBuilder => [adsStudio, read('src/systems/ads_studio/15g-studio-core.js'), read('src/systems/ads_studio/15h-studio-shell.js'), read('src/systems/ads_studio/15j-studio-home.js')]
+    .concat(withBuilder ? [read('src/systems/ads_studio/15l-studio-builder.js')] : [], [read('src/systems/ads_studio/15p-studio-desk.js')]);
+  const briefBox = withBuilder => {
+    const who = { staff: true };
+    const win = { location: { pathname: '/studio', search: '', href: 'http://localhost/studio' }, addEventListener() {}, removeEventListener() {}, localStorage: { getItem: () => null, setItem() {}, removeItem() {} } };
+    win.history = { length: 1, state: null, pushState() {}, replaceState() {}, go() {}, back() {} };
+    const box = vm.createContext({
+      state: { language: 'en', theme: 'light', currentUser: { id: 'u1', name: 'Reviewer' }, currentView: 'ads-studio', adCampaignRequests: [], users: [{ id: 'c1', name: 'Customer One' }] },
+      Security: {
+        escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+        isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+        sanitizeInput: (value, options = {}) => String(value ?? '').slice(0, options.maxLength || 10000),
+        sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+        sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+        plainText: fakePlainText,
+        generateSecureId: prefix => `${prefix}-1`
+      },
+      window: win, history: win.history, URLSearchParams, URL, Intl,
+      isServerModeEnabled: () => true,
+      isCurrentUserAdmin: () => false,
+      currentUserHasPermission: (collection, action) => (who.staff ? true : action !== 'review'),
+      hasSubscription: () => true,
+      canActOnRecord: () => true,
+      getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+      getEntityPhotoCountHint: () => 0,
+      updateUrlParams: () => {}, requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true
+    });
+    let loadError = '';
+    try {
+      const at = forms.indexOf('function normalizeDigitsAscii(');
+      vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+      vm.runInContext(`
+        var performance = { now: () => 100, getEntriesByType: () => [] };
+        var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, getElementById: () => null };
+        function setTimeout() { return 0; }
+        function clearTimeout() {}
+        function getUrlParams() { return { tab: null }; }
+        function showNotification() {}
+        function apiJson() { return new Promise(() => {}); }
+        function saveState() {}
+        function markCollectionDirty() {}
+        function clearCollectionCorruption() {}
+      `, box);
+      briefSources(withBuilder).forEach(src => vm.runInContext(src, box));
+    } catch (error) { loadError = String(error && error.message || error); }
+    // One renderer over one request, in one language, as staff or as the customer who owns nothing here.
+    const draw = (fn, request, language = 'en', staff = true) => {
+      box.state.language = language; who.staff = staff;
+      try { return String(vm.runInContext(`${fn}(${JSON.stringify(request)})`, box)); } catch (error) { return `THREW ${error && error.message}`; } finally { box.state.language = 'en'; who.staff = true; }
+    };
+    return { draw, loadError: () => loadError };
+  };
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const row = { createdBy: 'c1', status: 'Approved', name: 'Flat for sale', objective: 'engagement', platforms: ['facebook'], pageName: 'Homes Page', primaryText: 'See the flat',
+    budgetMinorUSD: 5000, paidMinorUSD: 5000, budgetType: 'lifetime', durationDays: 7, startDate: '2099-01-10', endDate: '2099-01-16', _created: 1, _lastModified: 2 };
+  const housing = { ...row, id: 'b_house', studioRef: 'ALB-S-HOUSE123', studioName: 'ALB-S-HOUSE123 · Flat for sale', goalDetail: 'video_views', specialAdCategories: ['housing'], autoReply: true };
+  const plain = { ...row, id: 'b_plain', objective: 'messages', specialAdCategories: ['none'] };             // the classic screens' "no category"
+  const sameWord = { ...row, id: 'b_same', objective: 'messages', goalDetail: 'messages', specialAdCategories: [] };  // the v2 builder's "None of these"
+  const several = { ...row, id: 'b_many', goalDetail: 'page_likes', specialAdCategories: ['employment', 'credit', '<img src=x onerror=alert(1)>'] };
+  const studio = briefBox(true);
+  const bare = briefBox(false);
+  const goalRow = (label, value) => `<dt>${label}</dt><dd dir="auto">${value}</dd>`;
+  const steps = card => (card.match(/<ol class="studio-desk-checklist">([\s\S]*?)<\/ol>/) || ['', ''])[1].split('</li>').filter(Boolean).map(item => item.replace(/<[^>]+>/g, ''));
+
+  const briefEn = studio.draw('renderStudioDeskBrief', housing);
+  const briefAr = studio.draw('renderStudioDeskBrief', housing, 'ar');
+  const briefPlain = studio.draw('renderStudioDeskBrief', plain);
+  const briefSame = studio.draw('renderStudioDeskBrief', sameWord);
+  const briefSeveral = studio.draw('renderStudioDeskBrief', several);
+  const briefCases = [
+    !studio.loadError() && !briefEn.startsWith('THREW') && briefEn.includes(goalRow('Goal', 'Video views (Engagement)')),
+    briefEn.includes('<p class="studio-flag" data-testid="studio-desk-special">Special ad category: Housing. Meta may limit age, gender and interest targeting for such ads; declare it in Meta when you build the ad.</p>')
+      && briefEn.indexOf('data-testid="studio-desk-special"') < briefEn.indexOf('<dl class="studio-desk-dl">'),
+    briefEn.includes('<dt>Auto-reply</dt><dd dir="auto">On: set up an automatic reply'),
+    briefAr.includes(goalRow('الهدف', 'مشاهدات الفيديو (التفاعل)')) && briefAr.includes('data-testid="studio-desk-special">فئة إعلانية خاصة: سكن وعقارات. قد تقيّد ميتا استهداف العمر والجنس والاهتمامات لهذه الإعلانات؛ صرّح بها في ميتا عند إنشاء الإعلان.</p>')
+      && briefAr.includes('<dt>الرد التلقائي</dt><dd dir="auto">مفعّل') && !/Housing|Video views|Engagement|Auto-reply/.test(briefAr),
+    briefPlain.includes(goalRow('Goal', 'Messages')) && !briefPlain.includes('studio-desk-special') && !briefPlain.includes('studio-flag') && !briefPlain.includes('Auto-reply'),
+    briefSame.includes(goalRow('Goal', 'Messages')) && !briefSame.includes('studio-desk-special'),
+    briefSeveral.includes(goalRow('Goal', 'Page likes (Engagement)'))
+      && briefSeveral.includes('Special ad category: Jobs, Credit, loans or financial services, &lt;img src=x onerror=alert(1)&gt;. Meta may limit') && !briefSeveral.includes('<img')
+  ];
+  check('Team desk brief (F-brief): the customer\'s exact goal ("Video views (Engagement)"), the declared special ad category as a flag above the rows and the auto-reply row reach the reviewer, in Arabic too; a request without them is drawn as before; a stored key is escaped',
+    briefCases.every(Boolean), `cases ${failed(briefCases)}; load ${studio.loadError() || 'ok'}; ${briefEn.slice(0, 700)}`);
+
+  const launchEn = studio.draw('renderStudioDeskLaunchCard', housing);
+  const launchAr = studio.draw('renderStudioDeskLaunchCard', housing, 'ar');
+  const launchPlain = studio.draw('renderStudioDeskLaunchCard', plain);
+  const launchSame = studio.draw('renderStudioDeskLaunchCard', sameWord);
+  const launchCases = [
+    JSON.stringify(steps(launchEn)) === JSON.stringify(['Create the ad in Meta on one of Albayan&#39;s ad accounts (any name).', 'Declare the special ad category in Meta: Housing.',
+      'Set the ad up for the customer&#39;s goal: Video views (Engagement).', 'Put the studio code in the campaign name, or let Albayan rename it at the link.', 'Keep the budget in Meta within what was paid ($50.00): lifetime.']),
+    launchEn.includes('<li><span class="studio-flag" data-testid="studio-desk-special-b_house">Declare the special ad category in Meta: Housing.</span></li>'),
+    steps(launchAr).length === 5 && steps(launchAr)[1] === 'صرّح بالفئة الإعلانية الخاصة في ميتا: سكن وعقارات.' && steps(launchAr)[2] === 'اضبط الإعلان على هدف العميل: مشاهدات الفيديو (التفاعل).'
+      && launchAr.includes('data-testid="studio-desk-special-b_house"') && !/Housing|Video views|Engagement/.test(launchAr),
+    steps(launchPlain).length === 3 && !launchPlain.includes('studio-desk-special') && !launchPlain.includes('studio-flag') && !launchPlain.includes('customer&#39;s goal'),
+    steps(launchSame).length === 4 && steps(launchSame)[1] === 'Set the ad up for the customer&#39;s goal: Messages.' && !launchSame.includes('studio-flag')
+  ];
+  check('Team desk launch card (F-brief): the checklist tells the launcher to declare the special ad category (a flagged step, right after "Create the ad") and which goal to set up, in Arabic too; a request without them keeps its three steps',
+    launchCases.every(Boolean), `cases ${failed(launchCases)}; steps ${JSON.stringify(steps(launchEn))}`);
+
+  const bareBrief = bare.draw('renderStudioDeskBrief', housing);
+  const bareLaunch = bare.draw('renderStudioDeskLaunchCard', housing);
+  const barePlain = bare.draw('renderStudioDeskBrief', plain);
+  const bareCases = [
+    !bare.loadError() && bareBrief.includes(goalRow('Goal', 'video_views (Engagement)')) && bareBrief.includes('data-testid="studio-desk-special">Special ad category: housing. Meta may limit'),
+    steps(bareLaunch).length === 5 && steps(bareLaunch)[1] === 'Declare the special ad category in Meta: housing.' && steps(bareLaunch)[2] === 'Set the ad up for the customer&#39;s goal: video_views (Engagement).',
+    barePlain.includes(goalRow('Goal', 'Messages')) && !barePlain.includes('studio-desk-special')
+  ];
+  check('Team desk brief and launch card without the builder (15l not loaded, F-brief): the stored goal and category keys are shown, nothing throws, and a request without them is drawn as before',
+    bareCases.every(Boolean), `cases ${failed(bareCases)}; load ${bare.loadError() || 'ok'}; ${bareBrief.slice(0, 400)}`);
+
+  // The card's "View brief" block (the one <details> that carries those words).
+  const viewBrief = card => (card.match(/<details[^>]*>[\s\S]*?<\/details>/g) || []).find(block => /View brief|عرض الملخص/.test(block)) || '';
+  const classicStaff = viewBrief(studio.draw('renderAdsStudioCampaignCard', housing));
+  const classicStaffAr = viewBrief(studio.draw('renderAdsStudioCampaignCard', housing, 'ar'));
+  const classicCustomer = viewBrief(studio.draw('renderAdsStudioCampaignCard', housing, 'en', false));
+  const classicPlain = viewBrief(studio.draw('renderAdsStudioCampaignCard', plain));
+  const classicSeveral = viewBrief(studio.draw('renderAdsStudioCampaignCard', several));
+  const classicBare = viewBrief(bare.draw('renderAdsStudioCampaignCard', housing));
+  const classicCases = [
+    /^<details [^>]* open>/.test(classicStaff) && /data-ads-studio-special="1">Special ad category \(declare it in Meta\): Housing<\/div>/.test(classicStaff)
+      && /Exact goal:<\/span> <span [^>]*>Video views<\/span>/.test(classicStaff) && classicStaff.includes('Homes Page'),
+    /^<details [^>]* open>/.test(classicStaffAr) && /data-ads-studio-special="1">فئة إعلانية خاصة \(صرّح بها في ميتا\): سكن وعقارات<\/div>/.test(classicStaffAr)
+      && /الهدف الدقيق:<\/span> <span [^>]*>مشاهدات الفيديو<\/span>/.test(classicStaffAr),
+    classicCustomer.includes('Homes Page') && !/^<details [^>]* open>/.test(classicCustomer) && !classicCustomer.includes('data-ads-studio-special') && !classicCustomer.includes('Exact goal'),
+    classicPlain.includes('Homes Page') && !/^<details [^>]* open>/.test(classicPlain) && !classicPlain.includes('data-ads-studio-special') && !classicPlain.includes('Exact goal'),
+    classicSeveral.includes('(declare it in Meta): Jobs, Credit, loans or financial services, &lt;img src=x onerror=alert(1)&gt;</div>') && !classicSeveral.includes('<img') && classicSeveral.includes('>Page likes</span>'),
+    /^<details [^>]* open>/.test(classicBare) && classicBare.includes('(declare it in Meta): housing</div>') && !classicBare.includes('Exact goal')
+  ];
+  check('classic staff card (F-brief): "View brief" shows staff the declared special ad category (flagged, and the brief starts open) and the exact goal, in Arabic too; the customer sees neither, a request without a category stays closed, a stored key is escaped',
+    classicCases.every(Boolean), `cases ${failed(classicCases)}; ${classicStaff.replace(/ class="[^"]*"/g, '').slice(0, 600)}`);
 }
 
 {
