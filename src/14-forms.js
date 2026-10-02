@@ -24,13 +24,9 @@ document.addEventListener('click', function(e) {
 // which records match.
 let _receiptPhoneFilterTimer = null;
 let _pageCustomerFilterTimer = null;
-// The phone list is rebuilt from every customer's every phone — it was being
-// rebuilt on every keystroke. It is cached from the moment the picker opens,
-// with a short lifetime so a customer arriving through background sync still
-// appears while the field stays focused (the old code caught that on the next
-// keystroke; this keeps the same guarantee within a few seconds).
-// Rows inserted into a picker dropdown at once. Matching more than this is
-// normal (typing "09" matches everyone); the user narrows instead of scrolling.
+// Phone rows are cached briefly from when the picker opens (not rebuilt per
+// keystroke; a customer arriving through sync still shows within seconds).
+// Dropdowns insert at most this many rows: "09" matches everyone, so narrow.
 const PICKER_DROPDOWN_LIMIT = 50;
 
 // The "N more — keep typing" footer, so a capped list never looks complete.
@@ -89,7 +85,7 @@ function filterReceiptPhonesNow() {
   const phoneCustomerMap = getReceiptPhoneRows();
 
   const filtered = phoneCustomerMap.filter(item =>
-    foldSearchText(item.phone).includes(searchTerm) ||
+    foldSearchText(item.phone).includes(searchTerm) || customerPhoneMatchesSearch(searchTerm, item.phone) ||
     foldSearchText(item.customer.name).includes(searchTerm)
   );
   
@@ -930,7 +926,7 @@ function filterPageCustomersNow() {
     foldSearchText(c.name).includes(searchTerm) ||
     // Guarded like the row below it: staff without customers.viewContacts get
     // customer rows with the phone fields removed, and searching threw for them.
-    (Array.isArray(c.phones) && c.phones.some(p => foldSearchText(p).includes(searchTerm))) ||
+    (Array.isArray(c.phones) && c.phones.some(p => foldSearchText(p).includes(searchTerm) || customerPhoneMatchesSearch(searchTerm, p))) ||
     foldSearchText(c.platform).includes(searchTerm)
   );
   
@@ -1291,13 +1287,9 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
     const prefix = getAutoSerialPrefix(autoMethod);
     // The number already belongs to this method's counter — keep it.
     const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
-    // Legacy S receipts were numbered with bare digits before the prefix
-    // existed; a saved one keeps its number rather than being renumbered. But
-    // this exception must ONLY apply when the STORED receipt was already a pure
-    // S-group receipt — a manual paper number (e.g. Cash #500) switched to LTT
-    // must be REISSUED to an S-serial, not kept as "500".
-    // The SAVED record is the source of truth here — state.modalData may only
-    // carry the id, so read the stored methods off state.receipts by that id.
+    // A legacy bare-digit number is kept only if the STORED receipt (state.receipts by
+    // id; modalData may hold just the id) was pure S-group: a paper number switched
+    // to LTT is reissued an S-serial.
     const _storedId = state.modalData?.id;
     const _stored = (_storedId && Array.isArray(state.receipts)
       ? state.receipts.find(r => r && r.id === _storedId)
@@ -1685,12 +1677,9 @@ let _savingReceiptInFlight = false;
 async function saveReceiptFromModal() {
   if (_savingReceiptInFlight) return;
   _savingReceiptInFlight = true;
-  // Busy feedback: settle/unsettle edits are server-confirmed (no optimistic
-  // paint) and can take up to ~60s across retries on a stalled connection.
-  // Without this the Save button reads as dead — users background the tab or
-  // hardware-Back out mid-save. Mirrors delivery-complete-submit's disable.
-  // (Kept HERE, not in _saveReceiptFromModalInner, so every validation
-  // early-return restores the button through the same finally.)
+  // Busy feedback: a server-confirmed save can take ~60s on a stalled line, and a dead
+  // Save button got the tab backgrounded mid-save. Kept here so every early return of
+  // the inner save restores it in the same finally.
   const _saveBtn = document.getElementById('receipt-save-btn');
   const _saveBtnHtml = _saveBtn ? _saveBtn.innerHTML : '';
   if (_saveBtn) {
@@ -1702,12 +1691,8 @@ async function saveReceiptFromModal() {
     await _saveReceiptFromModalInner();
   } finally {
     _savingReceiptInFlight = false;
-    // Restore ONLY the element captured at click time. Re-querying by id
-    // could stamp this save's captured label/state onto a DIFFERENT, later-
-    // opened receipt modal's Save button (the user can cancel and open
-    // another receipt while a 90s media save is still in flight). If the
-    // original node was removed (closeModal on success), isConnected is
-    // false and this is a safe no-op.
+    // Restore only the button captured at click time: by id it could be a later
+    // receipt form's (Cancel + reopen during a slow save). Removed: a no-op.
     if (_saveBtn && _saveBtn.isConnected) {
       _saveBtn.disabled = false;
       _saveBtn.classList.remove('opacity-60');
@@ -1729,6 +1714,7 @@ async function _saveReceiptFromModalInner() {
   // prompt must use the server-returned row because the server may assign the
   // authoritative temporary D-number.
   let newlyCreatedDeliveryReceiptId = '';
+  const _editEl = document.getElementById('receipt-editing-id');  // this form's frozen field (below)
   try {
   if (_receiptPhotoUploadsInFlight > 0) {
     showNotification(
@@ -1738,13 +1724,9 @@ async function _saveReceiptFromModalInner() {
     );
     return;
   }
-  // Resolve the edit target from the FROZEN hidden field written when this form
-  // was rendered — NOT from the mutable global state.modalData, which a stray
-  // browser-back / refresh / URL-restore can silently repoint at a different
-  // receipt. Empty id, or an id no longer present, means "create new".
-  // (Bug: a new receipt was overwriting an old one because state.modalData had
-  // been repointed at the old receipt after the form opened.)
-  const _editEl = document.getElementById('receipt-editing-id');
+  // The edit target comes from the FROZEN field written at render, never the mutable
+  // state.modalData (a stray back/refresh/URL-restore repointed it, and a new receipt
+  // overwrote an old one). Empty or unknown id means "create new".
   const _editingId = (_editEl?.value || '').trim();
   const editTarget = _editingId
     ? (state.receipts.find(r => r && !r._deleted && String(r.id) === _editingId) || null)
@@ -1774,12 +1756,8 @@ async function _saveReceiptFromModalInner() {
   paymentItems.forEach(item => {
     const method = item.querySelector('.payment-method').value;
     const amount = parseFloat(item.querySelector('.payment-amount').value) || 0;
-    // Rate 1 MUST read identically to the live preview (updateReceiptTotals /
-    // getPaymentTotalsFromDom both use `|| 0`). The old `|| defaultExchangeRate`
-    // fallback fired on the legit 0.00 that zero-rate methods (Sadad, Bank
-    // Transfer LYD, LTT…) auto-fill, so the saved receipt got amountLocal
-    // multiplied by the default rate and a SQUARED exchangeRate — "what you
-    // saw before saving" was not what got saved.
+    // Rate 1 reads exactly like the live preview (`|| 0`): a default-rate fallback fired
+    // on the 0.00 that zero-rate methods fill, multiplying amountLocal by the rate.
     const rate = parseFloat(item.querySelector('.payment-rate1').value) || 0;
     const rate2 = parseFloat(item.querySelector('.payment-rate2').value) || 0;
     const collectionType = item.querySelector('.collection-type').value;
@@ -1835,12 +1813,8 @@ async function _saveReceiptFromModalInner() {
     totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
-  // BUG FIX: Prevent division by zero (defense in depth, already checked totalUSD > 0)
-  // The receipt's exchange rate. With a SINGLE payment, store exactly the rate
-  // the user typed — deriving it as LYD/USD made the card show 9.69 for a rate
-  // of 9.70, because the credit total is rounded up in the customer's favour.
-  // With a split (different rates per row) the effective average is the only
-  // meaningful figure, so keep deriving it there.
+  // A single payment keeps the exchange rate exactly as typed (LYD/USD showed 9.69 for
+  // 9.70: the credit rounds in the customer's favour); a split keeps the average.
   const status = document.getElementById('receipt-status').value || 'Paid';
   const _keepMoney = status === 'Paid' && _keepsStoredMoney(editTarget, payments);
   const totalLYD = _keepMoney ? +editTarget.amountLocal || 0 : totalR1;
@@ -2178,23 +2152,16 @@ async function _saveReceiptFromModalInner() {
     deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (editTarget?.deliveryPlaceName || deliveryPlaceName || ''),
     deliveryInstructions: isTempDelivery ? deliveryInstructions : (editTarget?.deliveryInstructions || deliveryInstructions || ''),
     quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (editTarget?.quotedDeliveryFee ?? quotedDeliveryFee),
-    // Debt baseline (what the driver must collect on delivery). While the
-    // receipt is still a pre-delivery temp receipt, keep this in sync with the
-    // current totals so an admin's edit to the amount also corrects the amount
-    // to be collected. Once delivered (no longer a temp receipt) the stored
-    // baseline is preserved. Previously an edit updated amountLocal but left
-    // this stale, corrupting the driver's cash reconciliation.
+    // Debt baseline the driver collects: follows the totals while still a temp D#
+    // receipt (an amount edit left it stale), then kept as stored once delivered.
     debtAmountLocal: (isTempDelivery ? totalLYD : (editTarget?.debtAmountLocal ?? undefined)),
     debtAmountUSD: (isTempDelivery ? totalUSD : (editTarget?.debtAmountUSD ?? undefined)),
     officeFee: 0,
     discount: 0,
     phoneNumber: document.getElementById('receipt-phone-search').value || '',
-    // When the money arrived. Stamped ONLY when the receipt is Paid: an EDIT
-    // keeps the saved date (rewriting it made every edited old receipt look
-    // newly collected, poisoning the liquidity window), an unpaid receipt
-    // carries no arrival date at all, and the save that turns it Paid stamps
-    // the true payment moment — matching the edit-modal rule in 15-modals.js.
-    // Only a receipt that was already paid keeps it (old Not Paid rows carry a stale date).
+    // When the money arrived, for a Paid receipt only: an edit keeps the saved date
+    // (re-stamping made old receipts look newly collected) and the save that turns a
+    // receipt Paid stamps it, as in 15-modals.js; a stale Not Paid date is not kept.
     collectionDate: status === 'Not Paid'
       ? ''
       : (((editTarget?.isPaid === true || editTarget?.status === 'Paid') ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
@@ -2204,12 +2171,8 @@ async function _saveReceiptFromModalInner() {
   };
   if (_hideContacts) ['phoneNumber', 'deliveryPlaceName'].forEach(k => { if (!receipt[k]) delete receipt[k]; });
 
-  // Denormalize the customer's display NAME (never phone/contact) so a role
-  // that can view receipts but not load the customers collection still sees who
-  // the receipt is for — mirrors createdByName. In server mode the server
-  // re-stamps this authoritatively from the customers table (so it cannot be
-  // spoofed), and updateRecord protects it on edit; the live customer name
-  // always wins on read when available. Only stamp when a customer is linked.
+  // Customer NAME stamp (never contacts) for roles that cannot load customers, like
+  // createdByName; the server re-stamps it and updateRecord protects it on edit.
   if (customerId) {
     const _receiptCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
     if (_receiptCustomer && _receiptCustomer.name) receipt.customerName = String(_receiptCustomer.name);
@@ -2298,9 +2261,11 @@ async function _saveReceiptFromModalInner() {
       });
     }
     
-    // Add to edit history if there are changes
+    // Add to edit history if there are changes, on a COPY: oldReceipt is the
+    // live row, and a failed save left the row in it (a retry then uploaded the
+    // edit twice; a refused edit was recorded as if it happened).
     if (changes.length > 0) {
-      const editHistory = oldReceipt.editHistory || [];
+      const editHistory = Array.isArray(oldReceipt.editHistory) ? oldReceipt.editHistory.slice() : [];
       editHistory.push({
         editedAt: new Date().toISOString(),
         editedBy: state.currentUser?.name || 'Unknown',
@@ -2309,17 +2274,13 @@ async function _saveReceiptFromModalInner() {
       receipt.editHistory = editHistory;
       receipt.editCount = editHistory.length;
     } else {
-      receipt.editHistory = oldReceipt.editHistory || [];
+      receipt.editHistory = Array.isArray(oldReceipt.editHistory) ? oldReceipt.editHistory.slice() : [];
       receipt.editCount = oldReceipt.editCount || 0;
     }
     
     receipt.updatedAt = new Date().toISOString();
-    // Pass the baseline the user actually edited (the MODAL-OPEN snapshot) so a
-    // concurrent change (e.g. a driver completing the delivery) triggers a 409
-    // conflict + reload instead of being silently overwritten. editTarget is
-    // re-resolved fresh at save time, and live-sync REPLACES the array slot
-    // (applyServerDelta arr[idx]=clean), so editTarget._lastModified is the
-    // NEW value while state.modalData still holds the frozen open-time object.
+    // The MODAL-OPEN baseline (live sync replaced editTarget with the new version), so
+    // a concurrent change such as a driver's completion 409s instead of being overwritten.
     const _openLastMod = (state.modalData && String(state.modalData.id) === String(receipt.id))
       ? state.modalData._lastModified
       : oldReceipt?._lastModified;
@@ -2381,6 +2342,8 @@ async function _saveReceiptFromModalInner() {
     }
   }
   
+  // Cancel removed this form while it saved: the form open now is another one.
+  if (_editEl?.isConnected === false) return render();
   // Reset modal state FIRST
   state.activeModal = null;
   state.modalData = null;
@@ -2420,7 +2383,7 @@ async function _saveReceiptFromModalInner() {
   } catch (error) {
     console.error('Error saving receipt:', error);
     showNotification(isArV ? 'خطأ' : 'Error', (isArV ? 'فشل حفظ الوصل: ' : 'Failed to save receipt: ') + error.message, 'error');
-    
+    if (_editEl?.isConnected === false) return render();
     // Still try to close the modal even if there was an error
     state.activeModal = null;
     state.modalData = null;
@@ -2899,12 +2862,8 @@ function initAdFunding(adData = {}) {
   };
 }
 
-// When EDITING an ad, getReceiptUsageStats counts the ad's own saved
-// allocation as "used" on its receipts. Every edit-form display must add that
-// share back, otherwise the form double-counts the ad against itself — e.g. a
-// $50 ad on a $200 receipt showed Balance $100 instead of $150, as if a brand
-// new ad were being created next to the old one. (The save-time validation
-// already does this add-back; this is the display-side counterpart.)
+// Editing an ad: usage stats count its own saved allocation as "used", so edit-form
+// displays add that share back (a $50 ad on a $200 receipt showed $100 left, not $150).
 // kind: 'receipt' (paid funding rows) | 'merged' (merged paid-funds rows).
 function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   if (!state.modalData?.id) return 0;
@@ -3223,6 +3182,7 @@ function selectAdPage(pageId, preserveFunding = false) {
   const customerDisplay = document.getElementById('ad-customer-display');
   const customerIdInput = document.getElementById('ad-customer-id');
   const customerHint = document.getElementById('ad-customer-hint');
+  const prevCustomerId = customerIdInput?.value || '';
   
   // Hide dropdown after selection
   hideAdPageDropdown();
@@ -3310,6 +3270,8 @@ function selectAdPage(pageId, preserveFunding = false) {
   } else {
     // Multiple customers - show selection cards
     if (customerHint) customerHint.textContent = isArP ? '(اختر واحداً)' : '(select one)';
+    // The previous page's customer is not this page's: Save must ask, never charge them.
+    if (customerIdInput && !linkedCustomers.some(c => c.id === customerIdInput.value)) customerIdInput.value = '';
     const currentCustomerId = customerIdInput?.value || '';
     if (customerDisplay) {
       customerDisplay.innerHTML = `
@@ -3341,6 +3303,8 @@ function selectAdPage(pageId, preserveFunding = false) {
   // Refresh icons and funding
   lucide.createIcons();
   handleAdPageChange(!!preserveFunding);
+  // The D#/unpaid-receipt list follows a changed customer (edit init refreshes via selectAdCustomer).
+  if (!preserveFunding && (customerIdInput?.value || '') !== prevCustomerId) refreshAdTempReceiptOptions();
 }
 
 // Select customer in multi-customer scenario
@@ -3828,13 +3792,8 @@ function onAdTempReceiptChange(receiptId) {
           }
         }
         
-        // Preserve an existing saved value, but never spend delivery receipt
-        // credit just because the receipt was selected. The user can explicitly
-        // enter an amount or press "Use Full Credit" when that is intended.
-        // The field is stamped with the receipt it belongs to: switching the
-        // linked receipt used to KEEP the previous receipt's amount (the
-        // "Available" label updated, the amount did not), so the ad could be
-        // saved spending more than the new receipt actually holds.
+        // Keep a saved value, but never spend D# credit just because the receipt is
+        // picked. Stamped with its receipt: a switch kept the old amount (overspend).
         const belongsToThisReceipt = dueInput.dataset.receiptId === rid;
         const originalReceiptId = String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '');
         const replacingSavedReceipt = !!state.modalData?.id && !!originalReceiptId && originalReceiptId !== rid;
@@ -5033,19 +4992,9 @@ function updateAdUnpaidTotals() {
   updateReceiptTotals();
 }
 
-// Update ad status directly from list view
-// NOTE: updateAdStatusFromList was removed (user request): the ads-table
-// status dropdown is now a read-only badge. It also let "Stopped" be set
-// directly, bypassing confirmStopAd's money flow (unspent funds were never
-// returned to the funding receipts) — status changes go through the Actions
-// buttons, which run the correct flows.
-
-// NOTE: updateAdDeliveryStatus was removed (user request, same as the status
-// dropdown): the ads-table Delivery column is now a read-only badge. Like the
-// status dropdown, it wrote deliveryStatus directly with no transition
-// validation (e.g. could jump straight to Delivered, or reopen a terminal
-// state). Delivery changes go through the Deliveries page / delivery
-// dashboard flows, which run the proper checks.
+// updateAdStatusFromList and updateAdDeliveryStatus were removed (user request): the
+// ads-table status and delivery columns are read-only badges, since direct writes
+// skipped confirmStopAd's money flow and the delivery transition checks.
 
 // Receipt photos helpers
 function uploadReceiptPhotos(fileList) {

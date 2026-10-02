@@ -446,6 +446,37 @@ async function main() {
     assert.equal(await sandbox.retryMobileConnection(), true);
     assert.equal(reloads, 2);
   });
+  // R1 ios-webview-runtime-1: the test above passes only because its getElementById never finds the gate.
+  // With the gate really on screen (#app holds nothing else), Retry cleared the blocked flag together with
+  // the gate, so a signed-out phone whose connection came back was left on a blank page.
+  await test('R1 ios-webview-runtime-1: a cold start blocked on the "No internet" gate reloads when the connection is back; a signed-in user renders instead', async () => {
+    for (const signedIn of [false, true]) {
+      const { sandbox, state, run } = loadBrowserSource();
+      const nodes = new Map();
+      const app = { id: 'app', querySelector: () => null };
+      Object.defineProperty(app, 'innerHTML', { get: () => '', set(html) {
+        if (!html.includes('id="mobile-connection-gate"')) return;
+        nodes.set('mobile-connection-gate', { id: 'mobile-connection-gate', querySelector: () => null, remove: () => nodes.delete('mobile-connection-gate') });
+      } });
+      nodes.set('app', app);
+      sandbox.document.getElementById = id => nodes.get(id) || null;
+      let reloads = 0, renders = 0;
+      sandbox.window.location.reload = () => { reloads += 1; };
+      sandbox.render = () => { renders += 1; };
+      sandbox.isPackagedMobileApp = () => true;
+      sandbox.apiHealthCheck = async () => true;
+      sandbox.serverLiveSyncTick = async () => {};
+      state.serverMode = true;
+      state.currentUser = signedIn ? { id: 'admin', role: 'Admin', permissions: {} } : null;
+      run('setMobileColdStartBlocked(true)');
+      assert.ok(nodes.has('mobile-connection-gate'), 'the gate is drawn into #app');
+      assert.equal(await sandbox.retryMobileConnection(), true);
+      assert.equal(nodes.has('mobile-connection-gate'), false, 'the gate is gone');
+      assert.equal(reloads, signedIn ? 0 : 1, signedIn ? 'a signed-in user is not reloaded' : 'before: no reload, a blank screen');
+      assert.equal(renders, signedIn ? 1 : 0);
+      assert.equal(run('_mobileColdStartBlocked'), false);
+    }
+  });
   for (const [paidRate, debtRate] of [[5, 10], [10, 5]]) {
     await test(`full company coverage settles USD and LYD at different rates ${paidRate}/${debtRate}`, () => {
       const { sandbox } = moneyFixture(paidRate, debtRate);
@@ -3546,6 +3577,493 @@ async function main() {
     assert.equal(await mergeFails(Object.assign(new Error(closed), { status: 423 }), { language: 'en' }), closed);
     assert.equal(await mergeFails(Object.assign(new Error('Conflict: ad has changed'), { status: 409 }), { language: 'en' }),
       'The ad changed during the merge. Refresh and try again.');
+  });
+
+  // ---- Bug-hunt R1, client-a: customer contacts, ad page switch, stale saves, receipt history, ?modal entries, phone search ----
+  await test('R1 data-plane-1: staff without viewContacts edit a customer with no phone box, and the save sends no phones or links', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.URLSearchParams = URLSearchParams;
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    const drawn = () => { made.length = 0; sandbox.renderModal(); return made.map(el => String(el.innerHTML || '')).join('\n'); };
+    // The row exactly as the server serves it to this clerk: every contact field removed.
+    const projected = { id: 'cust_1', name: 'Hidden', platform: 'Facebook', createdBy: 'admin', _lastModified: 1000 };
+    state.currentUser = { id: 'clerk', role: 'Employee', permissions: { customers: ['view', 'add', 'edit'] } };
+    state.users = [state.currentUser];
+    state.customers = [projected];
+    state.activeModal = 'customer';
+    state.modalData = projected;
+    let html = drawn();
+    assert.ok(html.includes('id="customer-name"'), 'the edit form is drawn');
+    assert.ok(!html.includes('customer-phone') && !html.includes('customer-link'), 'before: an empty required phone box replaced every stored number');
+    assert.ok(html.includes('Contact details are hidden for your role'), html.slice(0, 300));
+    const fields = { 'modal-form': {}, 'customer-name': { value: 'Hidden (fixed)' }, 'customer-platform': { value: 'Facebook' }, 'customer-joindate': { value: '2026-09-01' } };
+    sandbox.document.getElementById = id => fields[id] || null;
+    sandbox.document.querySelectorAll = () => [];
+    const sent = [];
+    sandbox.updateRecord = async (array, id, updates, expected) => { sent.push({ id, updates: JSON.parse(JSON.stringify(updates)), expected }); return true; };
+    const notes = [];
+    sandbox.showNotification = (title, message) => notes.push(message);
+    await sandbox.handleModalSubmit();
+    assert.equal(sent.length, 1, `before: ${notes.join(' | ')}`);
+    assert.equal(sent[0].id, 'cust_1');
+    assert.equal(sent[0].expected, 1000);
+    assert.equal(sent[0].updates.name, 'Hidden (fixed)');
+    assert.ok(!('phones' in sent[0].updates) && !('profileLinks' in sent[0].updates), JSON.stringify(sent[0].updates));
+    // Creating a customer still asks for a phone, and an editor who sees contacts keeps the boxes.
+    assert.equal(state.activeModal, null, 'the saved form closed');
+    sandbox.document.getElementById = () => null;
+    state.activeModal = 'customer';
+    state.modalData = null;
+    assert.ok(drawn().includes('customer-phone'), 'the create form lost its phone box');
+    state.currentUser.permissions = { customers: ['view', 'add', 'edit', 'viewContacts'] };
+    state.modalData = { ...projected, phones: ['0912345678'] };
+    html = drawn();
+    assert.ok(html.includes('customer-phone') && !html.includes('Contact details are hidden'), 'a viewContacts editor lost the phone boxes');
+  });
+
+  await test('R1 forms-modals-1: switching the ad page clears a customer the new page does not have, and the receipt list follows', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const els = new Map();
+    for (const id of ['ad-page', 'ad-page-search', 'ad-customer-section', 'ad-customer-display', 'ad-customer-id', 'ad-customer-hint', 'ad-page-dropdown']) {
+      els.set(id, { id, value: '', innerHTML: '', textContent: '', style: {}, dataset: {}, classList: fakeClassList(), focus() {} });
+    }
+    sandbox.document.getElementById = id => els.get(id) || null;
+    sandbox.renderAdFundingList = () => {};
+    sandbox.clearAdMergeFunding = () => {};
+    const refreshedFor = [];
+    sandbox.refreshAdTempReceiptOptions = () => refreshedFor.push(els.get('ad-customer-id').value);
+    state.customers = [{ id: 'custX', name: 'X' }, { id: 'custY', name: 'Y' }, { id: 'custZ', name: 'Z' }];
+    state.pages = [
+      { id: 'pageA', name: 'A', customerIds: ['custX'] },
+      { id: 'pageB', name: 'B', customerIds: ['custY', 'custZ'] },
+      { id: 'pageC', name: 'C', customerIds: ['custY'] }
+    ];
+    const customerId = () => els.get('ad-customer-id').value;
+    sandbox.selectAdPage('pageA');
+    assert.equal(customerId(), 'custX');
+    refreshedFor.length = 0;
+    sandbox.selectAdPage('pageB');
+    assert.equal(customerId(), '', "before: page B kept page A's customer, so Save charged the wrong customer");
+    assert.ok(!/bg-indigo-600 text-white/.test(els.get('ad-customer-display').innerHTML), 'no customer card is preselected');
+    assert.deepEqual(refreshedFor, [''], 'the D#/unpaid receipt list follows the cleared customer');
+    // A one-customer page switches X -> Y: the receipt list is rebuilt for Y.
+    sandbox.selectAdPage('pageA');
+    refreshedFor.length = 0;
+    sandbox.selectAdPage('pageC');
+    assert.equal(customerId(), 'custY');
+    assert.deepEqual(refreshedFor, ['custY'], "before: the list still showed X's receipts");
+    // A customer the new page also has stays chosen, with nothing to rebuild.
+    refreshedFor.length = 0;
+    sandbox.selectAdPage('pageB');
+    assert.equal(customerId(), 'custY');
+    assert.deepEqual(refreshedFor, []);
+    // Editing keeps a saved customer the page no longer lists (edit init picks it right after).
+    els.get('ad-customer-id').value = 'custX';
+    refreshedFor.length = 0;
+    sandbox.selectAdPage('pageB', true);
+    sandbox.selectAdCustomer('custX', true);
+    assert.equal(customerId(), 'custX');
+    assert.deepEqual(refreshedFor, ['custX'], 'edit init refreshes once, through selectAdCustomer');
+  });
+
+  await test('R1 forms-modals-2: a slow save finishing after Cancel never closes the form opened next', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.URLSearchParams = URLSearchParams;
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const els = new Map();
+    const node = (id, value = '') => ({ id, value, isConnected: true, style: {}, dataset: {}, classList: fakeClassList(),
+      setAttribute() {}, removeAttribute() {}, focus() {}, querySelector() { return null; }, querySelectorAll() { return []; },
+      remove() { if (els.get(id) === this) els.delete(id); this.isConnected = false; } });
+    sandbox.document.getElementById = id => els.get(id) || null;
+    sandbox.document.querySelectorAll = sel => (sel === '#app-modal' ? [els.get('app-modal')].filter(Boolean) : (sel === '.customer-phone' ? [node('', '0912345678')] : []));
+    const formIds = ['modal-form', 'customer-name', 'customer-platform', 'customer-joindate'];
+    const openCustomerForm = () => {
+      state.activeModal = 'customer';
+      state.modalData = null;
+      els.set('app-modal', node('app-modal'));
+      for (const [id, value] of [['modal-form', ''], ['customer-name', 'New Customer'], ['customer-platform', 'Facebook'], ['customer-joindate', '2026-10-01']]) els.set(id, node(id, value));
+    };
+    let finish;
+    sandbox.addRecord = () => new Promise(resolve => { finish = resolve; });
+    openCustomerForm();
+    const pending = sandbox.handleModalSubmit();
+    // Cancel removes the dialog and the form inside it; then a receipt form opens with a photo.
+    sandbox.closeModal();
+    for (const id of formIds) els.get(id)?.remove();
+    state.activeModal = 'receipt';
+    state.modalData = null;
+    state.tempReceiptPhotos = ['data:image/png;base64,AAAA'];
+    const receiptDialog = node('app-modal');
+    els.set('app-modal', receiptDialog);
+    finish(true);
+    await pending;
+    assert.equal(state.activeModal, 'receipt', 'before: the old customer save closed the receipt form');
+    assert.equal(els.get('app-modal'), receiptDialog, 'the receipt dialog is still on screen');
+    assert.equal(state.tempReceiptPhotos.length, 1, 'the attached photo is kept');
+    // Control: a save that finishes on its own form still closes it.
+    state.tempReceiptPhotos = [];
+    openCustomerForm();
+    sandbox.addRecord = async () => true;
+    await sandbox.handleModalSubmit();
+    assert.equal(state.activeModal, null, 'a current save closes its own form');
+    assert.ok(!els.get('app-modal'));
+    // A save that changes the signed-in user's role (a self-edit) still closes its own form.
+    openCustomerForm();
+    sandbox.addRecord = async () => { state.currentUser = { ...state.currentUser, role: 'Employee', permissions: { customers: ['view'] } }; return true; };
+    await sandbox.handleModalSubmit();
+    assert.equal(state.activeModal, null, 'a role change during its own save left the form open');
+  });
+
+  await test('R1 forms-modals-2: a receipt create finishing after Cancel saves once and leaves the next receipt form alone', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.URLSearchParams = URLSearchParams;
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const els = new Map();
+    const node = (id, value = '') => ({ id, value, checked: false, isConnected: true, innerHTML: '', textContent: '', style: {}, dataset: {},
+      classList: fakeClassList(), setAttribute() {}, removeAttribute() {}, focus() {}, querySelector() { return null; }, querySelectorAll() { return []; },
+      remove() { if (els.get(id) === this) els.delete(id); this.isConnected = false; } });
+    let paymentRows = [];
+    const formIds = ['receipt-editing-id', 'receipt-phone-search', 'receipt-customer-name', 'receipt-serial-error', 'receipt-save-btn', 'receipt-customer-id', 'receipt-status', 'paid-collection-value', 'receipt-serial'];
+    const openReceiptForm = serial => {
+      state.activeModal = 'receipt';
+      state.modalData = null;
+      els.set('app-modal', node('app-modal'));
+      for (const id of formIds) els.set(id, node(id));
+      els.get('receipt-customer-id').value = 'c1';
+      els.get('receipt-status').value = 'Paid';
+      els.get('paid-collection-value').value = 'office';
+      els.get('receipt-serial').value = serial;
+      const field = { '.payment-method': 'Cash (LYD)', '.payment-amount': '100', '.payment-rate1': '1', '.payment-rate2': '5', '.collection-type': 'office' };
+      paymentRows = [{ querySelector: sel => (sel in field ? node('', field[sel]) : null) }];
+    };
+    sandbox.document.getElementById = id => els.get(id) || null;
+    sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? paymentRows : (sel === '#app-modal' ? [els.get('app-modal')].filter(Boolean) : []));
+    state.serverMode = true;
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.markCollectionDirty = () => {};
+    sandbox.addLog = () => {};
+    sandbox.requireReceiptCustomerRiskAcknowledgement = () => false;
+    state.customers = [{ id: 'c1', name: 'Customer One', phones: ['0911111111'] }];
+    state.receipts = [];
+    const creates = [];
+    let finish;
+    sandbox.apiCreateEntity = (_collection, data) => {
+      creates.push(data.id);
+      return new Promise(resolve => { finish = () => resolve({ data: { ...data, _lastModified: 1 } }); });
+    };
+    openReceiptForm('5551');
+    const pending = sandbox.saveReceiptFromModal();
+    // Cancel: the first form, its hidden editing-id field included, leaves the page.
+    sandbox.closeModal();
+    for (const id of formIds) els.get(id)?.remove();
+    openReceiptForm('5552');
+    state.tempReceiptPhotos = ['data:image/png;base64,AAAA'];
+    const secondDialog = els.get('app-modal');
+    finish();
+    await pending;
+    assert.equal(state.activeModal, 'receipt', 'before: the first save closed the second receipt form');
+    assert.equal(els.get('app-modal'), secondDialog, 'the second dialog is still on screen');
+    assert.equal(state.tempReceiptPhotos.length, 1, "the second form's photo is kept");
+    assert.equal(creates.length, 1);
+    assert.deepEqual(state.receipts.map(r => r.serialNumber), ['5551'], 'the first receipt is saved once');
+    // Control: the second form's own save still closes it.
+    sandbox.apiCreateEntity = async (_collection, data) => { creates.push(data.id); return { data: { ...data, _lastModified: 2 } }; };
+    await sandbox.saveReceiptFromModal();
+    assert.equal(state.activeModal, null, 'a current receipt save closes its own form');
+    assert.equal(state.receipts.length, 2);
+  });
+
+  await test('R1 storage-integrity-2: a failed receipt save leaves no phantom history row, so a retried edit is recorded once and a refused one never', async () => {
+    const plain = value => JSON.parse(JSON.stringify(value));
+    const scenario = async (status, firstError, firstAmount, secondAmount) => {
+      const { sandbox, state, run } = loadBrowserSource();
+      sandbox.setTimeout = fn => setTimeout(fn, 0);
+      sandbox.clearTimeout = id => clearTimeout(id);
+      run('RenderQueue.schedule = () => {};');
+      sandbox.isServerModeEnabled = () => true;
+      state.serverMode = true;
+      state.currentUser = { id: 'admin', name: 'Owner', role: 'Admin', permissions: {} };
+      state.users = [state.currentUser];
+      state.customers = [{ id: 'c1', name: 'Customer One', phones: ['0912345678'] }];
+      const paid = status === 'Paid';
+      const row = { method: 'Cash (LYD)', amount: 500, rate: 1, rate2: 5, collectionType: 'office', deliveryPersonId: '' };
+      state.receipts = [{
+        id: 'r1', recordType: 'receipt', customerId: 'c1', status, isPaid: paid, amountUSD: 100, amountLocal: 500, exchangeRate: 5,
+        paymentMethod: 'Cash (LYD)', payments: paid ? [row] : [], plannedPayments: paid ? [] : [row],
+        serialNumber: paid ? '123' : '', finalReceiptNo: paid ? '123' : '', deliveryStatus: 'Office', phoneNumber: '0912345678',
+        statusDetail: paid ? { paidCollection: 'office' } : { notPaidCollection: 'office' }, createdAt: '2026-09-01T10:00:00.000Z', _lastModified: 1000,
+        editHistory: [{ editedAt: '2026-09-02T10:00:00.000Z', editedBy: 'Owner', changes: [{ field: 'Phone Number', from: 'None', to: '0912345678' }] }],
+        editCount: 1
+      }];
+      let amount = firstAmount;
+      const value = v => ({ value: v, dataset: {}, classList: fakeClassList(), focus() {}, checked: false });
+      const fields = { 'receipt-editing-id': 'r1', 'receipt-customer-id': 'c1', 'receipt-status': status, 'receipt-serial': paid ? '123' : '',
+        'receipt-phone-search': '0912345678', 'paid-collection-value': 'office', 'notpaid-collection-value': 'office' };
+      const item = { querySelector: sel => ({ '.payment-method': value('Cash (LYD)'), '.payment-amount': value(amount), '.payment-rate1': value('1'),
+        '.payment-rate2': value('5'), '.collection-type': value('office'), '.delivery-person': null })[sel] };
+      sandbox.document.getElementById = id => (id in fields ? value(fields[id]) : null);
+      sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? [item] : []);
+      const sent = [];
+      let calls = 0;
+      const echo = (id, updates) => ({ id, data: { ...plain(state.receipts.find(r => r.id === id)), ...plain(updates), _lastModified: 2000 + calls }, lastModified: 2000 + calls });
+      sandbox.apiPatchEntity = async (_collection, id, updates) => { calls += 1; sent.push(plain(updates)); if (calls === 1) throw firstError; return echo(id, updates); };
+      sandbox.apiSettleReceipt = async ({ receiptId, data }) => { calls += 1; sent.push(plain(data)); if (calls === 1) throw firstError; return { receipt: echo(receiptId, data), updatedAds: [], replayed: false }; };
+      await sandbox._saveReceiptFromModalInner();
+      const afterFailure = plain(state.receipts[0]);
+      amount = secondAmount;
+      await sandbox._saveReceiptFromModalInner();
+      return { afterFailure, firstSent: sent[0], retrySent: sent[1] };
+    };
+    const rows = history => history.map(entry => entry.changes.map(c => `${c.field}: ${c.from} -> ${c.to}`).join('; '));
+    // 1. The network drops the first save; the same edit is saved again.
+    {
+      const { afterFailure, firstSent, retrySent } = await scenario('Paid', Object.assign(new Error('Network request failed'), { status: 0 }), '600', '600');
+      assert.equal(firstSent.editHistory.length, 2, 'the failed attempt did carry the new row');
+      assert.equal(afterFailure.editHistory.length, 1, 'before: the failed save left a phantom row on the live receipt');
+      assert.equal(afterFailure.editCount, 1);
+      assert.equal(retrySent.editHistory.length, 2, 'before: the retry uploaded the same edit twice');
+      assert.equal(retrySent.editCount, 2);
+      assert.match(rows(retrySent.editHistory)[1], /Amount \(USD\): \$100\.00 -> \$120\.00/);
+    }
+    // 2. The server refuses the first change (409 rule); a different, allowed change is saved.
+    {
+      const { afterFailure, retrySent } = await scenario('Not Paid', Object.assign(new Error('Receipt amount is locked by linked ads'), { status: 409 }), '600', '550');
+      assert.equal(afterFailure.editHistory.length, 1, 'before: the refused change was left in the history');
+      const uploaded = rows(retrySent.editHistory);
+      assert.equal(uploaded.length, 2, 'before: the refused change was uploaded as if it happened');
+      assert.match(uploaded[1], /Amount \(USD\): \$100\.00 -> \$110\.00/);
+      assert.ok(!uploaded.some(text => text.includes('$120.00')), uploaded.join(' | '));
+    }
+  });
+
+  // A fake browser history wired to the real router (desktop: no phone-browser sentinels).
+  const historyFixture = path => {
+    const fixture = loadBrowserSource();
+    const { sandbox, run } = fixture;
+    sandbox.URLSearchParams = URLSearchParams;
+    const location = sandbox.window.location;
+    const entries = [{ state: { view: path.slice(1) }, url: path }];
+    let index = 0;
+    const apply = url => { const next = new URL(url, 'http://localhost'); location.pathname = next.pathname; location.search = next.search; location.href = next.href; };
+    apply(path);
+    const pops = [];
+    let backs = 0;
+    sandbox.window.addEventListener = (type, fn) => { if (type === 'popstate') pops.push(fn); };
+    sandbox.window.history = {
+      get state() { return entries[index].state; },
+      pushState(state, _title, url) { entries.splice(index + 1); entries.push({ state, url: url || entries[index].url }); index += 1; apply(entries[index].url); },
+      replaceState(state, _title, url) { entries[index] = { state, url: url || entries[index].url }; apply(entries[index].url); },
+      back() { backs += 1; if (index > 0) { index -= 1; apply(entries[index].url); pops.forEach(fn => fn({ state: entries[index].state })); } }
+    };
+    let timers = [];
+    sandbox.setTimeout = fn => { timers.push(fn); return timers.length; };
+    const flush = () => { while (timers.length) { const due = timers; timers = []; due.forEach(fn => fn()); } };
+    run("Security.escapeHtml = s => String(s ?? '')");
+    run('setupUrlRouting()');
+    assert.equal(run('isPhoneBrowserHistoryManaged()'), false);
+    return { ...fixture, flush, url: () => location.pathname + location.search, backs: () => backs };
+  };
+
+  await test('R1 forms-modals-3: closing the collect dialog (X, backdrop, or after saving) consumes its ?modal entry, so Back never reopens it', async () => {
+    for (const how of ['x', 'backdrop', 'saved']) {
+      const fixture = historyFixture('/receipts');
+      const { sandbox, state, run } = fixture;
+      const dialogs = new Map();
+      let markup = '';
+      sandbox.document.getElementById = id => dialogs.get(id) || null;
+      sandbox.document.body.insertAdjacentHTML = (_where, html) => {
+        markup = html;
+        const id = html.match(/id="([^"]+)"/)[1];
+        dialogs.set(id, { id, remove() { dialogs.delete(id); } });
+      };
+      sandbox.updateRecord = async (array, id, updates) => { Object.assign(array.find(row => row.id === id), updates); return true; };
+      state.currentView = 'receipts';
+      state.receipts = [{ id: 'r1', serialNumber: '1001', status: 'Paid', isPaid: true, amountUSD: 10, amountLocal: 50, exchangeRate: 5,
+        payments: [{ method: 'Cash (LYD)', amount: 50, rate: 1 }], customerId: 'c1' }];
+      sandbox.openCollectReceiptModal('r1');
+      assert.equal(fixture.url(), '/receipts?modal=collect-receipt&id=r1');
+      const dialog = dialogs.get('collect-receipt-modal');
+      if (how === 'x') run(markup.match(/<button onclick="([^"]+)"[^>]*><i data-lucide="x"/)[1]);
+      if (how === 'backdrop') run(`(function (event) { ${markup.match(/id="collect-receipt-modal"[^>]*onclick="([^"]+)"/)[1]} })`).call(dialog, { target: dialog });
+      if (how === 'saved') {
+        run("_tempCollectPayments = [{ method: 'Cash (LYD)', amount: '30' }]");
+        await sandbox.confirmCollectReceipt('r1');
+        assert.equal(state.receipts[0].collectedAmount, 30);
+      }
+      assert.ok(!dialogs.has('collect-receipt-modal'), `${how}: the dialog closed`);
+      assert.equal(fixture.url(), '/receipts', `${how}: before, the address kept ?modal=collect-receipt`);
+      // A second tap on the already-closed dialog consumes nothing more.
+      const backsAfterClose = fixture.backs();
+      sandbox._closeUrlTrackedOverlay(Object.assign(dialog, { isConnected: false }));
+      assert.equal(fixture.backs(), backsAfterClose);
+      run("navigateTo('ads')");
+      fixture.flush();
+      sandbox.window.history.back();
+      fixture.flush();
+      assert.equal(fixture.url(), '/receipts', how);
+      assert.ok(!dialogs.has('collect-receipt-modal'), `${how}: before, Back reopened the collect dialog`);
+    }
+  });
+
+  await test('R1 forms-modals-3: closing the Permissions Manager (Done, X, backdrop) consumes its ?modal entry', async () => {
+    for (const how of ['done', 'x', 'backdrop']) {
+      const fixture = historyFixture('/users');
+      const { sandbox, state, run } = fixture;
+      const els = new Map();
+      sandbox.document.createElement = () => ({ style: {}, dataset: {}, classList: fakeClassList(), setAttribute() {}, addEventListener() {},
+        querySelector() { return null; }, querySelectorAll() { return []; }, remove() { if (els.get(this.id) === this) els.delete(this.id); } });
+      sandbox.document.getElementById = id => els.get(id) || null;
+      sandbox.document.body.appendChild = el => { if (el && el.id) els.set(el.id, el); };
+      run('IconQueue').schedule = () => {};
+      state.currentView = 'users';
+      state.users = [state.currentUser, { id: 'u2', name: 'Employee Two', role: 'Employee', permissions: { ads: ['view'] } }];
+      sandbox.showPermissionsModal('u2');
+      const modal = els.get('app-modal');
+      assert.equal(fixture.url(), '/users?modal=permissions&id=u2');
+      const button = { closest: selector => (selector === '#app-modal' ? modal : null) };
+      const handler = pattern => run(`(function () { ${modal.innerHTML.match(pattern)[1]} })`).call(button);
+      if (how === 'done') handler(/<button onclick="([^"]+)"[^>]*>\s*Done\s*<\/button>/);
+      if (how === 'x') handler(/<button onclick="([^"]+)"[^>]*>\s*<i data-lucide="x"/);
+      if (how === 'backdrop') modal.onclick({ target: modal });
+      assert.ok(!els.has('app-modal'), `${how}: the manager closed`);
+      assert.equal(fixture.url(), '/users', `${how}: before, the address kept ?modal=permissions`);
+      run("navigateTo('customers')");
+      fixture.flush();
+      sandbox.window.history.back();
+      fixture.flush();
+      assert.ok(!els.has('app-modal'), `${how}: before, Back reopened the Permissions Manager`);
+    }
+  });
+
+  await test('R1 forms-modals-4: the receipt and page pickers find a phone typed in another spelling; a name with a digit no longer matches everyone', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const els = new Map();
+    for (const id of ['receipt-phone-search', 'receipt-phone-dropdown', 'page-customer-search', 'page-customer-dropdown']) {
+      els.set(id, { id, value: '', innerHTML: '', classList: fakeClassList() });
+    }
+    sandbox.document.getElementById = id => els.get(id) || null;
+    state.customers = [
+      { id: 'c1', name: 'Salem Ali', phones: ['+218 91-234-5678'], platform: 'Facebook', createdBy: 'admin' },
+      { id: 'c2', name: 'Huda', phones: ['00218 92 765 4321'], platform: 'Instagram', createdBy: 'admin' },
+      { id: 'c3', name: 'Store 2', phones: ['0913333333'], platform: 'Facebook', createdBy: 'admin' }
+    ];
+    const picked = (picker, term) => {
+      els.get(`${picker}-search`).value = term;
+      els.get(`${picker}-dropdown`).innerHTML = '';
+      els.get(`${picker}-dropdown`).classList.add('hidden');
+      run(picker === 'receipt-phone' ? 'invalidateReceiptPhoneRows(); filterReceiptPhonesNow()' : 'filterPageCustomersNow()');
+      const dropdown = els.get(`${picker}-dropdown`);
+      if (dropdown.classList.contains('hidden')) return [];
+      return [...new Set((dropdown.innerHTML.match(/data-(?:customer|record)-id="[^"]+"/g) || []).map(found => found.split('"')[1]))];
+    };
+    for (const picker of ['receipt-phone', 'page-customer']) {
+      assert.deepEqual(picked(picker, '0912345678'), ['c1'], `${picker}: before, nothing was found`);
+      assert.deepEqual(picked(picker, '٠٩١٢٣٤٥٦٧٨'), ['c1'], picker);
+      assert.deepEqual(picked(picker, '0927654321'), ['c2'], picker);
+      assert.deepEqual(picked(picker, 'Store 2'), ['c3'], picker);
+      assert.deepEqual(picked(picker, '0000'), [], `${picker}: zeros match nobody`);
+    }
+    const find = term => { state.customerSearch = term; state.customerSort = 'newest'; state.customerFinancialFilter = 'all'; return sandbox.getFilteredCustomers().map(c => c.id); };
+    assert.deepEqual(find('Store 2'), ['c3'], 'before: every 218… phone key contains a 2');
+    state.customers.push({ id: 'c4', name: 'محل 7', phones: ['0945555555'], createdBy: 'admin' });
+    assert.deepEqual(find('محل 7'), ['c4'], 'before: unrelated customers matched the 7');
+    assert.deepEqual(find('0912345678'), ['c1']);
+    assert.deepEqual(find('234-5678'), ['c1']);
+    assert.deepEqual(find('092765'), ['c2']);
+  });
+
+  await test('R1 ios-webview-runtime-3: Android Back while the app lock shows leaves the dialog, its input and photos behind the lock alone and only backgrounds the app', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const removed = [];
+    const modal = { id: 'app-modal', className: 'mobile-dialog-overlay', isConnected: true, style: {}, setAttribute() {}, removeAttribute() {}, remove: () => removed.push('app-modal') };
+    const nodes = new Map([['native-app-lock', { id: 'native-app-lock', remove: () => removed.push('native-app-lock') }], ['app-modal', modal]]);
+    sandbox.document.getElementById = id => nodes.get(id) || null;
+    sandbox.document.querySelectorAll = selector => (/\.mobile-dialog-overlay|#app-modal/.test(String(selector)) ? [modal] : []);
+    const calls = { back: 0, navigate: 0, exit: 0, minimize: 0 };
+    sandbox.URLSearchParams = URLSearchParams;  // an unlocked Back's closeModal() clears ?modal=
+    sandbox.isPackagedMobileApp = () => true;
+    sandbox.window.history.back = () => { calls.back += 1; };
+    sandbox.navigateToInternal = () => { calls.navigate += 1; };
+    sandbox.getCapacitorAppPlugin = () => ({ exitApp: async () => { calls.exit += 1; }, minimizeApp: async () => { calls.minimize += 1; } });
+    state.currentView = 'receipts';  // not the landing view: an unlocked Back would navigate
+    state.activeModal = 'receipt';
+    state.tempReceiptPhotos = [{ id: 'photo1', dataUrl: 'data:image/jpeg;base64,AAAA' }];
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.equal(state.activeModal, 'receipt', 'before: closeModal() threw the half-filled receipt away');
+    assert.equal(state.tempReceiptPhotos.length, 1, 'the unsaved photo is kept');
+    assert.deepEqual(removed, []);
+    assert.deepEqual(calls, { back: 0, navigate: 0, exit: 0, minimize: 1 });
+    await sandbox.handleAndroidBackButton({ canGoBack: true });  // a second press is not "press Back again to exit"
+    assert.deepEqual(calls, { back: 0, navigate: 0, exit: 0, minimize: 2 });
+    assert.equal(state.activeModal, 'receipt');
+  });
+
+  await test('R1 ios-webview-runtime-5: a short landscape screen is not taken for an open keyboard (the bottom nav stays); a real keyboard still is', () => {
+    const { sandbox } = loadBrowserSource();
+    const classes = new Set();
+    sandbox.document.body.classList = {
+      add: (...names) => names.forEach(name => classes.add(name)), remove: (...names) => names.forEach(name => classes.delete(name)),
+      contains: name => classes.has(name), toggle: (name, on) => { if (on) classes.add(name); else classes.delete(name); return !!on; }
+    };
+    sandbox.document.documentElement.style.setProperty = () => {};
+    const keyboardOpen = (innerHeight, visualHeight) => {
+      Object.assign(sandbox.window, { innerWidth: 844, innerHeight, visualViewport: { width: 844, height: visualHeight, offsetTop: 0 } });
+      sandbox._updateVisualViewportVariables();
+      return classes.has('keyboard-open');
+    };
+    assert.equal(keyboardOpen(343, 343), false, 'a phone held sideways, nothing focused: before, the nav was hidden');
+    assert.equal(keyboardOpen(659, 350), true, 'portrait keyboard');
+    assert.equal(keyboardOpen(343, 150), true, 'landscape keyboard');
+    assert.equal(keyboardOpen(900, 900), false);
+    classes.add('native-keyboard-open');
+    assert.equal(keyboardOpen(343, 343), true, 'the packaged app\'s native keyboard event still decides');
+  });
+
+  // load-browser-source stubs saveState: snapshot tests re-evaluate the real one.
+  const persistenceSrc = fs.readFileSync(path.join(__dirname, '..', 'src', '06-persistence.js'), 'utf8');
+  const useRealSaveState = run => {
+    const at = persistenceSrc.indexOf('function saveState() {');
+    run(persistenceSrc.slice(at, persistenceSrc.indexOf('\n}\n', at) + 2));
+  };
+  await test('R1 storage-integrity-4: Clear All Data (local mode) empties all 15 stored collections and the old recovery key, in memory and in the saved snapshot', async () => {
+    for (const withDb of [false, true]) {
+      const { sandbox, state, run } = loadBrowserSource();
+      useRealSaveState(run);
+      const names = Array.from(run('PERSISTED_COLLECTIONS'));
+      assert.equal(names.length, 15);
+      for (const name of names) state[name] = [{ id: `${name}_1`, name: 'Private row', phone: '0912345678' }];
+      state.localRecovery = { hash: 'old-hash', salt: 'old-salt', createdAt: 1 };
+      state._quarantinedUnsafeRecords = { receipts: [{ record: { id: 'bad id' }, reason: 'Invalid identifier' }] };
+      const cleared = [];
+      if (withDb) {
+        run('db = {}');
+        sandbox.clearIndexedDBLogs = async () => { cleared.push('auditLogs'); return true; };
+        sandbox.idbClear = async store => { cleared.push(store); return true; };
+        sandbox.markCollectionDirty('walletTransactions');
+        sandbox.markCollectionDirty('clothesOrders');
+        sandbox.markCollectionCorrupted('dollarPurchases');
+      } else run('db = null');
+      await sandbox.clearAllData();
+      const snapshot = JSON.parse(sandbox.localStorage.getItem('albayan_complete_state'));
+      for (const name of names) {
+        assert.deepEqual(Array.from(state[name]), [], `${name} survived in memory`);
+        if (!withDb) assert.deepEqual(snapshot[name], [], `${name} survived in the snapshot`);
+      }
+      assert.equal(state.localRecovery, null, 'the old recovery key could still reset passwords');
+      assert.equal(snapshot.localRecovery, null);
+      assert.equal(state._quarantinedUnsafeRecords, undefined);
+      assert.equal('_quarantinedUnsafeRecords' in snapshot, false);
+      if (withDb) {
+        assert.equal(run('idbSync.dirty.size'), 0, 'no collection is left queued for a later flush');
+        assert.equal(sandbox.isCollectionCorrupted('dollarPurchases'), false, 'the next workspace can be saved again');
+        assert.ok(cleared.includes('appData') && cleared.includes('backups'), cleared.join());
+      }
+    }
   });
 
   console.log(`\n${passed} review behavior regressions passed.`);

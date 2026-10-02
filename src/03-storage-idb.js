@@ -128,12 +128,9 @@ function initIndexedDB(onLateOpen) {
       return;
     }
 
-    // RESILIENCE: this promise must ALWAYS settle and can NEVER reject —
-    // init() awaits it before the first render, so a hung or failed open
-    // would strand the user on the loading screen forever. Known hangs:
-    // Safari 14.1–15.x can drop the open request without firing any event,
-    // and a DB_VERSION bump in another tab leaves this request in the
-    // (previously unhandled) "blocked" state.
+    // Must ALWAYS settle, never reject: init() awaits it before the first render. Known
+    // hangs: Safari 14.1–15.x drops the open with no event; another tab's DB_VERSION bump
+    // leaves it "blocked".
     let settled = false;
     let timer = null;
     const done = (val) => {
@@ -142,14 +139,15 @@ function initIndexedDB(onLateOpen) {
       clearTimeout(timer);
       resolve(val);
     };
+    // Only the BOOT open (no onLateOpen) has loaded nothing; a mid-session reopen keeps the
+    // whole workspace in memory, so saveState keeps marking its snapshot newest.
+    const bootOpen = typeof onLateOpen !== 'function';
 
-    // Watchdog: no event ever arrived, continue without IndexedDB. INCONCLUSIVE
-    // (the store may hold an intact workspace): flag it so init()/render() never
-    // present a fresh install, and a late connection is NOT silently adopted
-    // (see the case split in request.onsuccess).
+    // Watchdog: no event ever came. INCONCLUSIVE at boot (the store may hold an intact
+    // workspace): init()/render() never show a fresh install, and a late open is not adopted.
     timer = setTimeout(() => {
       console.warn('IndexedDB open timed out, continuing without it');
-      window.__albayanIdbOpenInconclusive = true;
+      if (bootOpen) window.__albayanIdbOpenInconclusive = true;
       done(null);
     }, 3000);
 
@@ -173,17 +171,16 @@ function initIndexedDB(onLateOpen) {
     // watchdog, this is inconclusive: the stored data itself is intact.
     request.onblocked = () => {
       console.warn('IndexedDB open blocked by another tab');
-      window.__albayanIdbOpenInconclusive = true;
+      if (bootOpen) window.__albayanIdbOpenInconclusive = true;
       done(null);
     };
 
     request.onsuccess = (event) => {
       const database = event.target.result;
-      // LATE OPEN (the watchdog/onblocked already resolved with null): adopt the connection
-      // only when the caller can recover (`db` truthiness drops the business collections from
-      // the localStorage snapshot). At startup (no onLateOpen) close it and stay in snapshot
-      // mode; the onclose reopen path adopts and re-persists the authoritative in-memory state.
-      if (settled && typeof onLateOpen !== 'function') {
+      // LATE OPEN (watchdog/onblocked already resolved null): only a caller that can recover
+      // adopts it (a truthy `db` drops the collections from the snapshot); the boot open closes
+      // it and stays in snapshot mode, the onclose reopen re-persists memory.
+      if (settled && bootOpen) {
         try { database.close(); } catch (_) {}
         return;
       }
@@ -196,12 +193,9 @@ function initIndexedDB(onLateOpen) {
         try { database.close(); } catch (_) {}
         if (db === database) db = null;
       };
-      // iOS Safari force-closes the connection when the tab is backgrounded
-      // or the device is locked ("Connection to Indexed Database server
-      // lost"). Null the handle immediately — saveState() then keeps the
-      // business collections inside the localStorage snapshot — and try to
-      // reopen; a successful reopen re-persists everything to IndexedDB via
-      // the normal dirty-flush machinery.
+      // iOS force-closes it when backgrounded or locked ("Connection to Indexed Database
+      // server lost"): null the handle (saveState keeps the collections in the snapshot)
+      // and reopen; a reopen re-persists everything through the dirty flush.
       database.onclose = () => {
         if (db !== database) return; // a newer connection already took over
         db = null;
@@ -332,15 +326,9 @@ function idbDelete(storeName, key) {
   });
 }
 
-/**
- * Perform several puts and deletes in ONE IndexedDB transaction, atomically.
- * Either every operation commits or none does — so an interrupted collection
- * save (tab close / crash / quota) can never leave new chunks mixed with old
- * ones under a stale meta record (which silently corrupts the collection).
- * Enqueued on the same write queue to preserve serialization. Do NOT await
- * anything between the put/delete calls — an intervening await would let the
- * transaction auto-commit early and defeat atomicity.
- */
+/** Puts and deletes in ONE transaction: all commit or none, so an interrupted save (close,
+ * crash, quota) never mixes new chunks with old under a stale meta. Same write queue; never
+ * await between the calls (the transaction would auto-commit early). */
 function idbAtomicWrite(puts, deleteKeys) {
   if (!db) return Promise.resolve(false);
   return new Promise((resolve, reject) => {
@@ -619,9 +607,28 @@ async function loadCollectionFromIndexedDB(collectionName) {
   }
 }
 
-async function createAutoBackup() {
+async function createAutoBackup(minAgeMs = 0) {
   // Local mode only: in server mode this copy would outlive the user's sign-out.
   if (!db || state.serverMode) return false;
+  // ONE rolling copy (nothing restores it; ~30 daily copies with photos filled the quota),
+  // pruned in its own transaction first: a quota-refused put rolls back deletes in its own.
+  // minAgeMs (export) keeps a younger copy.
+  const due = await new Promise((resolve) => {
+    try {
+      const tx = db.transaction([BACKUP_STORE_NAME], 'readwrite');
+      const store = tx.objectStore(BACKUP_STORE_NAME);
+      let fresh = false;
+      if (minAgeMs > 0) {
+        store.index('createdAt').openKeyCursor(null, 'prev').onsuccess = (event) => {
+          fresh = Date.now() - (event.target.result?.key || 0) < minAgeMs;
+          if (!fresh) store.clear();
+        };
+      } else store.clear();
+      tx.oncomplete = () => resolve(!fresh);
+      tx.onabort = tx.onerror = () => resolve(false);
+    } catch (_) { resolve(false); }
+  });
+  if (!due || !db) return false;
 
   return new Promise((resolve) => {
     try {
@@ -629,7 +636,7 @@ async function createAutoBackup() {
       const store = transaction.objectStore(BACKUP_STORE_NAME);
       
       const backup = {
-        id: Security.generateSecureId('backup'),
+        id: 'auto-latest',
         createdAt: Date.now(),
         state: {
           ads: state.ads,
@@ -657,7 +664,7 @@ async function createAutoBackup() {
         cleanOldBackups();
         resolve(true);
       };
-      request.onerror = () => resolve(false);
+      request.onerror = () => { cleanOldBackups(); resolve(false); };
     } catch (error) {
       console.error('Error creating backup:', error);
       resolve(false);

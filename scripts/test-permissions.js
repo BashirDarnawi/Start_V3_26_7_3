@@ -1884,6 +1884,69 @@ check('ad edit history viewer safely handles malformed and unsafe legacy rows', 
   }
 });
 
+check('receipt and ad edit history dialogs speak Arabic in Arabic mode; the stored English rows stay as they are', () => {
+  const original = { ads: S.ads, receipts: S.receipts, customers: S.customers, pages: S.pages, language: S.language, insert: sandbox.document.body.insertAdjacentHTML };
+  let inserted = '';
+  sandbox.document.body.insertAdjacentHTML = (_position, html) => { inserted = String(html); };
+  // What a person reads: tags and comments removed.
+  const text = () => visible(inserted).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  try {
+    loginAs(ADMIN);
+    S.customers = [{ id: 'history-customer', name: 'محمد' }];
+    S.pages = [{ id: 'history-page', name: 'صفحة' }];
+    // Rows exactly as the receipt and ad edit forms record them.
+    S.receipts = [{ id: 'history-receipt', serialNumber: '1001', customerId: 'history-customer', createdAt: '2026-09-01T10:00:00Z',
+      editHistory: [{ editedAt: '2026-09-02T10:00:00Z', editedBy: 'Bashir', changes: [
+        { field: 'Status', from: 'Not Paid', to: 'Paid' },
+        { field: 'Phone Number', from: 'None', to: '0912345678' },
+        { field: 'Payment Method', from: 'Cash (LYD)', to: 'Bank Transfer' },
+        { field: 'Amount (USD)', from: '$100.00', to: '$120.00' },
+        { field: 'Payments', from: '0 payment(s)', to: '1 payment(s)' }] }] }];
+    S.ads = [{ id: 'history-ad2', customerId: 'history-customer', pageId: 'history-page', createdAt: '2026-09-01T10:00:00Z',
+      editHistory: [{ editedAt: '2026-09-02T10:00:00Z', editedBy: 'Bashir', changes: [
+        { field: 'Payment Status', from: 'not_paid', to: 'paid' },
+        { field: 'Ad Status', from: 'Active', to: 'Stopped' },
+        { field: 'Start Date', from: 'N/A', to: '9/1/2026' },
+        { field: 'Receipt Funding', from: '0 allocation(s) • $0.00', to: '1 allocation(s) • $20.00' },
+        { field: 'Ad Links', from: '1 link(s)', to: '2 link(s)' },
+        { field: 'Custom Label', from: 'x', to: 'y' }] }] }];
+    const stored = JSON.stringify([S.receipts, S.ads]);
+    S.language = 'ar';
+    sandbox.showReceiptEditHistory('history-receipt');
+    let shown = text();
+    for (const arabic of ['الحالة', 'غير مدفوع', 'مدفوع', 'رقم الهاتف', 'طريقة الدفع', 'نقدي (LYD)', 'حوالة مصرفية', 'المبلغ (USD)', '$120.00', 'الدفعات: 0', 'الدفعات: 1', '—']) {
+      assert(shown.includes(arabic), `receipt history lacks "${arabic}": ${shown}`);
+    }
+    for (const english of ['Status', 'Not Paid', 'Phone Number', 'None', 'Payment Method', 'Cash', 'Bank Transfer', 'Amount', 'Payments', 'payment(s)']) {
+      assert(!shown.includes(english), `before: the Arabic receipt history shows "${english}"`);
+    }
+    sandbox.showAdEditHistory('history-ad2');
+    shown = text();
+    for (const arabic of ['حالة الدفع', 'غير مدفوع', 'حالة الإعلان', 'نشط', 'موقوف', 'تاريخ البداية', '9/1/2026', 'تمويل الوصولات', 'التخصيصات: 1 • $20.00', 'روابط الإعلان', 'الروابط: 2', 'Custom Label']) {
+      assert(shown.includes(arabic), `ad history lacks "${arabic}": ${shown}`);
+    }
+    for (const english of ['Payment Status', 'not_paid', 'Ad Status', 'Active', 'Stopped', 'Start Date', 'N/A', 'Receipt Funding', 'allocation(s)', 'Ad Links', 'link(s)']) {
+      assert(!shown.includes(english), `before: the Arabic ad history shows "${english}"`);
+    }
+    // English mode shows the stored text unchanged, and nothing stored was rewritten.
+    S.language = 'en';
+    sandbox.showReceiptEditHistory('history-receipt');
+    shown = text();
+    for (const english of ['Status', 'Not Paid', 'Phone Number', 'None', 'Cash (LYD)', '1 payment(s)']) assert(shown.includes(english), `English receipt history lost "${english}"`);
+    sandbox.showAdEditHistory('history-ad2');
+    shown = text();
+    for (const english of ['Payment Status', 'not_paid', 'N/A', '1 allocation(s) • $20.00', '2 link(s)']) assert(shown.includes(english), `English ad history lost "${english}"`);
+    assert(JSON.stringify([S.receipts, S.ads]) === stored, 'showing the history rewrote the stored rows');
+  } finally {
+    sandbox.document.body.insertAdjacentHTML = original.insert;
+    S.ads = original.ads;
+    S.receipts = original.receipts;
+    S.customers = original.customers;
+    S.pages = original.pages;
+    S.language = original.language;
+  }
+});
+
 check('uploadAdPhotos refuses without ads.uploadPhotos', () => {
   loginAs(employee({ ads: ['view', 'add'] }));
   clearNotes();

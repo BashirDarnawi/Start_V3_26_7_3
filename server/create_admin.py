@@ -3,7 +3,7 @@ import json
 from getpass import getpass
 
 from server.db import db_conn, get_engine, init_db, json_dumps, now_ms
-from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
+from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id, normalize_signin_email
 from sqlalchemy import text
 
 
@@ -14,9 +14,15 @@ def main():
     parser.add_argument("--password", default=None, help="Admin password (if omitted, will prompt)")
     args = parser.parse_args()
 
+    # The API's own rule, before anything is written: sign-in and the Users
+    # screen refuse any other address (owner@albayan, admin@localhost).
+    try:
+        email = normalize_signin_email(args.email)
+    except ValueError:
+        raise SystemExit(f"Not a valid sign-in email: {args.email!r}") from None
+
     init_db()
 
-    email = args.email.strip().lower()
     name = args.name.strip() or "Admin"
     password = args.password or getpass("Admin password: ")
     if len(password) < 8:

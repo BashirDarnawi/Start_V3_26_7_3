@@ -342,6 +342,10 @@ check('ad history rendering is defensive, escaped and accessible',
   adEditHistoryViewer.includes("Security.escapeHtml(change.field)") &&
   adEditHistoryViewer.includes("Security.escapeHtml(change.from)") &&
   adEditHistoryViewer.includes("Security.escapeHtml(change.to)") &&
+  // The ad dialog translates its stored English rows in Arabic mode; escaping stays the last step.
+  adEditHistoryViewer.includes("Security.escapeHtml(_editHistoryFieldLabel(change.field))") &&
+  adEditHistoryViewer.includes("Security.escapeHtml(_editHistoryValueText(change.from, change.field))") &&
+  adEditHistoryViewer.includes("Security.escapeHtml(_editHistoryValueText(change.to, change.field))") &&
   adEditHistoryViewer.includes('role="dialog"') &&
   adEditHistoryViewer.includes('aria-modal="true"') &&
   adEditHistoryViewer.includes('No field details were saved for this older edit.'));
@@ -734,7 +738,7 @@ check('mobile session timeout cannot be mistaken for a real logout',
     serverBranch.includes('if (db) { clearIndexedDBLogs(); idbClear(BACKUP_STORE_NAME).catch(() => {}); }') &&
     serverBranch.indexOf('state.userTombstones = {};') < serverBranch.indexOf('saveState();') &&
     init.includes('const runDailyBackupIfDue = () => {\n    if (!db || state.serverMode) return;') &&
-    read('src/03-storage-idb.js').includes('async function createAutoBackup() {\n  // Local mode only') &&
+    read('src/03-storage-idb.js').includes('async function createAutoBackup(minAgeMs = 0) {\n  // Local mode only') &&
     liveSync.includes("writes.push(clearIndexedDBLogs(), idbClear(BACKUP_STORE_NAME).catch(() => {}));"));
 }
 check('sync indicator cancels stale hide timers before every new status',
@@ -1093,6 +1097,26 @@ check('native biometric lock, reminders and phone viewport protections are wired
   views.includes('data-native-device-settings') &&
   css.includes('.native-app-lock') &&
   css.includes('var(--app-visual-height, 100dvh)'));
+
+// R1 ios-webview-runtime-2: the Face ID lock (also the app-switcher privacy cover) must sit above EVERY
+// other surface: the admin "Dollar purchase" dialog (inline z-index 10001) used to cover the 10000 lock.
+{
+  const lockRule = text => (text.match(/\.native-app-lock \{[^}]*\}/) || [''])[0];
+  const lockZ = Number((lockRule(css).match(/z-index:\s*(\d+)/) || [])[1]);
+  const listFiles = dir => fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })
+    .flatMap(entry => (entry.isDirectory() ? listFiles(`${dir}/${entry.name}`) : [`${dir}/${entry.name}`]));
+  const scanned = [...listFiles('src').filter(file => file.endsWith('.js')), ...listFiles('assets').filter(file => file.endsWith('.css')), 'style.css', 'index.html'];
+  const rivals = [];
+  for (const file of scanned) {
+    const text = file === 'style.css' ? css.replace(lockRule(css), '') : read(file);
+    for (const m of text.matchAll(/zIndex\s*=\s*['"`]?(\d+)|z-index\s*:\s*(\d+)|z-\[(\d+)\]/g)) {
+      if (Number(m[1] || m[2] || m[3]) >= lockZ) rivals.push(`${file}: ${m[0]}`);
+    }
+  }
+  check('the native app lock (Face ID) sits above every other surface, in style.css and the www/ copy the apps ship (R1: the dollar-purchase dialog at 10001 covered the 10000 lock)',
+    lockZ === 2147483647 && rivals.length === 0 && lockRule(read('www/style.css')) === lockRule(css),
+    `lock z-index ${lockZ}; at or above it: ${rivals.join(', ') || 'none'}`);
+}
 
 check('browser login sends only the SHA-256 challenge — the verifier never leaves the device',
   appLoginStartBody.includes('_appLoginSha256Hex(verifier)') &&
@@ -1536,6 +1560,10 @@ check('ads use their original table and phone summary while deliveries retain jo
 // ---------- deep scan 2026-09-18 ----------
 const securitySrc = read('src/02-security.js');
 const controlCenterSrc = read('src/12b-control-center.js');
+
+check('R1 review: ad and page edit logs use the record that was saved, never the form opened after Cancel',
+  modals.includes("addLog('update', 'ad', submitData.id,") && modals.includes("addLog('update', 'page', submitData.id,") &&
+  !modals.includes("addLog('update', 'ad', state.modalData.id,") && !modals.includes("addLog('update', 'page', state.modalData.id,"));
 
 check('bug-hunt follow-ups: Arabic outcome toasts, translated role/theme labels, no native re-send, lock before first paint, dead session never restored, iOS pause records a real background',
   !helpers.includes("showNotification('Company coverage failed'") &&
@@ -8734,6 +8762,28 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Customer terms (P5-07): /privacy#terms is linked from the v2 Account screen (between Privacy and Sign out), from the Help contact card in the v2 screen and the classic help tab, and from the login help line (drawn by 15r: no startup bytes), in English and Arabic; the privacy page carries the anchor',
     !loadError && termsCases.every(Boolean), loadError || `cases ${failedCases(termsCases)}`);
+
+  // R1 ios-webview-runtime-4: in the packaged app a relative /privacy is the app bundle (iPhone: nothing
+  // opens; Android: the whole app reloads). There the Account and Help links take the server address and
+  // open the browser, like the manager's Settings links; the web keeps /privacy (pinned above).
+  const baseUrlAt = serverApi.indexOf('function getServerBaseUrl(');
+  const mobileServerUrl = (serverApi.match(/const MOBILE_SERVER_URL = '([^']+)';/) || [])[1];
+  run(`var Platform = { isCapacitor: true }; var MOBILE_SERVER_URL = ${JSON.stringify(mobileServerUrl)}; ${serverApi.slice(baseUrlAt, serverApi.indexOf('\n}\n', baseUrlAt) + 2)}`);
+  box.state.serverBaseUrl = '';
+  const appAccount = String(run('renderStudioAccountScreen()'));
+  const appHelp = String(run('renderStudioHelpContact()'));
+  const appHelpAr = String(inLanguage('ar', 'renderStudioHelpContact()'));
+  run('Platform.isCapacitor = false;');
+  const webAccount = String(run('renderStudioAccountScreen()'));
+  const appLinkCases = [
+    mobileServerUrl === 'https://albayanhub.com',
+    appAccount.includes('data-testid="studio-account-privacy" href="https://albayanhub.com/privacy"') && appAccount.includes('data-testid="studio-account-terms" href="https://albayanhub.com/privacy#terms"'),
+    appHelp.includes('href="https://albayanhub.com/privacy#terms"') && appHelpAr.includes('href="https://albayanhub.com/privacy#terms-ar"'),
+    [appAccount, appHelp, appHelpAr].every(out => !out.includes('href="/privacy')),
+    webAccount.includes('data-testid="studio-account-privacy" href="/privacy"') && webAccount.includes('data-testid="studio-account-terms" href="/privacy#terms"')
+  ];
+  check('Studio policy links in the packaged app (R1): Account Privacy / Customer terms and the Help terms link open https://albayanhub.com/privacy in the browser, never the app bundle\'s /privacy; the web keeps /privacy',
+    !loadError && appLinkCases.every(Boolean), loadError || `cases ${failedCases(appLinkCases)}`);
 
   // ---- P3-25: Test alert channel
   who.staff = true; who.admin = true;

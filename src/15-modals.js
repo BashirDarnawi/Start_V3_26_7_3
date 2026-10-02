@@ -245,6 +245,9 @@ function renderModal() {
       const phones = getCustomerPhoneEntries(custData).map(entry => entry.value);
       if (phones.length === 0) phones.push('');
       const profileLinks = custData.profileLinks || [];
+      // No customers.viewContacts: the stored phones/links never reached this
+      // device, so the edit form leaves them out (a typed number replaced them all).
+      const hideContacts = isEdit && !can('customers', 'viewContacts');
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center">
           <i data-lucide="user" class="w-6 h-6 mr-2 text-indigo-600"></i>
@@ -271,7 +274,7 @@ function renderModal() {
             <input type="date" id="customer-joindate" value="${Security.escapeHtml(custData.joinDate ? custData.joinDate.split('T')[0] : getTodayDateString())}" class="w-full glass-input px-4 py-2 rounded-xl" />
           </div>
 
-          <!-- Phone Numbers -->
+          ${hideContacts ? `<p class="text-sm text-slate-500">${state.language === 'ar' ? 'بيانات الاتصال مخفية عن دورك وستبقى كما هي.' : 'Contact details are hidden for your role and stay as they are.'}</p>` : `<!-- Phone Numbers -->
           <div>
             <div class="flex justify-between items-center mb-2">
               <label class="block text-sm font-medium">${state.language === 'ar' ? 'أرقام الهاتف *' : 'Phone Numbers *'}</label>
@@ -318,7 +321,7 @@ function renderModal() {
                 </div>
               `}
             </div>
-          </div>
+          </div>`}
 
           <div class="flex space-x-3 pt-4 border-t border-slate-200 dark:border-slate-700">
             <button type="submit" class="flex-1 btn-shine bg-indigo-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -853,13 +856,8 @@ function renderModal() {
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
-                      // Reconstruct a row that round-trips to the SAME USD credit
-                      // as the paid ad. amount = the LYD figure, rate1 = 1,
-                      // rate2 = the ad's own rate — so both USD-based and
-                      // LYD-based methods recompute amountUSD correctly.
-                      // Previously amount=amountUSD with rate2=defaultRate made a
-                      // LYD method divide the USD figure by the rate again,
-                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
+                      // Round-trips to the ad's USD credit: amount = LYD, rate1 = 1, rate2 =
+                      // the ad's rate (amount=USD at the default rate cut it ~10x, audit HIGH #3).
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
                       amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
                       rate: 1,
@@ -2719,12 +2717,9 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
   }
 }
 
-// A terminal ad (Stopped/Canceled/Completed/Lost or refunded) refuses every
-// edit EXCEPT a receipt relink — moving its committed funding onto a different
-// receipt — and its SETTLE variant, which flips a paid-off debt not_paid ->
-// paid while moving that same committed total onto paid receipt(s). These
-// helpers mirror the server's _financial_apply_relink so the client can
-// (a) decide a save is a pure relink/settle and (b) apply it in local mode.
+// A terminal ad (Stopped/Canceled/Completed/Lost or refunded) refuses every edit but a
+// receipt RELINK and its SETTLE variant; these mirror the server's _financial_apply_relink
+// to recognize such a save and apply it in local mode.
 function adIsTerminalForEdit(ad) {
   const status = String((ad && ad.status) || '');
   const refundType = String((ad && ad.refundType) || '');
@@ -2780,13 +2775,9 @@ function getAdCommittedFundingTotalUSD(ad) {
   return Math.round((paid + due) * 100) / 100;
 }
 
-// SETTLE variant (terminal ads only): the customer has now PAID the debt of a
-// Stopped/Canceled/Completed/Lost ad. Recognized when the save flips payment
-// not_paid -> paid while moving the ad's whole CURRENT committed total (paid
-// + due pools together) into PAID receipt rows — conserved to the cent, with
-// no due rows left. The old unpaid receipt is freed by omission exactly like
-// a relink; amountUSD/spentUSD/status stay untouched. Returns the new pools
-// or null (not a settle). The server independently re-checks every rule.
+// SETTLE (terminal ads): the paid debt flips not_paid -> paid and the whole committed
+// total (paid + due pools) moves into PAID receipt rows to the cent, freeing the old
+// unpaid receipt. Returns the new pools or null; the server re-checks every rule.
 function computeTerminalSettlePools(liveAd, adUpdates) {
   if (getAdPaymentState(liveAd) !== 'not_paid') return null;
   if (getAdPaymentState(adUpdates) !== 'paid') return null;
@@ -2994,34 +2985,38 @@ function _localDateInputValue(value) {
 
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
-  // Clothes saves can finish after Cancel followed by another form. The
-  // old record may save successfully, but only its original form may close.
-  const clothesSubmitModal = state.activeModal;
-  const clothesSubmitData = state.modalData;
-  const clothesSubmitForm = document.getElementById('modal-form');
-  const clothesSubmitIdentity = getAuthMeIdentity();
-  const clothesSubmitIsCurrent = () => clothesSubmitForm
-    && document.getElementById('modal-form') === clothesSubmitForm
-    && state.activeModal === clothesSubmitModal && state.modalData === clothesSubmitData
-    && getAuthMeIdentity() === clothesSubmitIdentity;
+  // A save can finish after Cancel and another form opened. The old record
+  // may save, but only its own form may close (else the new form's typing
+  // and photos are lost): a stale save only re-renders.
+  const submitModal = state.activeModal;
+  let submitData = state.modalData;
+  const submitForm = document.getElementById('modal-form');
+  // Clothes saves also stop on a role/permission change; other forms only on a
+  // new sign-in (a self-edit replaces currentUser and must still close its form).
+  const submitIdentityNow = () => (String(submitModal || '').startsWith('clothes-') ? getAuthMeIdentity() : getServerSessionIdentity());
+  const submitIdentity = submitIdentityNow();
+  const submitIsCurrent = () => submitForm
+    && document.getElementById('modal-form') === submitForm
+    && state.activeModal === submitModal && state.modalData === submitData
+    && submitIdentityNow() === submitIdentity;
   
   switch (state.activeModal) {
     case 'clothes-product': {
       if (typeof saveClothesProductFromModal !== 'function') return; // bundle still loading
       const saved = await saveClothesProductFromModal();
-      if (!saved || !clothesSubmitIsCurrent()) return; // keep validation/replacement forms open
+      if (!saved || !submitIsCurrent()) return; // keep validation/replacement forms open
       break;
     }
     case 'clothes-shipment': {
       if (typeof saveClothesShipmentFromModal !== 'function') return;
       const saved = await saveClothesShipmentFromModal();
-      if (!saved || !clothesSubmitIsCurrent()) return;
+      if (!saved || !submitIsCurrent()) return;
       break;
     }
     case 'clothes-order': {
       if (typeof saveClothesOrderFromModal !== 'function') return;
       const saved = await saveClothesOrderFromModal();
-      if (!saved || !clothesSubmitIsCurrent()) return;
+      if (!saved || !submitIsCurrent()) return;
       break;
     }
     case 'wallet-topup': {
@@ -3195,14 +3190,16 @@ async function handleModalSubmit() {
       const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
       // A whitespace-only phone passes `required` but is filtered out above —
       // without this check the customer is saved with zero phone numbers.
-      if (phones.length === 0) {
+      // Hidden contacts (no viewContacts) are not edited here; the server keeps them.
+      const hideContacts = isEdit && !can('customers', 'viewContacts');
+      if (!hideContacts && phones.length === 0) {
         showNotification(isAr ? 'خطأ في الإدخال' : 'Validation Error', isAr ? 'رقم هاتف واحد على الأقل مطلوب' : 'At least one phone number is required', 'error');
         return;
       }
 
       // Check for duplicate phone numbers with other customers
       const currentCustomerId = isEdit ? state.modalData.id : null;
-      const duplicatePhone = checkDuplicatePhone(phones, currentCustomerId);
+      const duplicatePhone = !hideContacts && checkDuplicatePhone(phones, currentCustomerId);
       if (duplicatePhone) {
         showNotification(
           isAr ? 'رقم هاتف مكرر' : 'Duplicate Phone Number',
@@ -3225,10 +3222,9 @@ async function handleModalSubmit() {
       if (isEdit) {
         const customerSaved = await updateRecord(state.customers, state.modalData.id, {
           name: custName,
-          phones: phones,
+          ...(hideContacts ? {} : { phones, profileLinks }),
           platform: document.getElementById('customer-platform').value,
-          joinDate: joinDate,
-          profileLinks: profileLinks
+          joinDate: joinDate
         }, state.modalData._lastModified || undefined);
         if (!customerSaved) return;
         showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
@@ -3255,7 +3251,7 @@ async function handleModalSubmit() {
       // save time (server-side cascades bumped the version while open).
       if (isEdit && state.modalData?.id) {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
-        if (liveAd) state.modalData = liveAd;
+        if (liveAd) state.modalData = submitData = liveAd;
       }
       // A terminal/refunded ad still accepts two money-safe edits (relink its funding receipt, or
       // settle its paid-off debt), so the "cannot edit" decision waits for the funding form: the
@@ -3826,13 +3822,9 @@ async function handleModalSubmit() {
         adUpdates.confirmMetaPageOverride = true;
       }
 
-      // Denormalize the customer's display NAME (never phone/contact) so a role
-      // that can view ads but not load the customers collection still sees who
-      // the ad is for — mirrors createdByName. This client stamp serves LOCAL
-      // mode (spread into the new ad via addRecord); in server mode
-      // buildServerAdMutationData strips it and the server stamps it
-      // authoritatively from the customers table, and updateRecord protects it
-      // on edit. The live customer name always wins on read when available.
+      // Customer NAME stamp (never contacts) for roles that cannot load customers, like
+      // createdByName. Local mode only: in server mode buildServerAdMutationData strips it
+      // and the server stamps it.
       if (customerId) {
         const _adCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
         if (_adCustomer && _adCustomer.name) adUpdates.customerName = String(_adCustomer.name);
@@ -3889,14 +3881,9 @@ async function handleModalSubmit() {
         adUpdates.collectionDate = new Date().toISOString();
       }
       
-      // A terminal/refunded ad accepts exactly two edits. (1) A receipt
-      // RELINK: the only change is the funding receipt — free the old receipt
-      // and move the spent amount to the new one (amount/spend/status/payment
-      // untouched). (2) A SETTLE: the customer paid the debt, so payment
-      // flips not_paid -> paid while the whole committed total moves onto
-      // paid receipt(s), conserved to the cent, and the old unpaid receipt is
-      // fully freed. Any other change keeps the "Ad Finished — use Refund"
-      // block.
+      // A terminal/refunded ad accepts two edits: a receipt RELINK (only the funding
+      // receipt changes) and a SETTLE (a paid-off debt moves onto paid receipts, to the
+      // cent). Anything else keeps the "Ad Finished — use Refund" block.
       if (isEdit && adIsTerminalForEdit(state.modalData)) {
         const liveTerminalAd = state.modalData;
         // Settle is detected FIRST: it is non-null only when the payment
@@ -3950,6 +3937,7 @@ async function handleModalSubmit() {
         addLog('update', 'ad', liveTerminalAd.id, settlePools
           ? 'Settled terminal ad debt onto paid receipt'
           : 'Relinked ad funding receipt');
+        if (!submitIsCurrent()) return render();
         state.tempAdFunding = { allocations: [] };
         state.tempAdPhotos = [];
         state.tempAdPrimaryPhotoIndex = 0;
@@ -4029,7 +4017,7 @@ async function handleModalSubmit() {
           if (!adSaved) return;
         }
         showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الإعلان بنجاح' : 'Ad updated successfully', 'success');
-        addLog('update', 'ad', state.modalData.id, `Updated ad with ${allocations.length} receipt link(s)`);
+        addLog('update', 'ad', submitData.id, `Updated ad with ${allocations.length} receipt link(s)`);
       } else {
         let savedAd;
         if (isServerModeEnabled()) {
@@ -4067,6 +4055,7 @@ async function handleModalSubmit() {
         }
       }
       
+      if (!submitIsCurrent()) return render();
       // Clear temp state
       state.tempAdFunding = { allocations: [] };
       state.tempAdPhotos = [];
@@ -4401,7 +4390,7 @@ async function handleModalSubmit() {
         }, state.modalData._lastModified || undefined);
         if (!pageSaved) return;
         showNotification(isArPage ? 'تم التحديث' : 'Updated', isArPage ? 'تم تحديث الصفحة بنجاح' : 'Page updated successfully', 'success');
-        addLog('update', 'page', state.modalData.id, `Updated page: ${pageName}`);
+        addLog('update', 'page', submitData.id, `Updated page: ${pageName}`);
       } else {
         const page = {
           id: generateId('page'),
@@ -4420,7 +4409,7 @@ async function handleModalSubmit() {
       break;
     }
   }
-  closeModal();
+  if (submitIsCurrent()) closeModal();
   render();
 }
 
@@ -4568,12 +4557,8 @@ async function cleanupAdFundingLinks(receiptId) {
       const kept = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
-    // Company-covered rows die with the receipt too: the coverage audit
-    // record keeps the history, but a dangling row would keep counting in
-    // capacity/funded sums against a receipt that no longer exists. These
-    // rows are SERVER-OWNED (a client PATCH carrying a change is refused),
-    // so in server mode the server strips them in its own delete transaction
-    // and delta-sync reconciles this copy; only local mode edits them here.
+    // Company-covered rows die with the receipt (a dangling row kept counting). They are
+    // server-owned: the server strips them in its delete; only local mode edits them here.
     if (!isServerModeEnabled() && Array.isArray(ad.companyFundingAllocations)) {
       const kept = ad.companyFundingAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.companyFundingAllocations.length) updates.companyFundingAllocations = kept;
@@ -4883,12 +4868,8 @@ async function deleteReceipt(id) {
       : `\n\n⚠️ This receipt transferred money to ${outgoingTargets.length} receipt(s) of other customers — those will be deleted too, because their money's source is being removed.`;
   }
   if (confirm(warning)) {
-    // Clean up every record that references this receipt (shared helpers,
-    // also used by deleteCustomer so both delete paths behave the same).
-    // Order matters: the transfer undo reads how much of this receipt was
-    // SPENT from its allocations, so it must run before cleanup strips them.
-    // All soft-deletes are collected and pushed to the server as ONE
-    // all-or-nothing batch (receipt + its chained transfer receipts).
+    // Clean every record that references this receipt (shared with deleteCustomer); the
+    // transfer undo reads spent amounts, so it runs first. One all-or-nothing server batch.
     const batchDeleteOps = { collectServerOps: [] };
     const returnedTo = await undoTransferIntoReceipt(receipt);
     await cleanupAdFundingLinks(id);

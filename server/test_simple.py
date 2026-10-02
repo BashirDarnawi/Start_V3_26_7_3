@@ -347,6 +347,25 @@ def test_assets_reject_traversal_and_unknown_types():
     assert response.status_code == 404
 
 
+def test_overlong_or_odd_asset_names_are_not_found_not_server_errors():
+    """A 300-character name made is_file() raise ENAMETOOLONG: an unhandled 500
+    anyone could repeat to set off the high-server-error-rate alert."""
+    from server import monitoring
+
+    tolerant = TestClient(app, raise_server_exceptions=False)
+    errors_before = monitoring.get_metrics()["total_errors"]
+    for path in ("/assets/" + "a" * 300, "/assets/fonts/" + "a" * 300, "/assets/" + "a" * 300 + ".png"):
+        assert tolerant.get(path).status_code == 404, path[:40]  # before: 500
+    assert tolerant.get("/assets/a%00b.css").status_code in (400, 404)  # an embedded NUL
+    assert monitoring.get_metrics()["total_errors"] == errors_before
+    assert tolerant.get("/assets/tailwind.css").status_code == 200
+    # The filesystem check behind the name rule never raises either.
+    request = Request({"type": "http", "query_string": b"", "headers": []})
+    with pytest.raises(HTTPException) as missing:
+        main_module._serve_asset_file(main_module.ASSETS_DIR / ("a" * 300 + ".css"), request)
+    assert missing.value.status_code == 404
+
+
 def test_login_requires_credentials():
     """Login should require email and password"""
     response = client.post("/api/auth/login", json={})

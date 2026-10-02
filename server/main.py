@@ -129,6 +129,7 @@ from .auth_limits import (
     _client_ip,
     _rate_check,
     _rate_key,
+    _rate_subject,
     _reset_confirm_rate_check,
     _reset_rate_check,
     _setup_rate_check,
@@ -236,7 +237,7 @@ from .schemas import (
 )
 from .security import (
     PBKDF2_ITERATIONS_DEFAULT, constant_time_equal, hash_password, hash_token, new_id,
-    new_session_cookie_value, parse_session_cookie_value, verify_password,
+    new_session_cookie_value, normalize_signin_email, parse_session_cookie_value, verify_password,
 )
 from .auth_security import upgrade_password_hash_after_login
 from .user_audit import user_create_audit_metadata, user_update_audit
@@ -488,7 +489,12 @@ def _next_temp_delivery_receipt_no_inner(created_by: str | None, dialect: str, n
 
         next_n = last_n + 1
         # Defense-in-depth: ensure uniqueness even if counter got out of sync.
-        while _temp_receipt_no_exists(f"D{next_n}", conn=conn):
+        # ONE scan on this locked connection: a scan per number held the counter
+        # lock for minutes after a backup import brought a thousand D numbers.
+        taken: set[str] = set()
+        for number_row in conn.execute(text(_receipt_number_scan_sql())).mappings().all():
+            taken |= _receipt_number_keys(_receipt_number_row_fields(number_row))
+        while f"D{next_n}" in taken:
             next_n += 1
 
         payload = {"last": int(next_n), "updatedAt": now}
@@ -1698,6 +1704,24 @@ def _normalize_customer_phone_storage(
     return data
 
 
+def _add_hidden_contact_writes(upd: dict[str, Any], old_data: dict[str, Any]) -> None:
+    """A writer without customers.viewContacts never received the stored phones or
+    links, so what they type is ADDED to them: an edit form's one typed number used
+    to replace every stored number. Stored scalars ride along in phones[]."""
+    typed = _customer_phone_candidates(upd)
+    for key in CUSTOMER_PHONE_FIELDS:
+        upd.pop(key, None)
+    if typed:
+        upd["phones"] = _customer_phone_candidates(old_data) + typed
+    if "profileLinks" in upd:
+        stored, new = old_data.get("profileLinks"), upd["profileLinks"]
+        links = list(stored) if isinstance(stored, list) else ([stored] if stored else [])
+        for link in new if isinstance(new, list) else [new]:
+            if link not in links:
+                links.append(link)
+        upd["profileLinks"] = links
+
+
 def _lock_customer_phone_keys_conn(conn: Any, keys: set[str], *, postgres: bool) -> None:
     if not postgres:
         return
@@ -1783,6 +1807,35 @@ def _lookup_customer_display_name(conn: Any, customer_id: Any) -> str:
     if not isinstance(name, str) or not name.strip():
         return ""
     return sanitize_str(name)[:120]
+
+
+def _customer_name_stamp(data: Any) -> str:
+    """A customer's NAME as stamped on its receipts/ads ('' when blank)."""
+    name = data.get("name") if isinstance(data, dict) else None
+    return sanitize_str(name)[:120] if isinstance(name, str) and name.strip() else ""
+
+
+def _lock_live_customer(conn: Any, customer_id: Any, *, postgres: bool) -> str:
+    """Re-check a receipt/ad's customer INSIDE the write; returns its name stamp.
+
+    _refuse_deleted_customer is an unlocked pre-check, so a delete or merge
+    committing after it left the record on a deleted customer. FOR SHARE
+    conflicts with the FOR UPDATE those take on the customer row: one waits and
+    sees the other's result (SQLite: both hold _SQLITE_FINANCIAL_LOCK). Take it
+    after the record's own row locks. '' when the id is blank or no row exists.
+    """
+    cid = sanitize_str(str(customer_id or ""))[:80]
+    if not cid:
+        return ""
+    row = conn.execute(
+        text("SELECT deleted, data_json FROM entities WHERE type='customers' AND id=:id LIMIT 1" + (" FOR SHARE" if postgres else "")),
+        {"id": cid},
+    ).mappings().first()
+    if row is None:
+        return ""
+    if bool(row["deleted"]):
+        raise HTTPException(status_code=409, detail=_merged_customer_detail(row) or "This customer was deleted; restore the customer first")
+    return _customer_name_stamp(json_loads(row.get("data_json") or "{}"))
 
 
 def upsert_entity(
@@ -1894,6 +1947,10 @@ def upsert_entity(
                 _prev_cust = json_loads(existing.get("data_json") or "{}") or {}
                 if isinstance(_prev_cust, dict) and _prev_cust.get("customerName"):
                     clean["customerName"] = _prev_cust["customerName"]
+            if entity_type in CUSTOMER_NAME_STAMP_TYPES and str(clean.get("customerId") or "") != str(previous_data.get("customerId") or ""):
+                _moved_name = _lock_live_customer(conn, clean.get("customerId"), postgres=postgres)
+                if _moved_name:  # moved to another customer: that customer's name, never the old one
+                    clean["customerName"] = _moved_name
             if entity_type == "customers":
                 _validate_customer_phone_change_conn(
                     conn,
@@ -1973,7 +2030,7 @@ def upsert_entity(
             # a client-supplied customerName is overwritten when the customerId
             # resolves; otherwise a valid client string (legacy import) is kept.
             if entity_type in CUSTOMER_NAME_STAMP_TYPES:
-                _cust_name = _lookup_customer_display_name(conn, clean.get("customerId"))
+                _cust_name = _lock_live_customer(conn, clean.get("customerId"), postgres=postgres)
                 if _cust_name:
                     clean["customerName"] = _cust_name
                 elif clean.get("customerName") is not None and not isinstance(clean.get("customerName"), str):
@@ -2042,6 +2099,7 @@ def patch_entity(
     expected_last_modified: int | None = None,
     enforce_ad_campaign_quota: bool = True,
     ad_photo_actor: dict[str, Any] | None = None,
+    additive_contacts: bool = False,
 ) -> dict[str, Any]:
     """
     Partially update an existing entity (merge semantics).
@@ -2123,6 +2181,8 @@ def patch_entity(
                     can_view=user_has_permission(ad_photo_actor, "ads", "viewPhotos"),
                 )
             protect_company_coverage_fields(entity_type, upd, old_data)
+            if additive_contacts and entity_type == "customers":
+                _add_hidden_contact_writes(upd, old_data)
             data.update(upd)
             if entity_type == "customers":
                 data = _normalize_customer_phone_storage(
@@ -2140,6 +2200,10 @@ def patch_entity(
             # record date to escape (or enter) that month.
             assert_financial_period_open(entity_type, old_data, conn=conn)
             assert_financial_period_open(entity_type, data, conn=conn)
+            if entity_type in CUSTOMER_NAME_STAMP_TYPES and str(data.get("customerId") or "") != str(old_data.get("customerId") or ""):
+                _moved_name = _lock_live_customer(conn, data.get("customerId"), postgres=postgres)
+                if _moved_name:  # moved to another customer: that customer's name, never the old one
+                    data["customerName"] = _moved_name
             modified = max(now_ms(), baseline + 1)
             data["id"] = entity_id
             data["_created"] = data.get("_created") or int(row["created_at"])
@@ -2338,6 +2402,11 @@ def _bootstrap_first_admin_if_empty():
     name = (os.getenv("ALBAYAN_BOOTSTRAP_ADMIN_NAME") or "Admin").strip() or "Admin"
 
     if not email or not password:
+        return
+    try:  # the API's EmailStr rule: an admin stored under any other address could never sign in
+        email = normalize_signin_email(email)
+    except ValueError:
+        print("[albayan] Bootstrap admin skipped: ALBAYAN_BOOTSTRAP_ADMIN_EMAIL is not a valid sign-in email")
         return
 
     try:
@@ -2974,9 +3043,18 @@ _ASSET_MEDIA_TYPES = {
 }
 
 
+# Every bundled asset and font name; anything else (a 300-character name made
+# is_file() raise ENAMETOOLONG: an unhandled 500) is simply not found.
+_ASSET_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
 def _serve_asset_file(path: Path, request: Request, always_cache: bool = False):
     """Serve one bundled asset with strict name validation done by the caller."""
-    if not path.is_file():
+    try:
+        found = path.is_file()
+    except (OSError, ValueError):  # a name the filesystem cannot hold is no file here
+        found = False
+    if not found:
         raise HTTPException(status_code=404, detail="Not found")
     media = _ASSET_MEDIA_TYPES.get(path.suffix.lower())
     if media is None:
@@ -3017,14 +3095,14 @@ def serve_delete_account():
 @app.get("/assets/{filename}")
 def serve_asset(filename: str, request: Request):
     # Only plain filenames — no separators, no traversal.
-    if "/" in filename or "\\" in filename or ".." in filename:
+    if "/" in filename or "\\" in filename or ".." in filename or not _ASSET_NAME_RE.fullmatch(filename):
         raise HTTPException(status_code=404, detail="Not found")
     return _serve_asset_file(ASSETS_DIR / filename, request)
 
 
 @app.get("/assets/fonts/{filename}")
 def serve_asset_font(filename: str, request: Request):
-    if "/" in filename or "\\" in filename or ".." in filename:
+    if "/" in filename or "\\" in filename or ".." in filename or not _ASSET_NAME_RE.fullmatch(filename):
         raise HTTPException(status_code=404, detail="Not found")
     # Font files have content-unique names (from Google's CDN), so they are
     # safe to cache forever even without a version parameter.
@@ -3314,7 +3392,7 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
     
     # Rate limit based on user ID + IP for additional protection
     ip = _client_ip(request)
-    key = f"pwchange:{user['id']}:{ip}"
+    key = f"pwchange:{user['id']}:{_rate_subject(ip)}"
     allowed, _, retry_after_ms = check_rate_limit(key, max_attempts=5, window_ms=15*60*1000)
     if not allowed:
         audit(str(user.get("id")), "password_change_blocked", "auth", str(user.get("id")), "Password change rate limited", {"ip": ip})
@@ -7240,6 +7318,7 @@ def _financial_derive_ad(
         "dueAmountToUseLYD",
         "hasMergedPaidFunds",
         "isPaid",
+        "customerName",  # stamped from the locked customer row in _ad_mutation_atomic
     ):
         clean.pop(key, None)
     # Only /stop changes into or out of Stopped. Ordinary edit payloads often
@@ -8442,6 +8521,9 @@ def _ad_mutation_atomic(
             customer_row = _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
             if not customer_row or bool(customer_row["deleted"]):
                 raise HTTPException(status_code=404, detail=(customer_row and _merged_customer_detail(customer_row)) or "Ad customer not found")
+            _cust_name = _customer_name_stamp(json_loads(customer_row.get("data_json") or "{}"))
+            if _cust_name:  # the locked customer's own name: never a client label or the previous customer's
+                saved_data["customerName"] = _cust_name
 
             updated_receipt_ids: list[str] = []
             for receipt_id, receipt_row, receipt_data, _validation_row in receipt_reconciliations:
@@ -9672,6 +9754,11 @@ def _financial_patch_receipt_atomic(
             for ad_row, ad_plan in ad_plans:
                 assert_financial_period_open("ads", _financial_row_data(ad_row), conn=conn)
                 assert_financial_period_open("ads", ad_plan, conn=conn)
+            if str(merged.get("customerId") or "") != str(old.get("customerId") or ""):
+                # Last lock (receipts -> ads -> customers); a label, no money moves.
+                _moved_name = _lock_live_customer(conn, merged.get("customerId"), postgres=postgres)
+                if _moved_name:
+                    merged["customerName"] = _moved_name
             saved_receipt = _clothes_write_row(conn, row, merged)
             saved_ads = [
                 _clothes_write_row(conn, ad_row, ad_plan)
@@ -10695,6 +10782,7 @@ def _merge_customers_atomic(
             keep_data, duplicate_data = check_customers(keep_row, duplicate_row)
             merged_customer_data = _merge_customer_data(keep_data, duplicate_data)
             merged_customer_data["id"] = keep_id
+            keep_name = _customer_name_stamp(merged_customer_data)
 
             # 4. Re-verify under the locks. A row that started referencing the
             #    duplicate after discovery is not locked; never take a new
@@ -10718,11 +10806,14 @@ def _merge_customers_atomic(
                     data = json_loads(row.get("data_json") or "{}") or {}
                     if not isinstance(data, dict):
                         continue
+                    moved = str(data.get("customerId") or "") == duplicate_id
                     data, changed = _rewrite_customer_references(
                         data, duplicate_id, keep_id
                     )
                     if not changed:
                         continue  # re-pointed elsewhere before our lock landed
+                    if moved and keep_name and collection in CUSTOMER_NAME_STAMP_TYPES:
+                        data["customerName"] = keep_name  # not the merged-away customer's name
                     if collection in {"receipts", "ads"} and not bool(row.get("deleted")):  # a tombstone moves no money
                         assert_financial_period_open(collection, data, conn=conn)
                     updated[collection].append(
@@ -12245,6 +12336,7 @@ def update_collection_item(
             str(user.get("id") or "system"),
             expected_last_modified=body.expectedLastModified,
             ad_photo_actor=user,
+            additive_contacts=not user_has_permission(user, "customers", "viewContacts"),
         )
     audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id}", {})
     return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
@@ -12832,6 +12924,11 @@ def batch_delete_entities(
                             status_code=409,
                             detail=f"Receipt {receipt_id} cannot be deleted while linked to {reason}",
                         )
+                if customer_ids:
+                    # Lock order receipts -> ads -> customers, as patch_entity, merge and
+                    # ad mutate take it: customers first could deadlock an ad move.
+                    for ad_id in sorted({eid for (col, eid) in normalized if col == "ads"}):
+                        _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
                 for customer_id in sorted(customer_ids):
                     _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
                 # SECURITY/INTEGRITY: match the single-delete atomic guard so the

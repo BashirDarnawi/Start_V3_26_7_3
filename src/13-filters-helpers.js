@@ -327,6 +327,20 @@ function normalizeCustomerPhoneKey(value) {
   return digits;
 }
 
+// A folded search term that is a phone (4+ digits, else only spaces + - ( ))
+// gives its digits; any other term gives '' so "Store 2" never matches 218….
+function _phoneLikeSearchDigits(term) {
+  const digits = String(term || '').replace(/[\s+\-()]/g, '');
+  return /^\d{4,}$/.test(digits) ? digits : '';
+}
+
+// The typed digits match a stored phone in any spelling (0912… = +218 91-…).
+function customerPhoneMatchesSearch(term, phone) {
+  const digits = _phoneLikeSearchDigits(term), tail = digits.replace(/^0+/, '');
+  const key = digits ? String(normalizeCustomerPhoneKey(phone) || '') : '';
+  return !!key && ((!!tail && key.includes(tail)) || (digits.length >= 9 && normalizeCustomerPhoneKey(digits) === key));
+}
+
 // Compare-time search normalizer for BOTH query and haystack (never stored
 // values): Arabic-Indic/Persian digits -> ASCII, lowercase Latin, hamza alif
 // forms -> ا, ة -> ه, ى -> ي, tashkeel/tatweel stripped; NFKC first (guarded).
@@ -554,13 +568,9 @@ function buildCustomerStatsIndex() {
     if (list) list.push(r); else receiptsByCustomer.set(customerId, [r]);
   }
   const adsByCustomer = new Map();
-  // committedUSDByReceiptId[rid] = the total explicitly committed against that
-  // receipt across ALL ads (receiptAllocations + dueAllocations rows + the
-  // rowless legacy due mirror) — the same number getDeliveryReceiptDueUsage
-  // computes as usedDueUSD, but for every receipt in ONE ads pass instead of
-  // one full ads scan per receipt. getCustomerStats' debt block reads this so
-  // the customers view no longer rescans state.ads per unpaid receipt on
-  // every keystroke / live-sync render.
+  // committedUSDByReceiptId[rid]: committed against that receipt across ALL ads (paid +
+  // due rows + rowless legacy mirror), getDeliveryReceiptDueUsage's usedDueUSD for every
+  // receipt in ONE pass, so getCustomerStats never rescans the ads per keystroke.
   const committedUSDByReceiptId = new Map();
   for (const ad of getVisibleRecords(state.ads)) {
     // Very old ads did not have recordType yet. Only the explicit receipt
@@ -667,12 +677,8 @@ function getLiquidityTrackingConfig() {
   return rows.slice().sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
 }
 
-// When did this receipt's money actually arrive? deliveredAt is the driver
-// handover, collectionDate is stamped when a receipt turns Paid, createdAt
-// covers receipts born Paid. collectedAt is stamped at the admin's
-// reconciliation CLICK, which can be long after the cash arrived — so it may
-// only make the money OLDER, never newer: otherwise confirming a backlog of
-// old receipts would mint them as "new" cash inside the tracking window.
+// When the receipt's money arrived (deliveredAt, collectionDate, createdAt). collectedAt
+// is the admin's later reconciliation click: it may only make the money OLDER.
 function getReceiptPaidDate(r) {
   const paidAt = r?.deliveredAt || r?.collectionDate || r?.createdAt || null;
   if (r?.collectedAt && paidAt) {
@@ -1264,12 +1270,8 @@ function getCustomerStats(customerId, statsIndex = null) {
   companyFundedUSD = Math.round((companyFundedUSD + unassignedCreditUSD) * 100) / 100;
   companyFundedLYD = Math.round((companyFundedLYD + unassignedCreditLYD) * 100) / 100;
 
-  // Calculate balance (paid - spent - uncommitted receipt debt + company-covered ad funding)
-  // Money is 2dp. The proportional/derived terms above leave float residue,
-  // so a fully settled customer landed at about -0.0000001: rendered as a RED
-  // "-0.00" and matched the "Has debt" filter (which tests balance < 0)
-  // despite owing nothing. Snap sub-cent noise to a true zero so settled
-  // reads as settled in the card, the colour, the filter and the sort.
+  // Balance = paid - spent - uncommitted receipt debt + company-covered ad funding. Float
+  // residue made a settled customer a red "-0.00" in "Has debt": snap sub-cent to 0.
   const snapMoney = value => {
     const rounded = Math.round(value * 100) / 100;
     return Object.is(rounded, -0) ? 0 : rounded;
@@ -1864,6 +1866,7 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
+  const searchPhoneLike = !!_phoneLikeSearchDigits(searchTerm);  // "Store 2" matched every 218… key
   const searchPhoneTail = searchPhoneDigits.replace(/^0+/, '');  // "0912…" finds "+218 91…"
   // A typed local number must match the stored international one.
   const searchPhoneKey = searchPhoneDigits.length >= 9 && typeof normalizeCustomerPhoneKey === 'function'
@@ -1873,7 +1876,7 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   if (searchTerm) {
     filtered = filtered.filter(c =>
       foldSearchText(c.name).includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneTail.length >= 4 && entry.key.includes(searchPhoneTail)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneLike && entry.key.includes(searchPhoneDigits)) || (searchPhoneLike && searchPhoneTail.length >= 4 && entry.key.includes(searchPhoneTail)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
       foldSearchText(c.platform).includes(searchTerm)
     );
   }
@@ -2060,7 +2063,7 @@ function showPermissionsModal(userId) {
   modal.dataset.modalType = 'permissions';
   modal.dataset.userId = String(userId);
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.onclick = (e) => { if (e.target === modal) _closeUrlTrackedOverlay(modal); };
   
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden animate-slide-up" onclick="event.stopPropagation()">
@@ -2079,7 +2082,7 @@ function showPermissionsModal(userId) {
               </div>
             </div>
           </div>
-          <button onclick="this.closest('#app-modal').remove()" class="w-10 h-10 rounded-xl bg-white/20 hover:bg-white/30 flex items-center justify-center transition-colors">
+          <button onclick="_closeUrlTrackedOverlay(this.closest('#app-modal'))" class="w-10 h-10 rounded-xl bg-white/20 hover:bg-white/30 flex items-center justify-center transition-colors">
             <i data-lucide="x" class="w-5 h-5"></i>
           </button>
         </div>
@@ -2188,7 +2191,7 @@ function showPermissionsModal(userId) {
             <i data-lucide="upload" class="w-3 h-3"></i>
             <span>${state.language === 'ar' ? 'استيراد' : 'Import'}</span>
           </button>
-          <button onclick="this.closest('#app-modal').remove()" class="px-6 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:opacity-90 transition-all">
+          <button onclick="_closeUrlTrackedOverlay(this.closest('#app-modal'))" class="px-6 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 text-white hover:opacity-90 transition-all">
             ${state.language === 'ar' ? 'تم' : 'Done'}
           </button>
         </div>
@@ -3683,12 +3686,9 @@ function updateReceiptDeliveryCompletionComputed() {
 // fresh at save time so its live _lastModified can't be trusted).
 let _deliveryCompletionOpen = null;
 
-// ---- Delivery completion: split-payment rows (same mechanism as a receipt) --------
-// The driver records what they collected (and the delivery fee) using the exact same
-// method/amount/Rate1/Rate2 rows as a receipt. Rows carry the .payment-split-item /
-// .payment-method / .payment-amount / .payment-rate1 / .payment-rate2 classes so the
-// receipt's own getPaymentTotalsFromDom(root) computes LYD (R1) and USD (R2) totals —
-// one call scoped to the collected container, one to the fee container.
+// ---- Delivery completion: the receipt's split-payment rows ----
+// Same .payment-* classes, so getPaymentTotalsFromDom(root) gives the LYD (R1) and USD
+// (R2) totals of the collected and the fee containers.
 const _DELIVERY_USD_METHODS = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
 
 // Rate 1 turns the entered amount into LYD (R1 = amount x rate1), and the debt
@@ -4348,12 +4348,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             return;
           }
           if (latestData && latestData.id) {
-            // GENUINE concurrent edit (admin changed the receipt while the
-            // form was open). Without a rebase every retry re-sends the same
-            // stale baseline and 409s forever; the only old escape was
-            // close+reopen, which destroyed the typed data and the photo.
-            // Install the fresh copy, rebase the conflict baseline, keep the
-            // driver's DOM inputs untouched, and let the next tap succeed.
+            // A real concurrent edit: rebase on the fresh copy (the driver's inputs
+            // stay) so the next tap succeeds instead of 409ing forever.
             const idxLive = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idxLive !== -1) state.receipts[idxLive] = latestData;
             markCollectionDirty('receipts');
@@ -5713,6 +5709,17 @@ function _blockDestroyedReceiptEdit(receipt) {
   return true;
 }
 
+// The collect dialog and the Permissions Manager push a ?modal= entry but are
+// not closeModal() dialogs: consume it the same way, else Back (desktop, the
+// Android app) or a refresh reopened them (a collection could be re-recorded).
+function _closeUrlTrackedOverlay(el) {
+  if (!el || el.isConnected === false) return;  // already closed: never consume another entry
+  el.remove();
+  const consumed = !_closingSurfaceFromPopstate && !_overlayHistoryConsumePending()
+    && window.history.state?.albayanModal && consumeOverlayHistoryEntry();
+  if (!consumed && /[?&]modal=(collect-receipt|permissions)(&|$)/.test(window.location.search)) clearUrlParams(['modal', 'id']);
+}
+
 function openCollectReceiptModal(receiptId) {
   if (!_canMarkCollected()) return;
   const receipt = state.receipts.find(r => r.id === receiptId);
@@ -5728,14 +5735,14 @@ function openCollectReceiptModal(receiptId) {
 
   document.getElementById('collect-receipt-modal')?.remove();
   const html = `
-    <div id="collect-receipt-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) this.remove()">
+    <div id="collect-receipt-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onclick="if(event.target===this) _closeUrlTrackedOverlay(this)">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
         <div class="p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between sticky top-0 bg-white dark:bg-slate-800 z-10">
           <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center">
             <i data-lucide="hand-coins" class="w-5 h-5 mr-2 text-emerald-600"></i>
             ${isAr ? 'تسجيل التحصيل' : 'Record Collection'}
           </h2>
-          <button onclick="document.getElementById('collect-receipt-modal').remove()" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
+          <button onclick="_closeUrlTrackedOverlay(document.getElementById('collect-receipt-modal'))" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
         </div>
         <div id="collect-modal-body" class="p-5">
           ${_collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt)}
@@ -5892,7 +5899,7 @@ async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceip
   if (!savedOk) return false;
   _logReceiptCollection(receipt, 'collected', totalLYD);
   saveState();
-  document.getElementById('collect-receipt-modal')?.remove();
+  _closeUrlTrackedOverlay(document.getElementById('collect-receipt-modal'));
   const leftLYD = Math.max(targetLYD - totalLYD, 0);
   const isAr = state.language === 'ar';
   showNotification(
@@ -6304,11 +6311,11 @@ function showReceiptEditHistory(receiptId) {
                 ${edit.changes.map(change => `
                   <div class="flex items-start text-sm bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-100 dark:border-slate-700">
                     <div class="min-w-0 flex-1">
-                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(_adEditHistoryText(change.field, 'Field'))}</span>
+                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(_editHistoryFieldLabel(change.field))}</span>
                       <div class="flex flex-wrap items-center mt-1 gap-2 text-xs">
-                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(_adEditHistoryText(change.from))}</span>
+                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(_editHistoryValueText(change.from, change.field))}</span>
                         <i data-lucide="arrow-right" class="w-3 h-3 shrink-0 text-slate-400"></i>
-                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(_adEditHistoryText(change.to))}</span>
+                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(_editHistoryValueText(change.to, change.field))}</span>
                       </div>
                     </div>
                   </div>
@@ -6352,6 +6359,25 @@ function _adEditHistoryText(value, fallback = '—') {
   }
   text = String(text || '').trim();
   return text ? text.slice(0, 500) : fallback;
+}
+
+// History rows are stored in English; Arabic mode translates them on display only.
+const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ (USD)',
+  'Amount (LYD)': 'المبلغ (LYD)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
+  'Payment Status': 'حالة الدفع', 'Delivery Status': 'حالة التوصيل', 'Ad Status': 'حالة الإعلان', 'Start Date': 'تاريخ البداية',
+  'End Date': 'تاريخ النهاية', 'Serial Number': 'رقم الوصل', 'Phone Number': 'رقم الهاتف', Payments: 'الدفعات',
+  'Receipt Funding': 'تمويل الوصولات', 'Funding Receipt': 'وصل التمويل', 'Ad Links': 'روابط الإعلان',
+  paid: 'مدفوع', not_paid: 'غير مدفوع', payment: 'الدفعات', allocation: 'التخصيصات', link: 'الروابط' };
+function _editHistoryFieldLabel(field) {
+  const text = _adEditHistoryText(field, 'Field');
+  return state.language === 'ar' ? _EDIT_HISTORY_AR[text] || text : text;
+}
+function _editHistoryValueText(value, field) {
+  const text = _adEditHistoryText(value);
+  if (state.language !== 'ar') return text;
+  if (text === 'None' || text === 'N/A') return '—';
+  if (/Status|Method/.test(field)) return trMethod(trStatus(_EDIT_HISTORY_AR[text] || text));
+  return text.replace(/(\d+) (payment|allocation|link)\(s\)/g, (_, count, word) => `${_EDIT_HISTORY_AR[word]}: ${count}`);
 }
 
 // Normalize legacy/imported rows before rendering. Older data can use
@@ -6525,11 +6551,11 @@ function showAdEditHistory(adId) {
                 ${edit.changes.length ? edit.changes.map(change => `
                   <div class="flex items-start text-sm bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-100 dark:border-slate-700">
                     <div class="min-w-0 flex-1">
-                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(change.field)}</span>
+                      <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(_editHistoryFieldLabel(change.field))}</span>
                       <div class="flex flex-wrap items-center mt-1 gap-2 text-xs">
-                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(change.from)}</span>
+                        <span class="max-w-full break-words px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded line-through">${Security.escapeHtml(_editHistoryValueText(change.from, change.field))}</span>
                         <i data-lucide="arrow-right" class="w-3 h-3 shrink-0 text-slate-400"></i>
-                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(change.to)}</span>
+                        <span class="max-w-full break-words px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded">${Security.escapeHtml(_editHistoryValueText(change.to, change.field))}</span>
                       </div>
                     </div>
                   </div>
@@ -6594,12 +6620,9 @@ function showMetaAdHistory(adId) {
   lucide.createIcons();
 }
 
-// A response can be lost after the server commits. Keep the same target
-// receipt id, key and version for an identical retry, and clear them only
-// after both authoritative receipt envelopes have been validated and applied.
-// The version stays out of the fingerprint: live sync of our own lost transfer
-// bumps it, and the server replays the key before it checks the version.
-// Each open of the dialog is a new intent, so its count is in the fingerprint.
+// A lost response after a commit: an identical retry keeps the target id, key and
+// version until both receipts are applied. The version is not in the fingerprint (sync
+// bumps it; the key replays first); each dialog open is a new intent.
 const _pendingReceiptTransferAttempts = new Map();
 let _receiptTransferOpens = 0;
 
@@ -6706,13 +6729,8 @@ async function saveReceiptTransfer() {
   // transfer. Server mode stamps both authoritatively in the transfer endpoint.
   const _transferToName = String((state.customers || []).find(c => c && String(c.id) === String(targetCustomerId))?.name || '');
 
-  // MONEY-MATH FIX: the transfer must actually ARRIVE somewhere. Previously it
-  // only reduced the source receipt's remaining (via transfers[]) — the target
-  // customer received nothing usable, so the money effectively vanished (it
-  // never appeared in their Receipt Funding options when creating an ad).
-  // Now every transfer creates a REAL receipt for the receiving customer,
-  // typed TRANSFER_IN and linked back to the source. Accounting stays balanced:
-  // source remaining goes down by X, target gains a receipt worth X.
+  // The transfer ARRIVES as a real TRANSFER_IN receipt for the target, linked to the
+  // source (it once only cut the source, so the money vanished): source -X, target +X.
   const inReceipt = {
     id: serverAttempt?.targetReceiptId || generateId('receipt'),
     recordType: 'receipt',

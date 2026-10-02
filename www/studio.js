@@ -12133,6 +12133,9 @@ function renderStudioAccountScreen() {
   const name = studioWalletText(user.name, 120) || adsStudioText('Your account', 'حسابك');
   const email = studioWalletText(user.email, 254);
   const dark = typeof state !== 'undefined' && state.theme === 'dark';
+  // The app's own /privacy is its bundle (iPhone: nothing opens; Android: the app reloads): the
+  // server address opens the browser there; the web keeps /privacy ('' base).
+  const base = studioEsc(typeof getServerBaseUrl === 'function' ? getServerBaseUrl() : '');
   const row = (onclick, icon, label, value, testid, extra = '') => `
               <button type="button" class="studio-v2-row${extra}" data-testid="${testid}" onclick="${onclick}">
                 ${studioWalletIcon(icon)}
@@ -12155,11 +12158,11 @@ function renderStudioAccountScreen() {
             </div>
             ${renderStudioAccountWhatsapp()}
             <div class="studio-v2-list">
-              <a class="studio-v2-row" data-testid="studio-account-privacy" href="/privacy" target="_blank" rel="noopener">
+              <a class="studio-v2-row" data-testid="studio-account-privacy" href="${base}/privacy" target="_blank" rel="noopener">
                 ${studioWalletIcon('shield-check')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Privacy', 'الخصوصية'))}</span>
               </a>
-              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
+              <a class="studio-v2-row" data-testid="studio-account-terms" href="${base}/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
                 ${studioWalletIcon('scroll-text')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
               </a>
@@ -13442,8 +13445,10 @@ function renderStudioHelpContact() {
 // The customer terms (P5-07): the terms section of the privacy page, at the end of the contact card
 // in the v2 Help screen and the classic help tab alike (an Arabic reader gets the Arabic terms, #terms-ar).
 function renderStudioHelpTerms() {
+  // The packaged app opens the server's page in the browser (its own /privacy is the app bundle).
+  const base = studioEsc(typeof getServerBaseUrl === 'function' ? getServerBaseUrl() : '');
   return `
-            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
+            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="${base}/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
 }
 
 function studioHelpRenderView(view) {

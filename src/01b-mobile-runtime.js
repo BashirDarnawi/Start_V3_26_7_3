@@ -165,6 +165,7 @@ async function retryMobileConnection() {
 
   removeMobileConnectivityNotice();
   const hadGate = !!document.getElementById('mobile-connection-gate');
+  const wasColdStartBlocked = _mobileColdStartBlocked || hadGate;  // read before the gate branch clears it
   removeMobileConnectionGate();
   if (hadGate) {
     _mobileColdStartBlocked = false;
@@ -178,8 +179,8 @@ async function retryMobileConnection() {
       showMobileConnectivityNotice({ serverReachable: false });
       return false;
     }
-  } else if (_mobileColdStartBlocked || (typeof state !== 'undefined' && !state.serverMode)) {
-    // Only a blocked cold start or local fallback: never each resume's "connected"
+  } else if (wasColdStartBlocked || (typeof state !== 'undefined' && !state.serverMode)) {
+    // Only a blocked cold start (its gate is gone: else a blank page) or local fallback, never each resume
     window.location.reload();
   }
   return true;
@@ -289,11 +290,9 @@ function closeTopMobileSurface() {
     return true;
   }
 
-  // Delivery, collect, history and chooser dialogs are standalone overlays
-  // without activeModal state. Clean their URL/working state as well as DOM.
-  // The driver completion form keeps a crash-recovery draft; write the
-  // pending debounced keystrokes before Back destroys the DOM the draft
-  // writer reads from (the timer would no-op after removal).
+  // Standalone overlays (delivery, collect, history, choosers) have no activeModal: clean
+  // their URL/working state too. The driver form's crash draft writes its debounced keys
+  // before Back removes the DOM it reads (the timer would no-op after).
   if (topSurface.id === 'delivery-complete-modal' && typeof _flushDeliveryCompletionDraftNow === 'function') {
     try { _flushDeliveryCompletionDraftNow(); } catch (_) {}
   }
@@ -312,6 +311,14 @@ function getMobileLandingView() {
 }
 
 async function handleAndroidBackButton(event = {}) {
+  // Under the app lock Back only backgrounds the app: closing or navigating behind
+  // it threw away a half-filled dialog and its photos.
+  if (document.getElementById('native-app-lock')) {
+    _mobileLastBackAt = 0;
+    const App = getCapacitorAppPlugin();
+    if (App?.minimizeApp) { try { await App.minimizeApp(); } catch (_) {} }
+    return;
+  }
   if (closeTopMobileSurface()) {
     _mobileLastBackAt = 0;
     return;
@@ -385,12 +392,10 @@ async function setupMobileRuntime() {
   }
 }
 
-// PHONE BROWSER BACK + OVERLAY HISTORY MODEL: tracked #app-modal dialogs push a
-// ?modal= entry; every other overlay gets one same-URL sentinel entry (body
-// observer; the nav drawer pushes its own). Back pops the entry and closes the
-// top surface only (closeTopMobileSurface); X/Cancel consume the entry via
-// history.back() flagged as bookkeeping; a navigation on top of a sentinel
-// replaces it; Capacitor keeps its native backButton path; desktop unchanged.
+// PHONE BROWSER BACK: tracked #app-modal dialogs push a ?modal= entry, other overlays one
+// same-URL sentinel (body observer; the drawer pushes its own). Back pops it and closes the
+// top surface; X/Cancel consume it via a bookkeeping history.back(); a navigation replaces a
+// sentinel. Capacitor keeps its native backButton; desktop is unchanged.
 
 let _overlaySentinelDepth = 0;          // sentinels pushed and not yet consumed this session
 let _albayanLastModalUrlPushAt = 0;     // set by updateUrlParams({ modal… }) — see 11-routing-cloud.js
@@ -512,12 +517,9 @@ function _handleOverlayDomChange() {
   _overlayObservedCount = count;
 
   if (count > previous) {
-    // Surface(s) opened. If the opener itself just pushed a ?modal history
-    // entry (all tracked #app-modal openers and the collect-receipt dialog
-    // do, via updateUrlParams), Back already has an entry to consume — a
-    // sentinel too would cost the user an extra Back press. One sentinel per
-    // transition: batch-opens of several untracked surfaces in one task are
-    // not a real flow.
+    // Surface(s) opened. An opener that just pushed a ?modal entry (tracked #app-modal
+    // dialogs, collect-receipt) already gave Back one: a sentinel would cost an extra press.
+    // One sentinel per transition (batch-opens in one task are not a real flow).
     if (Date.now() - _albayanLastModalUrlPushAt > 400) {
       pushMobileOverlayHistoryEntry();
     }

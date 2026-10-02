@@ -1065,7 +1065,7 @@ function exportData() {
   // BEFORE attempting, keep the local auto-backup, offer the clipboard as an
   // escape hatch, and never claim success or silence the reminder here.
   if (cannotPrintOrDownload()) {
-    createAutoBackup();
+    createAutoBackup(STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
     const isAr = state.language === 'ar';
     const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
       `${inAppLimitationText('download')}\n\n${isAr ? 'هل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟' : 'Copy the backup to the clipboard instead?'}`
@@ -1103,8 +1103,8 @@ function exportData() {
     URL.revokeObjectURL(url);
   }, 2000);
   
-  // Create auto backup
-  createAutoBackup();
+  // Refresh the rolling auto-backup only once it is a day old (not a full copy per export)
+  createAutoBackup(STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
 
   // Silences the local-mode "export a backup" durability reminder for 5 days
   // (see maybeShowLocalDataDurabilityReminder in 17-init.js).
@@ -1588,14 +1588,13 @@ async function clearAllData() {
     return;
   }
   if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
-    // Clear in-memory collections
-    state.ads = [];
-    state.receipts = [];
-    state.customers = [];
-    state.pages = [];
-    state.users = [];
-    state.exchangeRateHistory = [];
+    // Every stored collection (a hand list missed the wallet, clothes, dollar purchases...),
+    // the old recovery key (it could still reset passwords) and no queued write of them.
+    for (const name of PERSISTED_COLLECTIONS) { state[name] = []; clearCollectionCorruption(name); }
     state.logs = [];
+    state.localRecovery = null;
+    delete state._quarantinedUnsafeRecords;
+    resetDirtyCollectionQueueForScopeChange();
     state.currentUser = null;
     SessionManager.destroySession();
     

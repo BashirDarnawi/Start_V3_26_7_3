@@ -2957,11 +2957,12 @@ body.perf-lite .glass-panel:hover {
 }
 
 /* Native privacy screen. It lives outside #app so a background data render
-   cannot remove it, and it respects notches plus short landscape screens. */
+   cannot remove it, and it respects notches plus short landscape screens.
+   The highest z-index: no dialog may cover it (one at 10001 once did). */
 .native-app-lock {
   position: fixed;
   inset: 0;
-  z-index: 10000;
+  z-index: 2147483647;
   display: flex;
   min-width: 0;
   min-height: var(--app-visual-height, 100dvh);

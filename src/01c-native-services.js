@@ -377,7 +377,8 @@ function _updateVisualViewportVariables() {
   document.documentElement.style.setProperty('--app-visual-height', `${height}px`);
   document.documentElement.style.setProperty('--app-visual-width', `${width}px`);
   document.documentElement.style.setProperty('--app-visual-offset-top', `${top}px`);
-  const keyboardLikelyOpen = height < Math.max(360, (window.innerHeight || height) * 0.72);
+  // Relative only: a 360 px floor took a phone held sideways for an open keyboard (no bottom nav).
+  const keyboardLikelyOpen = height < (window.innerHeight || height) * 0.72;
   document.body.classList.toggle('keyboard-open', keyboardLikelyOpen || document.body.classList.contains('native-keyboard-open'));
 }
 
@@ -411,12 +412,9 @@ async function getNativeBiometricInfo(refresh = false) {
   } catch (_) { return null; }
 }
 
-// iOS presents the Face ID / passcode sheet out of process: UIKit reports
-// willResignActive when it appears and didBecomeActive when it leaves, which
-// @capacitor/app forwards as appStateChange. While this flag is set those two
-// events are the sheet's own and must not count as a background / return
-// (otherwise a cancelled prompt re-opened itself forever, and a slow unlock
-// was prompted twice).
+// iOS shows the Face ID / passcode sheet out of process: its willResignActive and
+// didBecomeActive reach appStateChange. While this flag is set they are the sheet's own,
+// not a background / return (a cancelled prompt re-opened forever; slow unlocks prompted twice).
 let _nativePromptOpen = false;
 
 async function authenticateNativeDevice(reason = '') {

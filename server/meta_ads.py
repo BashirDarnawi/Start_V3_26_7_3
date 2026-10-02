@@ -7603,9 +7603,9 @@ def create_meta_ads_router(
         ).hexdigest()
         if not constant_time_equal(supplied, expected):
             # Only INVALID deliveries count: Meta's real ones may all arrive from one address behind the proxy.
-            from .auth_limits import _client_ip
+            from .auth_limits import _client_ip, _rate_subject
             from .rate_limiter import check_rate_limit
-            _ok, _left, _retry_ms = check_rate_limit(f"meta-webhook-bad:{_client_ip(request)}", max_attempts=60, window_ms=60 * 1000)
+            _ok, _left, _retry_ms = check_rate_limit(f"meta-webhook-bad:{_rate_subject(_client_ip(request))}", max_attempts=60, window_ms=60 * 1000)
             if not _ok:
                 raise HTTPException(status_code=429, detail="Too many invalid webhook deliveries", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
             raise HTTPException(status_code=403, detail="Invalid Meta webhook signature")

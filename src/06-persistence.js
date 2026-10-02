@@ -39,6 +39,8 @@ const idbSync = {
   retryDelayMs: 2000,
   maxRetryDelayMs: 30000
 };
+// Set when a boot without IndexedDB took a marked (newest) snapshot: saveState keeps it marked.
+let _inlineSnapshotAdopted = false;
 
 function resetDirtyCollectionQueueForScopeChange() {
   if (idbSync.timer) clearTimeout(idbSync.timer);
@@ -46,13 +48,12 @@ function resetDirtyCollectionQueueForScopeChange() {
   idbSync.dirty.clear();
   idbSync.retryDelayMs = 2000;
   idbSync.scopeGeneration += 1;
+  _inlineSnapshotAdopted = false;
 }
 
-// SINGLE-WRITER TAB LOCK: whole-collection IndexedDB rewrites from two tabs
-// would be last-writer-wins, so the newest tab claims a localStorage lock
-// (Safari 15 has no Web Locks) and older tabs stop persisting until reloaded;
-// a superseded tab never re-claims (its arrays may be stale); expiry is by
-// heartbeat because iOS kills tabs without firing unload.
+// SINGLE-WRITER TAB LOCK: two tabs rewriting whole collections is last-writer-wins, so the
+// newest tab claims a localStorage lock (Safari 15 has no Web Locks); older tabs stop
+// persisting and never re-claim (stale arrays); heartbeat expiry (iOS kills without unload).
 const TAB_LOCK_KEY = 'albayan_tab_lock';
 const TAB_LOCK_HEARTBEAT_MS = 5000;
 const _albayanTabLock = {
@@ -335,11 +336,9 @@ function _albayanHadDataCookie() {
   }
 }
 
-// Captured ONCE at boot by loadState(): the snapshot was missing while the
-// sentinel cookie survived. It must be a runtime flag, not a render-time
-// localStorage re-read — loadCollectionsFromStorage()'s trailing saveState()
-// re-creates the snapshot BEFORE the first render, so re-reading it later
-// could never observe the eviction.
+// Captured ONCE at boot by loadState() (snapshot missing, sentinel cookie kept): a later
+// re-read could never see the eviction, as loadCollectionsFromStorage()'s trailing
+// saveState() re-creates the snapshot before the first render.
 let _storageLossAtBoot = false;
 
 // Before the local first-run setup screen: true means the browser deleted this
@@ -385,9 +384,10 @@ function saveState() {
       for (const key of PERSISTED_COLLECTIONS) {
         delete toSave[key];
       }
-    } else if (window.__albayanIdbOpenInconclusive !== true) {
+    } else if (window.__albayanIdbOpenInconclusive !== true || _inlineSnapshotAdopted) {
       // This snapshot is the newest copy: the next startup must prefer it over IndexedDB.
-      // (An inconclusive open loaded nothing, so its empty arrays must never win.)
+      // (An inconclusive boot loaded nothing, so its empty arrays must never win, unless it
+      // adopted a marked snapshot: that one is still the newest copy.)
       toSave._collectionsInline = Date.now();
     }
     // The studio shell must never rewrite the manager's remembered page.
@@ -502,11 +502,8 @@ function loadState() {
       // Sanitize loaded data to prevent XSS from corrupted storage
       const sanitizedData = Security.sanitizeObject(parsed);
 
-      // Extract legacy large collections (older versions stored everything in
-      // localStorage, and no-IndexedDB mode still does). Built from
-      // PERSISTED_COLLECTIONS so every collection saveState() persists is
-      // round-tripped — a hard-coded list here once missed walletTransactions
-      // and serviceSubscriptions, wiping wallets on reload in no-IDB mode.
+      // Legacy large collections (old versions and no-IndexedDB mode keep them here), built
+      // from PERSISTED_COLLECTIONS: a hard-coded list once missed the wallet (wiped on reload).
       const legacyCollections = {};
       for (const key of PERSISTED_COLLECTIONS) {
         legacyCollections[key] = Array.isArray(sanitizedData[key]) ? sanitizedData[key] : null;
@@ -675,6 +672,7 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
       // Edits made while IndexedDB was unavailable live only in the snapshot: a non-empty copy wins and is re-persisted.
       state[name] = legacy[name];
       if (db) await saveCollectionToIndexedDB(name, state[name]);
+      else _inlineSnapshotAdopted = true;
     } else if (loaded !== null && loaded !== undefined) {
       state[name] = loaded;
     } else if (Array.isArray(legacy[name])) {

@@ -58,6 +58,36 @@ if (capacitor.plugins?.Keyboard?.resize !== 'body') failures.push('Keyboard must
 if (!iosPlist.includes('<key>NSFaceIDUsageDescription</key>')) failures.push('iOS Face ID privacy explanation is missing.');
 if (!iosPlist.includes('<key>NSCameraUsageDescription</key>')) failures.push('iOS camera privacy explanation is missing.');
 
+// App Store Connect rejects an upload (ITMS-91053) when code inside the app
+// uses a "required reason" API that no privacy manifest declares. The camera
+// plugin's IONCameraLib.framework contains code that reads file creation dates
+// (URLResourceKey.creationDateKey), and Swift Package Manager does not package
+// that library's own manifest, so the app ships one and copies it into App.app.
+const privacyManifestFile = 'ios/App/App/PrivacyInfo.xcprivacy';
+if (!fs.existsSync(path.join(ROOT, privacyManifestFile))) {
+  failures.push(`${privacyManifestFile} is missing (App Store Connect rejects the upload with ITMS-91053).`);
+} else {
+  const manifest = read(privacyManifestFile).replace(/<!--[\s\S]*?-->/g, '');
+  if (!/<key>NSPrivacyTracking<\/key>\s*<false\s*\/>/.test(manifest)) failures.push('iOS privacy manifest must set NSPrivacyTracking to false (the app does not track).');
+  const fileTimestamp = [...manifest.matchAll(/<dict>((?:(?!<\/?dict>)[\s\S])*)<\/dict>/g)].map(match => match[1])
+    .find(body => /<key>NSPrivacyAccessedAPIType<\/key>\s*<string>NSPrivacyAccessedAPICategoryFileTimestamp<\/string>/.test(body));
+  const reasons = fileTimestamp?.match(/<key>NSPrivacyAccessedAPITypeReasons<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] || '';
+  for (const reason of ['C617.1', '3B52.1']) {
+    if (!reasons.includes(`<string>${reason}</string>`)) failures.push(`iOS privacy manifest must declare NSPrivacyAccessedAPICategoryFileTimestamp with reason ${reason} (the camera library's own reasons).`);
+  }
+}
+const pbxObject = id => iosProject.match(new RegExp(`\\b${id} /\\*[^*]*\\*/ = \\{\\r?\\n([\\s\\S]*?)\\r?\\n\\t\\t\\};`))?.[1] || '';
+const privacyBuildFile = iosProject.match(/\b([0-9A-F]{24}) \/\* PrivacyInfo\.xcprivacy in Resources \*\/ = \{isa = PBXBuildFile; fileRef = ([0-9A-F]{24}) \/\* PrivacyInfo\.xcprivacy \*\/; \};/);
+if (!privacyBuildFile
+  || !new RegExp(`\\b${privacyBuildFile[2]} /\\* PrivacyInfo\\.xcprivacy \\*/ = \\{isa = PBXFileReference;[^}]*\\bpath = PrivacyInfo\\.xcprivacy; sourceTree = "<group>"; \\};`).test(iosProject)
+  || !pbxObject('504EC3061FED79650016851F').includes(`${privacyBuildFile[2]} /* PrivacyInfo.xcprivacy */,`)
+  || !pbxObject('504EC3021FED79650016851F').includes(`${privacyBuildFile[1]} /* PrivacyInfo.xcprivacy in Resources */,`)) {
+  failures.push("Xcode must copy App/PrivacyInfo.xcprivacy into the app: list it in the App group and in the App target's Copy Bundle Resources phase.");
+}
+if (/no privacy manifest is needed/i.test(read('docs/store/IOS_APP_STORE_RELEASE.md').replace(/\s+/g, ' '))) {
+  failures.push('docs/store/IOS_APP_STORE_RELEASE.md still says no privacy manifest is needed.');
+}
+
 if (failures.length) {
   console.error(`Mobile configuration failed (${failures.length} problem${failures.length === 1 ? '' : 's'}):`);
   failures.forEach(problem => console.error(`  - ${problem}`));

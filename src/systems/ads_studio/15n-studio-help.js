@@ -1130,8 +1130,10 @@ function renderStudioHelpContact() {
 // The customer terms (P5-07): the terms section of the privacy page, at the end of the contact card
 // in the v2 Help screen and the classic help tab alike (an Arabic reader gets the Arabic terms, #terms-ar).
 function renderStudioHelpTerms() {
+  // The packaged app opens the server's page in the browser (its own /privacy is the app bundle).
+  const base = studioEsc(typeof getServerBaseUrl === 'function' ? getServerBaseUrl() : '');
   return `
-            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
+            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="${base}/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
 }
 
 function studioHelpRenderView(view) {

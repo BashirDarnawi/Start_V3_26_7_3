@@ -1,6 +1,8 @@
 // Work-count and race regressions against authoritative browser source.
 // Network and storage completions are controlled; no real server or user data.
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const loadBrowserSource = require('./helpers/load-browser-source');
 
 let passed = 0;
@@ -37,6 +39,84 @@ function syncFixture() {
   return f;
 }
 const entity = (id, version = 20) => ({ id, data: { id, name: id, _lastModified: version }, lastModified: version });
+// load-browser-source stubs saveState: the snapshot tests re-evaluate the real one.
+const persistenceSrc = fs.readFileSync(path.join(__dirname, '..', 'src', '06-persistence.js'), 'utf8');
+function useRealSaveState(f) {
+  const at = persistenceSrc.indexOf('function saveState() {');
+  f.run(persistenceSrc.slice(at, persistenceSrc.indexOf('\n}\n', at) + 2));
+  return f;
+}
+const snapshotOf = f => JSON.parse(f.sandbox.localStorage.getItem('albayan_complete_state') || 'null');
+const drain = async () => { for (let i = 0; i < 12; i += 1) await new Promise(resolve => setImmediate(resolve)); };
+// An IndexedDB backups store with a byte quota and real transaction semantics: requests run one tick
+// later, a request that throws aborts its transaction and undoes every write made in it, and a
+// transaction that ends cleanly commits on its own (oncomplete).
+function quotaBackupsDb(quotaBytes) {
+  const fake = { rows: new Map(), otherBytes: 0, refused: 0 };
+  const used = () => fake.otherBytes + [...fake.rows.values()].reduce((sum, row) => sum + row.bytes, 0);
+  fake.transaction = () => {
+    const tx = {}, undo = [];
+    let pending = 0, failed = false, ended = false;
+    const finish = () => {
+      if (pending || ended) return;
+      ended = true;
+      setImmediate(() => {
+        if (!failed) { if (tx.oncomplete) tx.oncomplete(); return; }
+        undo.reverse().forEach(step => step());
+        if (tx.onabort) tx.onabort();
+      });
+    };
+    const write = (id, row) => {
+      const had = fake.rows.has(id), old = fake.rows.get(id);
+      undo.push(() => (had ? fake.rows.set(id, old) : fake.rows.delete(id)));
+      if (row) fake.rows.set(id, row); else fake.rows.delete(id);
+    };
+    const request = work => {
+      const req = {};
+      pending += 1;
+      setImmediate(() => {
+        pending -= 1;
+        try { req.result = work(); if (req.onsuccess) req.onsuccess({ target: req }); }
+        catch (error) { req.error = error; failed = true; if (req.onerror) req.onerror({ target: req }); if (tx.onerror) tx.onerror({ target: req }); }
+        finish();
+      });
+      return req;
+    };
+    const cursor = (range, direction) => {
+      const req = {};
+      const list = [...fake.rows.entries()].filter(([, row]) => !range || row.value.createdAt <= range.upper)
+        .sort((a, b) => (a[1].value.createdAt - b[1].value.createdAt) * (direction === 'prev' ? -1 : 1));
+      pending += 1;
+      const step = () => setImmediate(() => {
+        const entry = list.shift();
+        let more = false;
+        const result = entry ? { primaryKey: entry[0], key: entry[1].value.createdAt, value: entry[1].value, continue: () => { more = true; step(); } } : null;
+        if (req.onsuccess) req.onsuccess({ target: { result } });
+        if (!more) { pending -= 1; finish(); }
+      });
+      step();
+      return req;
+    };
+    const store = {
+      put: value => request(() => {
+        const bytes = JSON.stringify(value).length;
+        if (used() - (fake.rows.get(value.id)?.bytes || 0) + bytes > quotaBytes) {
+          fake.refused += 1;
+          throw Object.assign(new Error('The quota has been exceeded.'), { name: 'QuotaExceededError' });
+        }
+        write(value.id, { value, bytes });
+        return value.id;
+      }),
+      clear: () => request(() => { for (const id of [...fake.rows.keys()]) write(id, null); }),
+      delete: id => request(() => { write(id, null); }),
+      index: () => ({ openCursor: cursor, openKeyCursor: cursor })
+    };
+    tx.objectStore = () => store;
+    setImmediate(finish);  // a transaction given no request commits at once
+    return tx;
+  };
+  return fake;
+}
 
 async function main() {
   await test('edits before a collection write starts need 2 writes, not 3, and save latest records', async () => {
@@ -241,6 +321,103 @@ async function main() {
     assert.equal(calls.length, 2); assert.ok(calls[1].includes('after_id=p2'));
     assert.equal(rows.length, 2); assert.equal(rows.find(row => row.id === 'p1')._deleted, true);
     assert.equal(rows.find(row => row.id === 'p1')._lastModified, 30);
+  });
+  await test('R1 storage-integrity-3: a mid-session IndexedDB reopen that stalls past the 3 s watchdog keeps the snapshot marked newest, so the next launch keeps the edit', async () => {
+    const f = useRealSaveState(loadBrowserSource());
+    const timers = new Map();
+    let seq = 0;
+    f.sandbox.setTimeout = (fn, ms) => { timers.set(++seq, { fn, ms: Number(ms) || 0 }); return seq; };
+    f.sandbox.clearTimeout = id => { timers.delete(id); };
+    const advance = ms => { for (const [id, timer] of [...timers]) if (timer.ms <= ms) { timers.delete(id); timer.fn(); } };
+    const opens = [];
+    f.sandbox.indexedDB = f.sandbox.window.indexedDB = { open: () => { const request = {}; opens.push(request); return request; } };
+    const database = { objectStoreNames: { contains: () => true }, close() {} };
+    f.run('db = null');
+    const boot = f.sandbox.initIndexedDB();
+    opens[0].onsuccess({ target: { result: database } });
+    assert.equal(await boot, database);
+    assert.equal(f.sandbox.window.__albayanIdbOpenInconclusive, false);
+    f.state.receipts = [{ id: 'r_old', amountUSD: 10 }];
+    database.onclose();  // iOS drops the connection in the background, and the reopen never answers
+    assert.equal(opens.length, 2);
+    advance(3000); await settle();
+    assert.equal(f.run('db'), null);
+    assert.notEqual(f.sandbox.window.__albayanIdbOpenInconclusive, true, 'a stalled REopen is not an unreadable boot: memory is complete');
+    assert.equal(await f.sandbox.addRecord(f.state.receipts, { id: 'r_new', amountUSD: 25 }), true);
+    const saved = snapshotOf(f);
+    assert.ok(saved._collectionsInline, 'before: the snapshot lost its "newest copy" marker');
+    assert.deepEqual(saved.receipts.map(row => row.id), ['r_new', 'r_old']);
+    // The next launch: IndexedDB opens again and still holds the copy from before the drop.
+    const next = loadBrowserSource();
+    next.sandbox.localStorage.setItem('albayan_complete_state', JSON.stringify(saved));
+    const legacy = next.sandbox.loadState();
+    next.run('db = {}');
+    next.sandbox.loadCollectionFromIndexedDB = async name => (name === 'receipts' ? [{ id: 'r_old', amountUSD: 10 }] : null);
+    next.sandbox.saveCollectionToIndexedDB = async () => true;
+    await next.sandbox.loadCollectionsFromStorage(legacy);
+    assert.deepEqual(Array.from(next.state.receipts, row => row.id), ['r_new', 'r_old'], 'before: the receipt typed after the drop vanished');
+  });
+  await test('R1 storage-integrity-3: a boot whose IndexedDB never answers keeps the marker of the snapshot it adopted, and never marks empty arrays it did not adopt', async () => {
+    for (const marked of [true, false]) {
+      const f = useRealSaveState(loadBrowserSource());
+      f.run('db = null');
+      f.sandbox.window.__albayanIdbOpenInconclusive = true;
+      const legacy = { _collectionsInline: marked };
+      for (const name of f.run('PERSISTED_COLLECTIONS')) legacy[name] = marked ? [] : null;
+      if (marked) legacy.receipts = [{ id: 'r_new', amountUSD: 25 }];
+      await f.sandbox.loadCollectionsFromStorage(legacy);
+      assert.equal(!!snapshotOf(f)._collectionsInline, marked, marked ? 'before: the first save dropped the adopted marker' : 'nothing adopted: its empty arrays must never win');
+      f.state.receipts.unshift({ id: 'r_next', amountUSD: 5 });
+      f.sandbox.saveState();
+      assert.equal(!!snapshotOf(f)._collectionsInline, marked);
+      f.sandbox.resetDirtyCollectionQueueForScopeChange();  // another storage scope forgets the adoption
+      f.sandbox.saveState();
+      assert.equal(!!snapshotOf(f)._collectionsInline, false);
+    }
+  });
+  await test('R1 storage-integrity-5: local auto-backups keep ONE rolling copy over 45 days, and a copy refused for quota leaves no stale copy behind', async () => {
+    const f = loadBrowserSource();
+    const DAY = 86400000;
+    f.sandbox.__now = Date.UTC(2026, 0, 1);
+    f.run('Date.now = () => globalThis.__now;');
+    f.sandbox.IDBKeyRange = { upperBound: upper => ({ upper }) };
+    const photo = `data:image/jpeg;base64,${'A'.repeat(150 * 1024)}`;
+    f.state.receipts = Array.from({ length: 40 }, (_, i) => ({ id: `r${i}`, amountUSD: 10, photos: [photo] }));
+    const workspace = JSON.stringify(f.state.receipts).length;  // ~5.9 MB with the photos
+    const fake = quotaBackupsDb(workspace * 5);  // the device has room for the workspace and about four copies
+    fake.otherBytes = workspace;
+    for (const id of ['backup_legacy_1', 'backup_legacy_2']) fake.rows.set(id, { value: { id, createdAt: f.sandbox.__now - DAY }, bytes: 100 });
+    f.sandbox.__fakeDb = fake;
+    f.run('db = __fakeDb');
+    let most = 0;
+    const results = [];
+    for (let day = 1; day <= 45; day += 1) {
+      f.sandbox.__now += DAY;
+      results.push(await f.sandbox.createAutoBackup());
+      await drain();
+      most = Math.max(most, fake.rows.size);
+    }
+    console.log(`        Workspace ${(workspace / 1048576).toFixed(1)} MB; most copies stored over 45 days: ${most}`);
+    assert.equal(most, 1, 'before: full copies piled up until the quota was full, and none was pruned again');
+    assert.ok(results.every(Boolean), `refused on days ${results.map((ok, i) => (ok ? '' : i + 1)).filter(String).join()}`);
+    assert.deepEqual([...fake.rows.keys()], ['auto-latest']);
+    // An export within a day keeps the copy instead of rewriting it; a day later it is refreshed.
+    const kept = fake.rows.get('auto-latest').value.createdAt;
+    f.sandbox.__now += DAY / 2;
+    assert.equal(await f.sandbox.createAutoBackup(DAY), false);
+    await drain();
+    assert.equal(fake.rows.get('auto-latest').value.createdAt, kept);
+    f.sandbox.__now += DAY;
+    assert.equal(await f.sandbox.createAutoBackup(DAY), true);
+    await drain();
+    assert.equal(fake.rows.get('auto-latest').value.createdAt, f.sandbox.__now);
+    // The phone fills up: the new copy no longer fits, and the stale one is gone as well.
+    fake.otherBytes = workspace * 4.5;
+    f.sandbox.__now += DAY;
+    assert.equal(await f.sandbox.createAutoBackup(), false);
+    await drain();
+    assert.equal(fake.refused, 1);
+    assert.equal(fake.rows.size, 0, 'a refused copy leaves no stale copy holding the space');
   });
   console.log(`\n${passed} sync/persistence work regressions passed; ${failed} failed.`);
   if (failed) process.exitCode = 1;

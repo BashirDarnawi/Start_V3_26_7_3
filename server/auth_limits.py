@@ -167,9 +167,27 @@ def _client_ip(request: Request) -> str:
     return str(peer)[:80]  # the ip columns are VARCHAR(80)
 
 
+def _rate_subject(ip: str) -> str:
+    """What a per-address limit counts: the IPv4 address, or the whole IPv6 /64.
+
+    One IPv6 line or server gets a /64 (2**64 addresses), so counting the full
+    address gave every request a fresh allowance. Sessions, audit rows and
+    access logs keep the full address from _client_ip.
+    """
+    try:
+        address = ipaddress.ip_address(str(ip or "").strip())
+    except ValueError:
+        return ip
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:  # ::ffff:a.b.c.d is that IPv4 address
+            return str(address.ipv4_mapped)
+        return str(ipaddress.IPv6Network((int(address) >> 64 << 64, 64)))
+    return str(address)
+
+
 def _rate_key(request: Request, email: str) -> str:
     """Generate rate limit key from IP + email"""
-    return f"{_client_ip(request)}|{email.lower()}"
+    return f"{_rate_subject(_client_ip(request))}|{email.lower()}"
 
 
 def _rate_check(request: Request, email: str) -> tuple[bool, int]:
@@ -187,7 +205,7 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
     # (ip,email) bucket exists: otherwise each made-up email still minted a
     # key and the flood filled the limiter store. Read-only, so a blocked
     # account's retries still never spend the office's shared allowance.
-    ip_key = f"login:ip:{_client_ip(request)}"
+    ip_key = f"login:ip:{_rate_subject(_client_ip(request))}"
     if get_rate_limit_status(ip_key, _LOGIN_WINDOW_MS) >= _LOGIN_IP_MAX_ATTEMPTS:
         ok_ip, _left_ip, retry_ip = check_rate_limit(ip_key, _LOGIN_IP_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
         if not ok_ip:
@@ -227,7 +245,8 @@ def _login_address_known(email: str, ip: str) -> bool:
     that bucket, an address the account already signed in from may still try:
     a wrong password from it still gets 401 and its own (ip,email) bucket still
     caps it, while new addresses stay blocked (the IP-rotation defence). An
-    unknown email and an unknown address get the same 429.
+    unknown email and an unknown address get the same 429. "This address" is
+    its _rate_subject: a phone's IPv6 privacy address changes inside its /64.
     """
     try:
         from sqlalchemy import text
@@ -247,6 +266,16 @@ def _login_address_known(email: str, ip: str) -> bool:
                 {"uid": user_id, "ip": ip, "since": since},
             ).first():
                 return True
+            subject = _rate_subject(ip)
+            recent_ips = conn.execute(
+                text(
+                    "SELECT ip FROM sessions WHERE user_id=:uid AND created_at>=:since "
+                    "ORDER BY created_at DESC LIMIT 50"
+                ),
+                {"uid": user_id, "since": since},
+            ).scalars().all()
+            if any(_rate_subject(str(seen or "")) == subject for seen in recent_ips):
+                return True
             # Expired sessions are deleted, so a daily sign-in is also known
             # from the address its login audit row recorded.
             rows = conn.execute(
@@ -261,7 +290,7 @@ def _login_address_known(email: str, ip: str) -> bool:
                 meta = json_loads(raw or "")
             except ValueError:
                 continue
-            if isinstance(meta, dict) and meta.get("ip") == ip:
+            if isinstance(meta, dict) and _rate_subject(str(meta.get("ip") or "")) == subject:
                 return True
         return False
     except Exception:
@@ -284,7 +313,7 @@ def _reset_rate_check(request: Request, email: str) -> tuple[bool, int]:
     # email — unbounded noise that both floods the limiter store and writes an
     # audit row per attempt. Sized generously (a whole office behind one NAT
     # address stays well under it) but finite. Mirrors reset-confirm:ip:.
-    ip_ceiling_key = f"reset:ip:{_client_ip(request)}"
+    ip_ceiling_key = f"reset:ip:{_rate_subject(_client_ip(request))}"
     ip_ok, _ip_left, ip_retry = check_rate_limit(
         ip_ceiling_key, _RESET_IP_MAX_ATTEMPTS, _RESET_WINDOW_MS
     )
@@ -311,7 +340,7 @@ def _reset_confirm_rate_check(request: Request, token_hash: str) -> tuple[bool, 
     """Limit confirms by peer IP and one-way token hash, never a global key."""
     from .rate_limiter import check_rate_limit
 
-    ip_key = f"reset-confirm:ip:{_client_ip(request)}"
+    ip_key = f"reset-confirm:ip:{_rate_subject(_client_ip(request))}"
     allowed, _left, retry = check_rate_limit(
         ip_key, _RESET_EMAIL_MAX_ATTEMPTS, _RESET_WINDOW_MS
     )
@@ -329,7 +358,7 @@ def _setup_rate_check(request: Request) -> tuple[bool, int]:
     from .rate_limiter import check_rate_limit
 
     allowed, _left, retry = check_rate_limit(
-        f"setup:ip:{_client_ip(request)}", _SETUP_IP_MAX_ATTEMPTS, _SETUP_WINDOW_MS
+        f"setup:ip:{_rate_subject(_client_ip(request))}", _SETUP_IP_MAX_ATTEMPTS, _SETUP_WINDOW_MS
     )
     if not allowed:
         return False, int(retry or 0)
@@ -344,7 +373,7 @@ def _app_handoff_rate_check(request: Request, user_id: str) -> tuple[bool, int]:
     from .rate_limiter import check_rate_limit
 
     allowed, _left, retry = check_rate_limit(
-        f"applogin-handoff:ip:{_client_ip(request)}",
+        f"applogin-handoff:ip:{_rate_subject(_client_ip(request))}",
         _APP_LOGIN_HANDOFF_IP_MAX_ATTEMPTS,
         _APP_LOGIN_WINDOW_MS,
     )
@@ -363,7 +392,7 @@ def _app_exchange_rate_check(request: Request) -> tuple[bool, int]:
     from .rate_limiter import check_rate_limit
 
     allowed, _left, retry = check_rate_limit(
-        f"applogin-exchange:ip:{_client_ip(request)}",
+        f"applogin-exchange:ip:{_rate_subject(_client_ip(request))}",
         _APP_LOGIN_EXCHANGE_MAX_ATTEMPTS,
         _APP_LOGIN_WINDOW_MS,
     )

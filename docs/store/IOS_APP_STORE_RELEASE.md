@@ -18,11 +18,17 @@ once or for every release.
 - `ITSAppUsesNonExemptEncryption = NO` is set (the app only uses HTTPS and the
   system keychain), so App Store Connect will not ask export-compliance
   questions for every build.
-- Arabic and English are declared (`CFBundleLocalizations`), the binary is
-  arm64-only, and no privacy manifest is needed in the app target: Capacitor
-  ships its own and none of the linked plugins use a "required reason" API.
-  If a future upload email mentions ITMS-91053, add
-  `ios/App/App/PrivacyInfo.xcprivacy` with the reason code the email names.
+- Arabic and English are declared (`CFBundleLocalizations`) and the binary is
+  arm64-only.
+- The app ships its own privacy manifest, `ios/App/App/PrivacyInfo.xcprivacy`
+  (no tracking). Apple requires one because the camera plugin's
+  `IONCameraLib.framework` contains code that reads file creation dates, one
+  of Apple's "required reason" APIs, and that library's own manifest is not
+  packaged into the app. The app's manifest therefore declares file
+  timestamps with the library's reasons `C617.1` and `3B52.1`. Without it App
+  Store Connect rejects the upload (ITMS-91053). `npm run test:mobile-config`
+  checks that the file exists and that the Xcode project copies it into the
+  app.
 - Public pages Apple asks for are live: privacy policy
   `https://albayanhub.com/privacy`, deletion request
   `https://albayanhub.com/delete-account`.
@@ -130,8 +136,12 @@ In Xcode:
 4. In the Organizer: **Distribute App → App Store Connect → Upload**, keep
    the default options (upload symbols, manage version and build number can
    stay off because you set them yourself), **Upload**.
-5. Apple processes the build (usually 10–60 minutes) and emails you. If the
-   email lists an ITMS warning, read it: most are informational.
+5. Apple processes the build (usually 10–60 minutes) and emails you. Read
+   every ITMS line in that email. ITMS-91053 ("Missing API declaration")
+   means the build is invalid and cannot be tested or submitted: add the API
+   category and reason code the email names to
+   `ios/App/App/PrivacyInfo.xcprivacy`, raise the build number and upload
+   again.
 
 ## Step 6 — Screenshots and listing text (once, then only when the UI changes)
 

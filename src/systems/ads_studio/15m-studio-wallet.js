@@ -1264,6 +1264,9 @@ function renderStudioAccountScreen() {
   const name = studioWalletText(user.name, 120) || adsStudioText('Your account', 'حسابك');
   const email = studioWalletText(user.email, 254);
   const dark = typeof state !== 'undefined' && state.theme === 'dark';
+  // The app's own /privacy is its bundle (iPhone: nothing opens; Android: the app reloads): the
+  // server address opens the browser there; the web keeps /privacy ('' base).
+  const base = studioEsc(typeof getServerBaseUrl === 'function' ? getServerBaseUrl() : '');
   const row = (onclick, icon, label, value, testid, extra = '') => `
               <button type="button" class="studio-v2-row${extra}" data-testid="${testid}" onclick="${onclick}">
                 ${studioWalletIcon(icon)}
@@ -1286,11 +1289,11 @@ function renderStudioAccountScreen() {
             </div>
             ${renderStudioAccountWhatsapp()}
             <div class="studio-v2-list">
-              <a class="studio-v2-row" data-testid="studio-account-privacy" href="/privacy" target="_blank" rel="noopener">
+              <a class="studio-v2-row" data-testid="studio-account-privacy" href="${base}/privacy" target="_blank" rel="noopener">
                 ${studioWalletIcon('shield-check')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Privacy', 'الخصوصية'))}</span>
               </a>
-              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
+              <a class="studio-v2-row" data-testid="studio-account-terms" href="${base}/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
                 ${studioWalletIcon('scroll-text')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
               </a>

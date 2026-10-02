@@ -4,10 +4,24 @@ import re
 import secrets
 from dataclasses import dataclass
 
+from pydantic import EmailStr, TypeAdapter
+
 
 # OWASP's current PBKDF2-HMAC-SHA256 baseline. Existing lower-work-factor
 # hashes remain valid and are upgraded transparently after a successful login.
 PBKDF2_ITERATIONS_DEFAULT = 600_000
+
+_SIGNIN_EMAIL = TypeAdapter(EmailStr)
+
+
+def normalize_signin_email(raw: object) -> str:
+    """The address as the API's own EmailStr rule stores it (lower-cased).
+
+    Raises ValueError (pydantic's ValidationError) for an address the API
+    refuses: an admin stored as e.g. owner@albayan could never sign in, and
+    its row made GET /api/users answer 500 for every user manager.
+    """
+    return str(_SIGNIN_EMAIL.validate_python(str(raw or "").strip())).lower()
 
 
 def new_id(prefix: str) -> str:

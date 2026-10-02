@@ -8,6 +8,7 @@ from ordinary edits, and backfilled onto legacy records at startup.
 """
 
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -227,3 +228,141 @@ def test_backfill_stamps_legacy_receipts_and_ads_without_touching_stamped_rows(a
     backfill_customer_names()
     assert _row_data("receipts", legacy_receipt_id)["customerName"] == "Backfilled Customer"
     assert _row_data("receipts", already_named_id)["customerName"] == "Do Not Overwrite"
+
+
+# --- Bug-hunt R1 (server-data-plane-4): a record moved to another customer carries THAT name ---
+# Moving a receipt or ad to another customer (edit, /api/ads/mutate, or a merge) kept the previous
+# customer's stamp, and /api/ads/mutate even stored a client-sent customerName. A role with
+# receipts/ads view but no customers access read the wrong person on the record.
+
+VIEWER_EMAIL = "customer-name-viewer@tests.albayanhub.com"
+
+
+@pytest.fixture(scope="module")
+def viewer(actors):
+    """receipts/ads view WITHOUT the customers permission: the stamp is all it sees."""
+    password = hash_password(ADMIN_PASSWORD, iterations=PBKDF2_ITERATIONS_DEFAULT)
+    stamp = now_ms()
+    viewer_id = new_id("cust_name_viewer")
+    with db_conn() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO users "
+                "(id,name,email,role,permissions_json,password_hash,password_salt,password_algo,"
+                "password_iterations,deleted,created_at,created_by,last_modified) "
+                "VALUES (:id,'Customer Name Viewer',:email,'Employee',:permissions,:password_hash,"
+                ":password_salt,:password_algo,:password_iterations,false,:created_at,NULL,:last_modified)"
+            ),
+            {
+                "id": viewer_id,
+                "email": VIEWER_EMAIL,
+                "permissions": json_dumps({"receipts": ["view"], "ads": ["view"]}),
+                "password_hash": password.hash_hex,
+                "password_salt": password.salt_hex,
+                "password_algo": password.algo,
+                "password_iterations": password.iterations,
+                "created_at": stamp,
+                "last_modified": stamp,
+            },
+        )
+    login = client.post("/api/auth/login", json={"email": VIEWER_EMAIL, "password": ADMIN_PASSWORD})
+    assert login.status_code == 200, login.text
+    cookies = {"albayan_session": login.cookies.get("albayan_session")}
+    client.cookies.clear()
+    assert client.get("/api/collections/customers", cookies=cookies).status_code == 403
+    try:
+        yield cookies
+    finally:
+        with db_conn() as conn:
+            for table in ("sessions", "audit_logs"):
+                conn.execute(text(f"DELETE FROM {table} WHERE user_id = :uid"), {"uid": viewer_id})
+            conn.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": viewer_id})
+
+
+def _new_customer(actors, name):
+    customer_id = new_id("moved_customer")
+    phone = "092" + str(secrets.randbelow(10**7)).zfill(7)
+    created = _create_customer(actors["admin"], customer_id, name, [phone])
+    assert created.status_code == 200, created.text
+    return customer_id
+
+
+def _viewer_sees(viewer, collection, entity_id):
+    seen = client.get(f"/api/collections/{collection}/{entity_id}", cookies=viewer)
+    assert seen.status_code == 200, seen.text
+    return seen.json()["data"].get("customerName")
+
+
+def _mutate_create(actors, ad_id, data):
+    created = client.post("/api/ads/mutate", cookies=actors["admin"], json={
+        "action": "create", "adId": ad_id, "idempotencyKey": f"{ad_id}_create",
+        "data": {"paymentStatus": "not_paid", "collectionMethod": "in_shop",
+                 "receiptAllocations": [], "dueAllocations": [], **data}})
+    assert created.status_code == 200, created.text
+    return created.json()["ad"]
+
+
+def test_a_receipt_moved_to_another_customer_carries_that_customers_name(actors, viewer):
+    first = _new_customer(actors, "Receipt Owner Before")
+    second = _new_customer(actors, "Receipt Owner After")
+    created = client.post("/api/collections/receipts", cookies=actors["admin"], json={"data": {
+        "customerId": first, "status": "Not Paid", "isPaid": False,
+        "amountUSD": 10, "amountLocal": 70, "exchangeRate": 7}})
+    assert created.status_code == 200, created.text
+    moved = client.patch(
+        f"/api/collections/receipts/{created.json()['id']}", cookies=actors["admin"],
+        json={"data": {"customerId": second}, "expectedLastModified": created.json()["lastModified"]})
+    assert moved.status_code == 200, moved.text
+    assert _viewer_sees(viewer, "receipts", created.json()["id"]) == "Receipt Owner After"  # before: "...Before"
+
+
+def test_an_ad_moved_by_a_plain_edit_carries_the_new_customers_name_not_the_clients(actors, viewer):
+    first = _new_customer(actors, "Ad Owner Before")
+    second = _new_customer(actors, "Ad Owner After")
+    ad_id = new_id("moved_ad")
+    stamp = _insert_entity("ads", ad_id, {  # an unfunded office ad, stamped for its first customer
+        "recordType": "ad", "customerId": first, "customerName": "Ad Owner Before",
+        "status": "Active", "paymentStatus": "paid", "collectionMethod": "office"}, actors["admin_id"])
+    moved = client.patch(f"/api/collections/ads/{ad_id}", cookies=actors["admin"], json={
+        "data": {"customerId": second, "customerName": "Spoof"}, "expectedLastModified": stamp})
+    assert moved.status_code == 200, moved.text
+    assert _viewer_sees(viewer, "ads", ad_id) == "Ad Owner After"  # before: "Ad Owner Before"
+
+
+def test_an_ad_moved_through_the_ad_api_carries_the_new_customers_name_not_the_clients(actors, viewer):
+    first = _new_customer(actors, "Mutate Owner Before")
+    second = _new_customer(actors, "Mutate Owner After")
+    ad_id = new_id("moved_mutate_ad")
+    created = _mutate_create(actors, ad_id, {"customerId": first})
+    updated = client.post("/api/ads/mutate", cookies=actors["admin"], json={
+        "action": "update", "adId": ad_id, "idempotencyKey": f"{ad_id}_update",
+        "expectedLastModified": created["lastModified"],
+        "data": {"customerId": second, "customerName": "Spoof"}})
+    assert updated.status_code == 200, updated.text
+    assert _viewer_sees(viewer, "ads", ad_id) == "Mutate Owner After"  # before: "Spoof"
+
+
+def test_records_of_a_merged_customer_carry_the_kept_customers_name(actors, viewer):
+    admin_id = actors["admin_id"]
+    shared = "093" + str(secrets.randbelow(10**7)).zfill(7)
+    duplicate, keep = new_id("merged_away_customer"), new_id("kept_customer")
+    duplicate_v = _insert_entity("customers", duplicate, {"name": "Merged Away", "phones": [shared]}, admin_id)
+    keep_v = _insert_entity("customers", keep, {"name": "Kept Customer", "phones": [shared]}, admin_id)
+    receipt_id, ad_id = new_id("merged_receipt"), new_id("merged_ad")
+    _insert_entity("receipts", receipt_id, {"customerId": duplicate, "customerName": "Merged Away",
+                                            "status": "Paid", "amountUSD": 5}, admin_id)
+    _insert_entity("ads", ad_id, {"customerId": duplicate, "customerName": "Merged Away"}, admin_id)
+    merged = client.post("/api/customers/merge", cookies=actors["admin"], json={
+        "keepCustomerId": keep, "duplicateCustomerId": duplicate,
+        "expectedKeepLastModified": keep_v, "expectedDuplicateLastModified": duplicate_v,
+        "idempotencyKey": f"merge-{new_id('op')}"})
+    assert merged.status_code == 200, merged.text
+    assert _viewer_sees(viewer, "receipts", receipt_id) == "Kept Customer"  # before: "Merged Away"
+    assert _viewer_sees(viewer, "ads", ad_id) == "Kept Customer"
+
+
+def test_an_ad_created_through_the_ad_api_never_keeps_a_client_name(actors, viewer):
+    owner = _new_customer(actors, "Created Ad Owner")
+    ad_id = new_id("created_mutate_ad")
+    _mutate_create(actors, ad_id, {"customerId": owner, "customerName": "Spoof"})
+    assert _viewer_sees(viewer, "ads", ad_id) == "Created Ad Owner"
