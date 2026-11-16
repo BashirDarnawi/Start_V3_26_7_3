@@ -347,3 +347,60 @@ def test_check_stuck_with_an_infinite_threshold_is_not_a_500(actors):
                                headers={"Content-Type": "application/json"},
                                cookies=actors["admin"]["cookies"])
         assert response.status_code == 200, (body, response.text)      # before: OverflowError -> 500
+
+
+def test_unsettle_cannot_reopen_a_finished_job_or_hand_it_to_someone_else(actors):
+    """Bug hunt 2026-11-16: /unsettle ran the delivery rules only inside its delivery-debt branch.
+    Naming another collection ("office") and a status other than Needs Delivery skipped them, so an
+    employee with receipts.edit reopened a Delivered job and assigned it to any user id."""
+    receipt = _delivered(actors, 500)
+    editor = actors["editor"]
+
+    def unsettle(data: dict, who: dict = editor):
+        return client.post(f"/api/receipts/{receipt['id']}/unsettle", json={
+            "idempotencyKey": f"r4dv-reopen-{secrets.token_hex(4)}",
+            "expectedLastModified": receipt["lastModified"],
+            "data": {**data, "statusDetail": {"notPaidCollection": "office"}},
+        }, cookies=who["cookies"])
+
+    reopened = unsettle({"deliveryStatus": "In Progress"})
+    assert reopened.status_code == 400 and "cannot be reopened" in reopened.text, reopened.text
+    for who in (editor, actors["admin"]):  # "a finished job keeps its driver" holds for an Admin too
+        moved = unsettle({"deliveryPersonId": editor["id"]}, who)
+        assert moved.status_code == 409 and "keeps its driver" in moved.text, moved.text
+    stored = _get(actors, receipt["id"])["data"]
+    assert stored["status"] == "Paid" and stored["deliveryStatus"] == "Delivered"
+    assert stored["deliveryPersonId"] == actors["driver"]["id"]
+
+
+def test_a_completion_with_a_nonsense_amount_or_photo_is_refused_not_stored_as_zero(actors):
+    """Bug hunt 2026-11-16: "nan", "inf" and true were stored as "collected 0" (or 1) and the job became
+    Delivered, which the driver can never correct; a proof photo of 1 was accepted too."""
+    receipt = _d_receipt(actors)
+    assert _patch(actors, "driver", receipt["id"], {"deliveryStatus": "In Progress"}).status_code == 200
+
+    def complete(**changes):
+        return _patch(actors, "driver", receipt["id"], {
+            "deliveryStatus": "Delivered", "finalReceiptNo": _final_no(), "receiptImage": PROOF,
+            "amountCollectedFromCustomer": 500, "actualDeliveryFeeCollected": 0, **changes,
+        })
+
+    for odd in ("nan", "inf", True, "-1", [500], "five hundred"):
+        for key in ("amountCollectedFromCustomer", "actualDeliveryFeeCollected"):
+            refused = complete(**{key: odd})
+            assert refused.status_code == 400 and key in refused.text, (key, odd, refused.text)
+    assert complete(receiptImage=1).status_code == 400
+    assert _get(actors, receipt["id"])["data"]["deliveryStatus"] == "In Progress"  # nothing was completed
+    # Real figures still complete the job: Arabic digits as text, and a zero fee.
+    done = complete(amountCollectedFromCustomer="٥٠٠")
+    assert done.status_code == 200, done.text
+    assert done.json()["data"]["deliveryStatus"] == "Delivered" and done.json()["data"]["status"] == "Paid"
+
+
+def test_a_dispatcher_cancel_needs_a_reason_even_when_only_the_status_is_sent():
+    """Bug hunt 2026-11-16: {"deliveryStatus": "Canceled"} alone canceled the job with an empty reason."""
+    open_job = {"data": {"deliveryStatus": "Needs Delivery", "deliveryPersonId": "u1"}}
+    allowed = lambda updates: delivery_workflow.patch_allowed(open_job, updates, has=lambda a: True, active_driver=lambda x: True)
+    assert allowed({"deliveryStatus": "Canceled"}) is False
+    assert allowed({"deliveryStatus": "Canceled", "deliveryCancelReason": "   "}) is False
+    assert allowed({"deliveryStatus": "Canceled", "deliveryCancelReason": "Customer asked to wait"}) is True

@@ -53,6 +53,12 @@ WALLET_PAYMENT_COLLECTION = "walletPaymentRequests"
 LEGACY_PAYMENT_METHODS = ("card", "bank_transfer", "qr")
 
 
+def _stored_text(value: Any) -> str:
+    """Free text as the database can hold it: no NUL and no lone surrogate (both are valid JSON,
+    and PostgreSQL refuses both: the request answered 500)."""
+    return str(value or "").replace("\x00", "").encode("utf-8", "ignore").decode("utf-8").strip()
+
+
 def _lean_payment_entity(entity: dict[str, Any]) -> dict[str, Any]:
     """List rows never carry the receipt photo — flag it instead."""
     data = dict(entity.get("data") or {})
@@ -754,7 +760,7 @@ def create_wallet_payments_router(
                     "amount": amount / 100,
                     "currency": cur,
                     "method": method,
-                    "note": str(body.note or "").strip()[:500],
+                    "note": _stored_text(body.note)[:500],
                     "reference": _new_payment_reference(),
                     "status": "pending",
                     "idempotencyKey": idem,
@@ -883,7 +889,7 @@ def create_wallet_payments_router(
                 {
                     "receiptPhoto": clean_photo,
                     "receiptPhotoAt": ctx["iso_utc"](),
-                    "receiptNote": str(body.note or "").strip()[:500],
+                    "receiptNote": _stored_text(body.note)[:500],
                 }
             )
             entity = _update_payment_row(conn, entity, data)

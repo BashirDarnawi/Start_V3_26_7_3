@@ -1041,7 +1041,10 @@ function exportData() {
   };
   
   const dataStr = JSON.stringify(exportState);  // compact: photos are inline, a pretty-printed file can outgrow the import cap
-  if ((typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES) {
+  // The file is still handed over (it is the user's data), but it is never called a backup:
+  // the import refuses anything above the same limit.
+  const backupTooLargeToRestore = (typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES;
+  if (backupTooLargeToRestore) {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
   }
 
@@ -1091,10 +1094,20 @@ function exportData() {
 
   // Silences the local-mode "export a backup" durability reminder for 5 days
   // (see maybeShowLocalDataDurabilityReminder in 17-init.js).
-  if (!serverPartialSnapshot && typeof albayanNoteBackupExported === 'function') {
+  if (!serverPartialSnapshot && !backupTooLargeToRestore && typeof albayanNoteBackupExported === 'function') {
     albayanNoteBackupExported();
   }
 
+  if (backupTooLargeToRestore && !serverPartialSnapshot) {
+    // Before: "exported successfully" and the backup reminder went quiet for 5 days, for a file that cannot be restored.
+    addAuditLog('Export', 'system', 'Local data exported, but the file is above the import limit and cannot be restored');
+    showNotification(
+      state.language === 'ar' ? 'تم التصدير، لكنه ليس نسخة احتياطية' : 'Exported, but not a usable backup',
+      state.language === 'ar' ? 'الملف أكبر من 200 ميغابايت ولن يقبله الاستيراد. قلّل الصور ثم صدّر مرة أخرى.' : 'The file is over 200MB and the import will refuse it. Reduce photos, then export again.',
+      'warning'
+    );
+    return;
+  }
   addAuditLog('Export', 'system', serverPartialSnapshot ? 'Partial client snapshot exported' : 'Local backup exported successfully');
   showNotification(
     state.language === 'ar' ? 'تم التصدير' : 'Exported',

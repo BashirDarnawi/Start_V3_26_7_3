@@ -106,7 +106,11 @@ test('staff with the v2 desk get the Team desk frame with no wallet items', asyn
   for (const id of ['requests', 'launch', 'settle', 'tickets', 'health', 'more']) await expect(page.getByTestId(`studio-staffnav-${id}`)).toBeVisible();
   await expect(page.getByTestId('studio-staffnav-launch')).toHaveAttribute('aria-current', 'page');
   await expect(page.getByTestId('studio-nav-wallet')).toHaveCount(0);
-  expect(await desk.innerText()).not.toMatch(/wallet|payment/i);
+  // The frame's own menu, not the whole screen: the launch list shows whatever requests earlier specs
+  // left in the shared database, and one of them is named "Wallet e2e ad" (failed by run order).
+  const navItems = await desk.locator('[data-testid^="studio-staffnav-"]').evaluateAll(items => items.map(item => `${item.getAttribute('data-testid')} ${item.textContent}`));
+  expect(navItems.length).toBeGreaterThanOrEqual(6);
+  expect(navItems.join(' ')).not.toMatch(/wallet|payment/i);
   await page.getByTestId('studio-back').click();
   await expect.poll(() => param(page, 'section')).toBe('requests');
   await page.getByTestId('studio-staffnav-more').click();

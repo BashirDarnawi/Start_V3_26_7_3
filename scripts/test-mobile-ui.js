@@ -6436,6 +6436,23 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     pending && pending.ok === true && pending.pending === true && approveCall.length === 1 && approveCall[0].body.decision === 'Approved' && !('reviewReasonCode' in approveCall[0].body)
       && afterApprove.includes('data-decision="Approved"') && afterApprove.includes('ALB-S-NEW11111 · Second waiting') && afterApprove.includes('studio-desk-copy-r_sub2') && afterApprove.includes('studio-desk-to-launch'),
     `pending ${JSON.stringify(pending)} calls ${approveCall.length}`);
+  // Bug hunt 2026-11-16: a refused decision is shown, and a second decision tapped meanwhile joins the first.
+  // Its own waiting request, removed again afterwards, so the rows the next checks read stay as they were.
+  box.state.adCampaignRequests = [...box.state.adCampaignRequests, { ...requestsRows()[0], id: 'r_ref', _lastModified: 30 }];
+  openAt('/studio?tab=review&section=requests&id=r_ref');
+  run("studioDeskPickReason('r_ref', 'text_policy'); studioDeskNoteInput('r_ref', { value: 'Please soften the claim.' });");
+  replyError('/api/ad-studio/campaigns/r_ref/review', { status: 500, message: 'Server error' });
+  run("studioDeskDecide('r_ref', 'Changes Requested'); studioDeskDecide('r_ref', 'Rejected');");
+  run('render()');
+  const deskRefusedHtml = html();
+  const deskRefusedCalls = calls('POST', '/api/ad-studio/campaigns/r_ref/review');
+  check('Team desk decision (2026-11-16): "Reject" tapped while "Send back" is being saved sends nothing more, and a refused decision says so in the decision box with the note still there',
+    deskRefusedCalls.length === 1 && deskRefusedCalls[0].body.decision === 'Changes Requested'
+      && /data-testid="studio-desk-decision-error">[^<]+</.test(deskRefusedHtml) && deskRefusedHtml.includes('data-testid="studio-desk-decision"')
+      && deskRefusedHtml.includes('Please soften the claim.') && json('_studioDesk.runs.size') === 0,
+    `calls ${JSON.stringify(deskRefusedCalls.map(c => c.body && c.body.decision))} error ${(deskRefusedHtml.match(/studio-desk-decision-error"[^>]*>[^<]*/) || [''])[0]}`);
+  box.state.adCampaignRequests = box.state.adCampaignRequests.filter(row => row.id !== 'r_ref');
+  run("_studioDesk.decisions.delete('r_ref');");
   reply('/api/studio/campaigns/r_lnk/results', endedResults);
   openAt('/studio?tab=review&section=launch');
   run('render()');

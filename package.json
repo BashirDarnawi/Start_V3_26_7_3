@@ -26,7 +26,7 @@
     "test:import-boundaries": "node scripts/test-import-boundaries.js",
     "test:system-boundaries": "node scripts/test-system-boundaries.js",
     "test:clothes-submit-boundaries": "node scripts/test-clothes-submit-boundaries.js",
-    "test:sync-persistence-work": "node scripts/test-sync-persistence-work.js",
+    "test:sync-persistence-work": "node scripts/test-sync-persistence-work.js && node scripts/test-local-storage-loss.js",
     "test:render-performance": "node scripts/test-render-performance.js",
     "test:indexeddb-snapshot": "node scripts/test-indexeddb-snapshot.js",
     "test:legacy-data": "node scripts/test-legacy-data.js",

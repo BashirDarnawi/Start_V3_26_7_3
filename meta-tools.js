@@ -323,6 +323,12 @@ function metaAdsRenderModal() {
     </button>`;
   }).join('');
 
+  // The dialog is rebuilt whenever a list finishes loading: keep an ad ID the admin already
+  // pasted (same ad only), or it vanished under their finger and "Link" said "Invalid ID".
+  const sameTarget = modal.dataset.forAd === String(metaAdsUi.targetAdId || '');
+  const typedDirectId = sameTarget ? String(modal.querySelector('#meta-direct-ad-id')?.value || '') : '';
+  const directHadFocus = document.activeElement?.id === 'meta-direct-ad-id';
+  modal.dataset.forAd = String(metaAdsUi.targetAdId || '');
   modal.innerHTML = `<div class="meta-ads-dialog-panel glass-panel w-full max-w-3xl overflow-y-auto rounded-2xl p-4 shadow-2xl custom-scrollbar sm:p-6" style="max-height:${interactiveHeight - 48}px" dir="${isAr ? 'rtl' : 'ltr'}" onclick="event.stopPropagation()">
     <div class="flex items-start justify-between gap-3">
       <div><h2 class="flex items-center gap-2 text-xl font-black text-slate-800 dark:text-white"><i data-lucide="facebook" class="h-6 w-6 text-blue-600"></i>${isAr ? 'مزامنة إعلانات Meta' : 'Meta Ads Sync'}</h2><p class="mt-1 text-sm text-slate-500">${isAr ? 'قراءة فقط — معلومات Albayan المالية والصور لا تتغير.' : 'Read-only — Albayan accounting and photos are never changed.'}</p></div>
@@ -366,6 +372,11 @@ function metaAdsRenderModal() {
 
     ${configured && !metaAdsUi.loading ? `<div class="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4 dark:border-slate-700"><p class="text-xs text-slate-500">${isAr ? 'يعمل الاستيراد والمزامنة في السيرفر حتى عندما تغلق هذه الصفحة.' : 'Automatic import and sync run on the server even when this page is closed.'}</p><button type="button" onclick="metaAdsSyncAllDue()" ${metaAdsUi.busyAction || providerPaused ? 'disabled' : ''} class="min-h-11 rounded-xl border border-blue-200 px-3 text-sm font-bold text-blue-700 disabled:opacity-60 dark:border-blue-800 dark:text-blue-200">${providerPaused ? (isAr ? 'إعادة المحاولة تلقائياً' : 'Automatic retry pending') : (isAr ? 'مزامنة المستحق الآن' : 'Sync due now')}</button></div>` : ''}
   </div>`;
+  const directInput = modal.querySelector('#meta-direct-ad-id');
+  if (directInput && typedDirectId) {
+    directInput.value = typedDirectId;
+    if (directHadFocus) directInput.focus();
+  }
   metaAdsFitModalToViewport();
   window.requestAnimationFrame(() => metaAdsFitModalToViewport());
   IconQueue.schedule(modal);

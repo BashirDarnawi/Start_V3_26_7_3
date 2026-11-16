@@ -252,7 +252,7 @@ def _record_date(collection: str, data: dict[str, Any]) -> date | None:
                 if parsed.tzinfo is None:
                     parsed = parsed.replace(tzinfo=timezone.utc)
                 return parsed.astimezone(_business_zone()).date()
-            except ValueError:
+            except (ValueError, OverflowError):  # year 1 or 9999 pushed out of range by the zone: use the written day
                 pass
         try:
             if len(text_value) >= 10:

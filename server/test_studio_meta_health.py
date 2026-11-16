@@ -601,6 +601,14 @@ def test_a_timed_out_public_reply_is_never_sent_twice(actors, graph, token):
     resend = studio._rule_for_resend(rule, {**data, "skipActions": ["dm", "like"]}, now)
     assert resend["dmEnabled"] is False and resend["likeComment"] is False and resend["publicReply"] == "Thanks!"
     assert studio._rule_for_resend(rule, {"commentAt": studio._iso_at(now)}, now) is rule
+    # Bug hunt 2026-11-16: the DM went out in an earlier attempt and only the like failed. With
+    # "skip the public reply once a DM is sent" the retry sent the public reply as well.
+    skipping = {**rule, "skipPublicAfterDm": True}
+    retry = studio._rule_for_resend(skipping, {"commentAt": studio._iso_at(now)}, now, sent={"dm"})
+    assert retry["dmEnabled"] is False and retry["publicReply"] == "" and retry["likeComment"] is True
+    # Without the setting the public reply is still owed; a DM that only timed out proves nothing.
+    assert studio._rule_for_resend(rule, {"commentAt": studio._iso_at(now)}, now, sent={"dm"})["publicReply"] == "Thanks!"
+    assert studio._rule_for_resend(skipping, {"commentAt": studio._iso_at(now), "skipActions": ["dm"]}, now)["publicReply"] == "Thanks!"
 
 
 # ------------------------------------------------------------------ P3-18c: ad-account funds and status

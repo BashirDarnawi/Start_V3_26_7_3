@@ -3167,6 +3167,18 @@ async function loadCollectionFromIndexedDB(collectionName) {
       throw error;
     }
     console.error('Error loading collection from IndexedDB:', error);
+    // Local mode keeps its ONLY copy here. "Could not be read" (iOS dropped the connection while
+    // the app was in the background, a value too large to read) is not "nothing is stored":
+    // answering null made the loader start an empty list, and the next save wrote that empty list
+    // over the intact rows. Report it as an unreadable copy: it stays protected from overwrite
+    // and the next start reads it again. A server cache is simply refilled from the server.
+    if (capturedScope === 'local' && capturedScope === _collectionStorageScope) {
+      markCollectionCorrupted(name);
+      const unreadable = new Error(`IndexedDB collection "${name}" could not be read`);
+      unreadable.code = 'IDB_COLLECTION_CORRUPT';
+      unreadable.unreadable = true;
+      throw unreadable;
+    }
     return null;
   }
 }
@@ -6187,9 +6199,22 @@ function _notifyCollectionCorruption(name) {
 
 async function loadCollectionsFromStorage(legacyCollections = null) {
   const legacy = legacyCollections || {};
+  const hadConnection = !!db;
 
   for (const name of PERSISTED_COLLECTIONS) {
     let loaded = null;
+
+    // The connection was lost part-way through this load (iOS closes it in the background): the
+    // collections not read yet are NOT empty. In local mode they are kept out of every save until
+    // a later start reads them; a complete inline snapshot, when there is one, is used as usual.
+    if (hadConnection && !db && getCollectionStorageScope() === 'local'
+        && !(legacy._collectionsInline && Array.isArray(legacy[name]) && legacy[name].length)) {
+      markCollectionCorrupted(name);
+      if (Array.isArray(legacy[name])) state[name] = legacy[name];
+      else if (!Array.isArray(state[name])) state[name] = [];
+      _notifyCollectionCorruption(name);
+      continue;
+    }
 
     if (db) {
       try {
@@ -13790,9 +13815,11 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     }
   } catch (_) {}
 
-  const user = _users.find(u => 
-    !u._deleted &&
-    u.email.toLowerCase() === sanitizedEmail
+  // One stored row without an e-mail (an old backup, a half-imported file) used to throw here,
+  // so every account listed after it got "Could not sign in" with the right password.
+  const user = _users.find(u =>
+    u && !u._deleted &&
+    String(u.email || '').toLowerCase() === sanitizedEmail
   );
   
   if (!user) {
@@ -44479,7 +44506,10 @@ function exportData() {
   };
   
   const dataStr = JSON.stringify(exportState);  // compact: photos are inline, a pretty-printed file can outgrow the import cap
-  if ((typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES) {
+  // The file is still handed over (it is the user's data), but it is never called a backup:
+  // the import refuses anything above the same limit.
+  const backupTooLargeToRestore = (typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES;
+  if (backupTooLargeToRestore) {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
   }
 
@@ -44529,10 +44559,20 @@ function exportData() {
 
   // Silences the local-mode "export a backup" durability reminder for 5 days
   // (see maybeShowLocalDataDurabilityReminder in 17-init.js).
-  if (!serverPartialSnapshot && typeof albayanNoteBackupExported === 'function') {
+  if (!serverPartialSnapshot && !backupTooLargeToRestore && typeof albayanNoteBackupExported === 'function') {
     albayanNoteBackupExported();
   }
 
+  if (backupTooLargeToRestore && !serverPartialSnapshot) {
+    // Before: "exported successfully" and the backup reminder went quiet for 5 days, for a file that cannot be restored.
+    addAuditLog('Export', 'system', 'Local data exported, but the file is above the import limit and cannot be restored');
+    showNotification(
+      state.language === 'ar' ? 'تم التصدير، لكنه ليس نسخة احتياطية' : 'Exported, but not a usable backup',
+      state.language === 'ar' ? 'الملف أكبر من 200 ميغابايت ولن يقبله الاستيراد. قلّل الصور ثم صدّر مرة أخرى.' : 'The file is over 200MB and the import will refuse it. Reduce photos, then export again.',
+      'warning'
+    );
+    return;
+  }
   addAuditLog('Export', 'system', serverPartialSnapshot ? 'Partial client snapshot exported' : 'Local backup exported successfully');
   showNotification(
     state.language === 'ar' ? 'تم التصدير' : 'Exported',
@@ -45574,14 +45614,20 @@ async function init() {
     }
   }
   
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  const onSystemThemeChange = () => {
     if (state.theme === 'system') {
       applyTheme();
       render();
     }
-  });
+  };
+  try {
+    // Safari before 14 has only the old addListener: a throw here used to stop start-up before its only render().
+    const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+    if (typeof systemTheme.addEventListener === 'function') systemTheme.addEventListener('change', onSystemThemeChange);
+    else if (typeof systemTheme.addListener === 'function') systemTheme.addListener(onSystemThemeChange);
+  } catch (_) {}
   
-  if (state.cloudConfig.enabled && !state.serverMode) {
+  if (state.cloudConfig && state.cloudConfig.enabled && !state.serverMode) {
     startCloudSync();
   }
 
@@ -45697,8 +45743,33 @@ function maybeShowLocalDataDurabilityReminder() {
 // as soon as the page is parsed; icons render through IconQueue, which
 // retries until the library exists. (The test harness sets readyState to
 // 'loading' on purpose to keep init() from auto-running.)
+// init() had no catch: a throw late in start-up left the loading screen up for good, with no
+// login form and no message. Nothing is drawn from half-loaded data here: when the screen is
+// still empty the visitor gets a reload card (the same one render() shows), nothing else.
+function startAlbayan() {
+  return init().catch(error => {
+    console.error('[albayan] start-up failed:', error);
+    window.__albayanInitSettled = true;
+    try {
+      const app = document.getElementById('app');
+      if (!app || String(app.innerHTML || '').trim()) return;
+      const isAr = state.language === 'ar';
+      app.innerHTML = `
+        <div class="min-h-screen flex items-center justify-center p-6" dir="${isAr ? 'rtl' : 'ltr'}">
+          <div class="hub-card w-full max-w-md p-6 text-center" data-testid="startup-failed">
+            <div class="text-lg font-extrabold text-slate-900 dark:text-white mb-2">${isAr ? 'تعذر تشغيل التطبيق' : 'The app could not start'}</div>
+            <div class="text-sm text-slate-500 mb-4">${isAr ? 'أعد تحميل التطبيق. بياناتك محفوظة.' : 'Reload the app. Your data is safe.'}</div>
+            <button type="button" onclick="window.location.reload()" class="touch-target min-h-11 px-5 rounded-xl bg-blue-600 text-white font-bold">${isAr ? 'إعادة التحميل' : 'Reload'}</button>
+          </div>
+        </div>`;
+      const loadingScreen = document.getElementById('app-loading-screen');
+      if (loadingScreen) { loadingScreen.setAttribute('aria-busy', 'false'); loadingScreen.style.display = 'none'; }
+    } catch (_) {}
+  });
+}
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
+  document.addEventListener('DOMContentLoaded', startAlbayan);
 } else {
-  init();
+  startAlbayan();
 }

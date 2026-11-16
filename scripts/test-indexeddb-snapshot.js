@@ -191,9 +191,26 @@ async function main() {
             }
             return request;
           };
-          return { loaded: await loadCollectionFromIndexedDB('ads'), corrupt: isCollectionCorrupted('ads') };
+          // A server cache is refilled from the server: an unreadable copy is simply "nothing cached".
+          setCollectionStorageScope('server:A');
+          await saveCollectionToIndexedDB('ads', rows('old'));
+          const cache = { loaded: await loadCollectionFromIndexedDB('ads'), corrupt: isCollectionCorrupted('ads') };
+          // Local mode keeps its only copy here (bug hunt 2026-11-16): "could not be read" must never
+          // read as "empty", or the next save writes an empty list over the intact rows.
+          setCollectionStorageScope('local');
+          let local;
+          try { local = { loaded: await loadCollectionFromIndexedDB('ads') }; }
+          catch (error) { local = { code: error.code, unreadable: error.unreadable === true, partial: 'partialData' in error }; }
+          local.corrupt = isCollectionCorrupted('ads');
+          IDBObjectStore.prototype.get = originalGet;
+          clearCollectionCorruption('ads');
+          local.stillStored = (await loadCollectionFromIndexedDB('ads')).length;
+          return { cache, local };
         });
-        assert.deepEqual(result, { loaded: null, corrupt: false });
+        assert.deepEqual(result, {
+          cache: { loaded: null, corrupt: false },
+          local: { code: 'IDB_COLLECTION_CORRUPT', unreadable: true, partial: false, corrupt: true, stillStored: 6 }
+        });
       });
       await test('invalid chunk metadata fails safely before queuing chunk reads', async page => {
         const result = await page.evaluate(async () => {

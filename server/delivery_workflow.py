@@ -140,6 +140,10 @@ def patch_allowed(
             return False
         if not _text(updates.get("deliveryCancelReason")):
             return False
+    # A cancel sent with the status alone (no cancel field at all) skipped the block above: the job
+    # was canceled with an empty reason, which the driver's own cancel refuses.
+    if target_status == "Canceled" and current_status != "Canceled" and not _text(updates.get("deliveryCancelReason")):
+        return False
 
     if keys & _OFFICE_FIELDS:
         if not has("markCollected") or current_status != "Delivered":

@@ -1451,9 +1451,11 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     }
   } catch (_) {}
 
-  const user = _users.find(u => 
-    !u._deleted &&
-    u.email.toLowerCase() === sanitizedEmail
+  // One stored row without an e-mail (an old backup, a half-imported file) used to throw here,
+  // so every account listed after it got "Could not sign in" with the right password.
+  const user = _users.find(u =>
+    u && !u._deleted &&
+    String(u.email || '').toLowerCase() === sanitizedEmail
   );
   
   if (!user) {

@@ -147,6 +147,7 @@ META_TOKEN_ENV = "ALBAYAN_META_ACCESS_TOKEN"
 SWEEP_LOOKBACK = timedelta(hours=48)
 INTERRUPTED_AFTER_MINUTES = studio_integrity.CAPTURE_GRACE_MINUTES  # 15 (PLAN.md §7.4)
 DAILY_SCAN_AT = "04:00"  # Tripoli time
+DAILY_RETRY_EVERY = timedelta(hours=1)  # a daily run that did not finish is tried again this often
 HEARTBEAT_LATE_SECONDS = 300  # PLAN.md §7.4: jobs_heartbeat_late after 5 minutes
 ALERT_REFRESH = timedelta(hours=1)
 CLOCK_SKEW = timedelta(minutes=5)  # a "last run" this far in the future means the clock moved back: run now
@@ -867,8 +868,15 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         fields: dict[str, Any] = {"lastTickAt": at}
         local = now.astimezone(_zone())
         today = local.date().isoformat()
-        if local.strftime("%H:%M") >= DAILY_SCAN_AT and state.get("lastIntegrityScanDay") != today:
-            fields.update({"lastIntegrityScanDay": today, "lastSweepAt": at})  # the daily run sweeps everything
+        # The day is claimed BEFORE the run. A run that died outside its own guards (the database
+        # dropped for a few seconds) left the day claimed with no scan and no alert until tomorrow:
+        # while today's scan has not finished, the claim is taken again once an hour.
+        scanned = parse_time(state.get("lastIntegrityScanAt"))
+        scanned_today = scanned is not None and scanned.astimezone(_zone()).date().isoformat() == today
+        retry_daily = (state.get("lastIntegrityScanDay") == today and not scanned_today
+                       and _due(state.get("lastIntegrityAttemptAt"), DAILY_RETRY_EVERY, now))
+        if local.strftime("%H:%M") >= DAILY_SCAN_AT and (state.get("lastIntegrityScanDay") != today or retry_daily):
+            fields.update({"lastIntegrityScanDay": today, "lastSweepAt": at, "lastIntegrityAttemptAt": at})  # the daily run sweeps everything
             claimed.append("daily")
         elif _due(state.get("lastSweepAt"), SWEEP_EVERY, now):
             fields["lastSweepAt"] = at

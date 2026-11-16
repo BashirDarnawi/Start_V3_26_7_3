@@ -46,6 +46,7 @@ function resetAdsStudioSessionState() {
   if (typeof resetStudioHealthState === 'function') resetStudioHealthState();
   if (typeof studioResetMe === 'function') studioResetMe();  // Studio v2 /me (15g): the next session reads it afresh
   if (typeof studioBuilderReset === 'function') studioBuilderReset();  // the v2 request builder (15l): its draft, timers and retries end
+  if (typeof studioDeskPulseStop === 'function') studioDeskPulseStop();  // the Team desk (15p): its poll ends and the "(N) " count leaves the tab title now
   // Invalidate image compression still running for the previous draft/session.
   _adsStudioPhotoToken++;
   if (typeof window !== 'undefined' && window._adsStudioSearchTimer) {

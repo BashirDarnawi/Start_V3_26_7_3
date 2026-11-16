@@ -81,6 +81,7 @@ IG_COMMENTS_PER_MEDIA = 50   # Meta's maximum per query; newest first since Grap
 CHECK_PRESSES_PER_MINUTE = 10   # per admin
 CHECKS_PER_ACCOUNT_MINUTE = 1   # per Instagram account
 MAX_COMMENT_AGE = timedelta(days=7)
+UNCHANGED_TRUST = timedelta(hours=1)  # how long an unchanged comment count lets a post go unread
 MAX_FED_PER_CHECK = 20       # each may send a private message and a public reply, paced: a check stays short
 CHECK_SOURCES = ("manual_check", "poll")
 CHECK_STATE_ID = "studioIgChecks"
@@ -388,7 +389,12 @@ def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "m
 
     def unchanged(media_id: str, count: int) -> bool:
         entry = cursor.get(_media_key(ig_user_id, media_id))
-        return bool(entry) and entry.get("count") == count
+        if not entry or entry.get("count") != count:
+            return False
+        # The count alone can hide a new comment (one deleted, one written since the last read):
+        # a post is trusted as unchanged for an hour, then read once more whatever its count says.
+        seen = comment_second(entry.get("seenAt"))
+        return seen is not None and 0 <= now.timestamp() - seen < UNCHANGED_TRUST.total_seconds()
 
     read = read_recent_ig_comments(client, ig_user_id, meta_page_id=page["metaPageId"], with_text=True,
                                    with_author=True, media_limit=IG_MEDIA_READ, skip_media=unchanged)

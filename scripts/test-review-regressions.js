@@ -4717,6 +4717,7 @@ async function main() {
       sandbox.isMergeToolsAdmin = () => true;
       sandbox.getAdMergePlan = () => ({ keepAd, draftAd, metaAdId: '123456789', blocked: '' });
       sandbox.applyValidatedServerEntityBatch = () => {};
+      sandbox.apiMetaAdsStatus = async () => ({ configured: true, providerState: {} });
       sandbox.apiUnlinkMetaAd = async () => ({ ad: { ...draftAd, metaAdId: '' } });
       const links = [];
       sandbox.apiLinkMetaAd = async adId => { links.push(adId); if (adId === 'keep') throw error; return { ad: draftAd }; };
@@ -4740,6 +4741,40 @@ async function main() {
     assert.equal(await mergeFails(Object.assign(new Error(closed), { status: 423 }), { language: 'en' }), closed);
     assert.equal(await mergeFails(Object.assign(new Error('Conflict: ad has changed'), { status: 409 }), { language: 'en' }),
       'The ad changed during the merge. Refresh and try again.');
+  });
+
+  await test('bug hunt 2026-11-16: an ad merge started while Meta is paused, unreachable or not connected changes nothing', async () => {
+    const mergeWith = async status => {
+      const { sandbox, state, run } = loadBrowserSource();
+      run(fs.readFileSync(path.join(__dirname, '..', 'src', '13b-merge-tools.js'), 'utf8'));
+      state.language = 'en';
+      const keepAd = { id: 'keep', _lastModified: 5 };
+      const draftAd = { id: 'draft', metaAdId: '123456789', _lastModified: 6 };
+      state.ads = [keepAd, draftAd];
+      sandbox.isMergeToolsAdmin = () => true;
+      sandbox.getAdMergePlan = () => ({ keepAd, draftAd, metaAdId: '123456789', blocked: '' });
+      sandbox.applyValidatedServerEntityBatch = () => {};
+      sandbox.apiMetaAdsStatus = async () => { if (status instanceof Error) throw status; return status; };
+      const writes = [];
+      sandbox.apiUnlinkMetaAd = async () => { writes.push('unlink'); return { ad: { ...draftAd, metaAdId: '' } }; };
+      sandbox.apiLinkMetaAd = async adId => { writes.push(`link:${adId}`); return { ad: keepAd }; };
+      sandbox.deleteRecord = async () => { writes.push('delete'); return true; };
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+      await sandbox.runAdMerge('keep', 'draft');
+      return { writes, notes };
+    };
+    // Before: the unlink went through, the new link and the restore were both refused by the pause,
+    // and the Meta ad was left linked to neither copy with no way to retry the merge.
+    for (const status of [{ configured: true, providerState: { paused: true, retryAfterSeconds: 240 } }, { configured: true, remoteBackoffSeconds: 30 },
+      { configured: false }, new Error('Failed to fetch')]) {
+      const { writes, notes } = await mergeWith(status);
+      assert.deepEqual(writes, [], `nothing may be written: ${JSON.stringify(status)}`);
+      assert.deepEqual(notes.map(note => [note.title, note.type]), [['Nothing was changed', 'warning']]);
+    }
+    assert.ok((await mergeWith({ configured: true, providerState: { paused: true, retryAfterSeconds: 240 } })).notes[0].message.includes('4 minute'));
+    const ready = await mergeWith({ configured: true, providerState: { paused: false, retryAfterSeconds: 0 } });
+    assert.deepEqual(ready.writes, ['unlink', 'link:keep', 'delete']);
   });
 
   // ---- Bug-hunt R1, client-a: customer contacts, ad page switch, stale saves, receipt history, ?modal entries, phone search ----

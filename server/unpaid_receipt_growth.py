@@ -63,7 +63,9 @@ def _server_amount_change(
     changes = event.get("changes") if isinstance(event, dict) else None
     if not isinstance(changes, list):
         return None
-    fields = {change.get("field") for change in changes if isinstance(change, dict)}
+    # Only text names count: a stored "field" that is a list or an object cannot go in a set
+    # (TypeError, so every In-Shop ad save on that receipt answered 500).
+    fields = {change.get("field") for change in changes if isinstance(change, dict) and isinstance(change.get("field"), str)}
     if "Funding Ad" not in fields and not (
         growth_seen and "Debt Reconciliation" in fields
     ):

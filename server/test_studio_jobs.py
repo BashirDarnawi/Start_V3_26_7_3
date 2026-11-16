@@ -412,6 +412,31 @@ def test_tick_claims_each_job_once_per_turn(monkeypatch):
     assert studio_jobs.read_job_state()["lastIntegrityScanDay"] == _day(daily)
 
 
+def test_a_daily_run_that_did_not_finish_is_tried_again_within_the_day(monkeypatch):
+    """Bug hunt 2026-11-16: the day was claimed before the run, so a run that died (the database
+    dropped for a moment) meant no money scan and no alert until 04:00 the next day."""
+    runs: list[str] = []
+    finishes = {"on": False}
+
+    def daily_run(ctx, now):
+        runs.append("daily")
+        if finishes["on"]:  # what the real run does last
+            studio_jobs.update_job_state(lambda state: {"lastIntegrityScanAt": studio_jobs._iso(now)})
+        return {}
+
+    monkeypatch.setattr(studio_jobs, "sweep_orphans", lambda ctx, now, full=False: {})
+    monkeypatch.setattr(studio_jobs, "check_waiting_requests", lambda now: {})
+    monkeypatch.setattr(studio_jobs, "run_daily_money_check", daily_run)
+    _reset_state()
+    daily = _night(days=3) + timedelta(hours=2)  # 04:30 in Tripoli
+    assert "daily" in run_tick(_provider, daily)["claimed"]
+    assert "daily" not in run_tick(_provider, daily + timedelta(minutes=30))["claimed"]  # not a retry storm
+    finishes["on"] = True
+    assert "daily" in run_tick(_provider, daily + timedelta(minutes=61))["claimed"]  # before: never again today
+    assert "daily" not in run_tick(_provider, daily + timedelta(hours=3))["claimed"]  # it finished: once a day
+    assert runs == ["daily", "daily"]
+
+
 def test_tick_sends_the_pending_staff_notifications(monkeypatch):
     """P3-21: every tick that won the heartbeat write ends with studio_alert_out.send_pending, so a new
     stop request or a channel-worthy alert reaches the team before the operations worker's 300-s turn."""

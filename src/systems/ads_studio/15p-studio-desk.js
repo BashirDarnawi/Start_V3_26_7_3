@@ -602,7 +602,10 @@ function studioDeskStageOf(request) {
 function studioDeskDecide(id, decision, button = null, confirmed = false, version = 0) {
   const requestId = String(id || '');
   const key = `review:${decision}:${requestId}`;
-  if (_studioDesk.runs.has(key)) return _studioDesk.runs.get(key);
+  // One decision per REQUEST: while "Send back" is being saved, a tap on "Reject" or "Approve"
+  // (only the tapped button is greyed until the next draw) joins it instead of sending a second one.
+  const inFlight = ['Approved', 'Changes Requested', 'Rejected'].map(kind => _studioDesk.runs.get(`review:${kind}:${requestId}`)).find(Boolean);
+  if (inFlight) return inFlight;
   const draft = studioDeskDecision(requestId);
   const noteBox = typeof document !== 'undefined' && typeof document.getElementById === 'function' ? document.getElementById(`studio-desk-note-${requestId}`) : null;
   if (noteBox) draft.note = String(noteBox.value || '').slice(0, 1000);
@@ -626,7 +629,15 @@ function studioDeskDecide(id, decision, button = null, confirmed = false, versio
     if (button) setAdsStudioActionButtonBusy(button, false);
     studioV2Rerender();
   };
-  operation.then(cleanup, cleanup);
+  // A refused or lost decision is shown in the decision box (before: nothing appeared at all,
+  // the buttons just came back and the note looked as if it had been sent).
+  operation.then(result => {
+    if (result && result.ok === false && result.text) {
+      const refused = studioDeskDecision(requestId);
+      if (!refused.error) refused.error = String(result.text);
+    }
+    cleanup();
+  }, cleanup);
   return operation;
 }
 

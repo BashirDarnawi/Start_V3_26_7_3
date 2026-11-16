@@ -2009,6 +2009,11 @@ def _rule_for_resend(rule: dict[str, Any], data: dict[str, Any], now: datetime, 
     only the private reply still goes out (public replies and likes only within 24 hours, PLAN
     §7.4). The rule itself when nothing changes."""
     skip = _skip_actions(data.get("skipActions")) | set(sent or ())
+    # "Skip the public reply once a DM is sent": the private message went out in an EARLIER attempt,
+    # so this retry (say, for a like that failed) must not post the public reply the rule skipped.
+    # Only a DM Meta accepted counts, never one whose send timed out (skipActions).
+    if "dm" in set(sent or ()) and _bool(rule.get("skipPublicAfterDm")):
+        skip |= {"public"}
     if data.get("parkedReason") == PARKED_REASON and now >= _comment_time(data, now) + PUBLIC_REPLY_WINDOW:
         skip |= {"public", "like"}
     return _without_actions(rule, skip)

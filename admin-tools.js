@@ -581,7 +581,7 @@ async function saveDollarPurchase(event) {
 
 async function deleteDollarPurchase(id) {
   if (!isCurrentUserAdmin() || !Security.isValidRecordId(id)) return;
-  if (!confirm('Delete this dollar purchase? Profit and inventory will be recalculated.')) return;
+  if (!confirm(state.language === 'ar' ? 'حذف شراء الدولار هذا؟ سيُعاد حساب الربح والمخزون.' : 'Delete this dollar purchase? Profit and inventory will be recalculated.')) return;
   const ok = await deleteRecord(state.dollarPurchases, id);
   if (ok) {
     showNotification(state.language === 'ar' ? 'تم حذف شراء الدولار' : 'Dollar purchase deleted', state.language === 'ar' ? 'أعيد حساب الربح والمخزون.' : 'Profit and inventory were recalculated.', 'success');
@@ -1657,8 +1657,18 @@ function stopAllPageMerges() {
 function buildAllPageMergeJobs() {
   const jobs = [];
   if (!isMergeToolsAdmin()) return jobs;
+  // Two customers can each own a page with the same name. When both pages have owners and
+  // share none, the bulk run leaves the pair alone: only the one-by-one dialog, which shows
+  // both owners, may put two customers' ads under one page. jobs.differentOwners counts them.
+  jobs.differentOwners = 0;
   for (const group of findPageMergeGroups()) {
+    const keepOwners = getPageCustomerIds(group.keepPage).map(String);
     for (const losePage of group.manualPages) {
+      const loseOwners = getPageCustomerIds(losePage).map(String);
+      if (keepOwners.length && loseOwners.length && !loseOwners.some(id => keepOwners.includes(id))) {
+        jobs.differentOwners += 1;
+        continue;
+      }
       jobs.push({
         keepId: String(group.keepPage.id),
         loseId: String(losePage.id),
@@ -1684,6 +1694,11 @@ function showMergeAllDialog(triggerButton) {
     return;
   }
   const jobs = buildAllPageMergeJobs();
+  if (!jobs.length && jobs.differentOwners) {
+    showNotification(isAr ? 'ادمجها واحدة واحدة' : 'Merge these one by one',
+      isAr ? `${jobs.differentOwners} صفحة لها نفس اسم صفحة Meta لكنها لعميل آخر. افتح كل واحدة وتأكد من المالك قبل الدمج.` : `${jobs.differentOwners} page(s) share a Meta page's name but belong to a different customer. Open each one and check the owner before merging.`, 'warning');
+    return;
+  }
   if (!jobs.length) {
     showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لا توجد صفحة يدوية لها صفحة Meta بنفس الاسم.' : 'No hand-made page has a Meta page of the same name.', 'success');
     return;
@@ -1726,6 +1741,7 @@ function showMergeAllDialog(triggerButton) {
           <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة.' : 'No amount, receipt or photo changes.'}</div>
           <div>• ${isAr ? 'كل صفحة تُحذف فقط بعد انتقال كل إعلاناتها.' : 'Each page is removed only after all of its ads have moved.'}</div>
           <div>• ${isAr ? 'إذا فشلت صفحة، تستمر البقية وتظهر لك قائمة بما لم يكتمل.' : 'If one page fails the rest continue, and you get a list of what did not finish.'}</div>
+          ${jobs.differentOwners ? `<div data-merge-all-skipped="${jobs.differentOwners}">• ${isAr ? `${jobs.differentOwners} صفحة لعميل مختلف عن صفحة Meta بنفس الاسم: لن تُدمج هنا. ادمجها واحدة واحدة بعد التأكد من المالك.` : `${jobs.differentOwners} page(s) belong to a different customer than the Meta page of the same name: they are not merged here. Merge them one by one after checking the owner.`}</div>` : ''}
         </div>
         <div id="merge-all-progress" class="hidden rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm font-bold text-slate-700 dark:text-slate-200" role="status" aria-live="polite"></div>
         <div id="merge-all-report" class="hidden rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-3 text-xs text-amber-800 dark:text-amber-200 space-y-1 max-h-48 overflow-y-auto"></div>
@@ -2206,6 +2222,27 @@ async function runAdMerge(keepAdId, draftAdId) {
   const keepId = String(plan.keepAd.id);
   let released = false;
   try {
+    // 0. While Meta has asked Albayan to wait, the unlink below still succeeds but neither the new
+    //    link nor the restore can be made: the Meta ad ended up linked to neither copy and the pair
+    //    was no longer offered for a retry. Ask first; nothing is changed unless Meta is reachable.
+    let metaStatus = null;
+    try { metaStatus = await apiMetaAdsStatus(); } catch (_) { metaStatus = null; }
+    const metaProvider = metaStatus?.providerState && typeof metaStatus.providerState === 'object' ? metaStatus.providerState : {};
+    const metaWaitSeconds = Math.max(0, Number(metaProvider.retryAfterSeconds || metaStatus?.remoteBackoffSeconds) || 0);
+    if (!metaStatus || metaStatus.configured !== true || metaProvider.paused === true || metaWaitSeconds > 0) {
+      const minutes = Math.max(1, Math.ceil(metaWaitSeconds / 60));
+      showNotification(
+        isAr ? 'لم يتغير شيء' : 'Nothing was changed',
+        !metaStatus
+          ? (isAr ? 'تعذّر التحقق من اتصال Meta، فلم يبدأ الدمج. أعد المحاولة.' : 'The Meta connection could not be checked, so the merge did not start. Try again.')
+          : metaStatus.configured !== true
+            ? (isAr ? 'Meta غير متصل حالياً، فلم يبدأ الدمج.' : 'Meta is not connected right now, so the merge did not start.')
+            : (isAr ? `طلبت Meta من البيان الانتظار. أعد الدمج بعد حوالي ${minutes} دقيقة.` : `Meta asked Albayan to wait. Merge again in about ${minutes} minute(s).`),
+        'warning'
+      );
+      return;
+    }
+
     // 1. Release the link. Meta allows one Albayan ad per Meta ad and the check
     //    ignores deleted rows, so the draft has to let go before the real ad can
     //    take over.

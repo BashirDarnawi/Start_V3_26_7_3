@@ -3704,7 +3704,7 @@ def app_login_handoff(
 
     # Schema already pins challenge to ^[0-9a-f]{64}$ (lowercase SHA-256 hex).
     challenge_hash = str(body.challenge)
-    platform = (body.platform or "").strip()[:32] or None
+    platform = sanitize_str(body.platform or "")[:32] or None  # no NUL: PostgreSQL refuses it (was a 500)
 
     code = secrets.token_urlsafe(32)
     code_hash = hash_token(code)
@@ -10133,6 +10133,11 @@ def unsettle_receipt_and_linked_ads(
         )
     updates["status"] = "Not Paid"
     updates["isPaid"] = False
+    # The delivery rules of PATCH and /settle, for EVERY unsettle. They used to run only inside the
+    # delivery-debt branch below, so a request naming another collection ("office") and a status
+    # other than Needs Delivery reopened a finished job and handed it to any user id.
+    delivery_workflow.refuse_regression(existing_data, updates, str(user.get("role") or "").lower(),
+                                        active_driver=lambda uid: _active_delivery_user(uid) or _get_user_by_id(uid) is None)
     # A delivery-debt conversion produces a REAL pending delivery receipt, so
     # mirror the create path's provisioning: a driver must be assigned and the
     # receipt needs its temporary D-number. The number is derived stably (the
@@ -12043,6 +12048,24 @@ def update_collection_item(
                 receipt_image = str(updates.get("receiptImage") or data.get("receiptImage") or "").strip()
                 if not receipt_image:
                     raise HTTPException(status_code=400, detail="receiptImage is required")
+
+                # Judge what was SENT: float() reads "nan", "inf" and true, so the job was completed as
+                # "collected 0" (or 1), and Delivered is final for the driver. A proof "photo" that is a
+                # number passed too. (A negative NUMBER is still stored as 0, as test_delivery_completion_
+                # validates_fee_payer_and_fee_amount documents; a negative text is refused below.)
+                _sent_body = body.data if isinstance(body.data, dict) else {}
+                if _sent_body.get("receiptImage") is not None and not isinstance(_sent_body.get("receiptImage"), str):
+                    raise HTTPException(status_code=400, detail="receiptImage must be a photo")
+                for _money_key in ("amountCollectedFromCustomer", "actualDeliveryFeeCollected", "deliveryFeeCollected"):
+                    _sent = _sent_body.get(_money_key)
+                    if _sent is None or (isinstance(_sent, str) and not _sent.strip()):
+                        continue
+                    try:
+                        _number = None if isinstance(_sent, bool) else float(_sent if isinstance(_sent, (int, float)) else str(_sent).strip())
+                    except (TypeError, ValueError, OverflowError):
+                        _number = None
+                    if _number is None or not math.isfinite(_number):
+                        raise HTTPException(status_code=400, detail=f"{_money_key} must be a number")
 
                 amt_collected = _as_float(updates.get("amountCollectedFromCustomer"))
                 if amt_collected is None:

@@ -658,3 +658,21 @@ def test_comment_times_as_meta_writes_them():
     assert studio_ig_poll.comment_second("2026-09-24T08:00:00+0000") == int(datetime(2026, 9, 24, 8, tzinfo=timezone.utc).timestamp())
     assert studio_ig_poll.comment_second("2026-09-24T10:00:00+0200") == studio_ig_poll.comment_second("2026-09-24T08:00:00Z")
     assert studio_ig_poll.comment_second("") is None and studio_ig_poll.comment_second("yesterday") is None
+
+
+def test_an_unchanged_comment_count_is_trusted_only_for_a_while(actors, graph, monkeypatch):
+    """Bug hunt 2026-11-16: one comment deleted and another written between two checks leaves the
+    count as it was. The post was then never read again, and the new comment got no reply."""
+    _ig_page(actors)
+    _rule(actors, "srule_all", created_ago=timedelta(hours=1))
+    account = Account(graph, {MEDIA_1: [_comment("18500000000000001", timedelta(minutes=5), "first")]})
+    _check(actors, read=1, new=1, replied=1, skipped=0, errorCode="")
+    account.media[MEDIA_1] = [_comment("18500000000000002", timedelta(minutes=1), "second", author="7002")]
+    # Inside the trusted hour the equal count still saves the read (the cheap path is kept).
+    _next_minute()
+    _check(actors, read=0, new=0, replied=0, skipped=0)
+    # Once the hour is over the post is read whatever its count says, and the new comment is answered.
+    monkeypatch.setattr(studio_ig_poll, "UNCHANGED_TRUST", timedelta(0))
+    _next_minute()
+    _check(actors, read=1, new=1, replied=1, skipped=0)
+    assert [path for path, _body, _token in graph.posts()] == ["18500000000000001/replies", "18500000000000002/replies"]

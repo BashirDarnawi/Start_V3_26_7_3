@@ -476,14 +476,20 @@ async function init() {
     }
   }
   
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  const onSystemThemeChange = () => {
     if (state.theme === 'system') {
       applyTheme();
       render();
     }
-  });
+  };
+  try {
+    // Safari before 14 has only the old addListener: a throw here used to stop start-up before its only render().
+    const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+    if (typeof systemTheme.addEventListener === 'function') systemTheme.addEventListener('change', onSystemThemeChange);
+    else if (typeof systemTheme.addListener === 'function') systemTheme.addListener(onSystemThemeChange);
+  } catch (_) {}
   
-  if (state.cloudConfig.enabled && !state.serverMode) {
+  if (state.cloudConfig && state.cloudConfig.enabled && !state.serverMode) {
     startCloudSync();
   }
 
@@ -599,8 +605,33 @@ function maybeShowLocalDataDurabilityReminder() {
 // as soon as the page is parsed; icons render through IconQueue, which
 // retries until the library exists. (The test harness sets readyState to
 // 'loading' on purpose to keep init() from auto-running.)
+// init() had no catch: a throw late in start-up left the loading screen up for good, with no
+// login form and no message. Nothing is drawn from half-loaded data here: when the screen is
+// still empty the visitor gets a reload card (the same one render() shows), nothing else.
+function startAlbayan() {
+  return init().catch(error => {
+    console.error('[albayan] start-up failed:', error);
+    window.__albayanInitSettled = true;
+    try {
+      const app = document.getElementById('app');
+      if (!app || String(app.innerHTML || '').trim()) return;
+      const isAr = state.language === 'ar';
+      app.innerHTML = `
+        <div class="min-h-screen flex items-center justify-center p-6" dir="${isAr ? 'rtl' : 'ltr'}">
+          <div class="hub-card w-full max-w-md p-6 text-center" data-testid="startup-failed">
+            <div class="text-lg font-extrabold text-slate-900 dark:text-white mb-2">${isAr ? 'تعذر تشغيل التطبيق' : 'The app could not start'}</div>
+            <div class="text-sm text-slate-500 mb-4">${isAr ? 'أعد تحميل التطبيق. بياناتك محفوظة.' : 'Reload the app. Your data is safe.'}</div>
+            <button type="button" onclick="window.location.reload()" class="touch-target min-h-11 px-5 rounded-xl bg-blue-600 text-white font-bold">${isAr ? 'إعادة التحميل' : 'Reload'}</button>
+          </div>
+        </div>`;
+      const loadingScreen = document.getElementById('app-loading-screen');
+      if (loadingScreen) { loadingScreen.setAttribute('aria-busy', 'false'); loadingScreen.style.display = 'none'; }
+    } catch (_) {}
+  });
+}
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
+  document.addEventListener('DOMContentLoaded', startAlbayan);
 } else {
-  init();
+  startAlbayan();
 }

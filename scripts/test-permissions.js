@@ -762,6 +762,20 @@ check('every duplicate can be merged in one run, and one bad page never blocks t
     assert(byLoser.get('ma_old_a').ads === 2, 'the ad count shown before the run is wrong');
     assert(byLoser.get('ma_old_b2').ads === 0, 'an empty page reported ads to move');
 
+    // Bug hunt 2026-11-16: a hand-made page of ANOTHER customer with the same name is left to the
+    // one-by-one dialog (which shows both owners); a shared owner or an ownerless side still merges.
+    const pagesBefore = S.pages;
+    S.pages = [
+      { id: 'mo_meta', name: 'Offers', customerIds: ['c1'], metaPageId: '33' },
+      { id: 'mo_other', name: 'Offers', customerIds: ['c2'] },
+      { id: 'mo_shared', name: 'offers', customerIds: ['c2', 'c1'] },
+      { id: 'mo_nobody', name: 'Offers', customerIds: [] }
+    ];
+    const ownerJobs = sandbox.buildAllPageMergeJobs();
+    assert(ownerJobs.differentOwners === 1, `expected 1 page of another customer to be skipped, got ${ownerJobs.differentOwners}`);
+    assert(ownerJobs.map(job => job.loseId).sort().join() === 'mo_nobody,mo_shared', `wrong bulk jobs: ${ownerJobs.map(job => job.loseId)}`);
+    S.pages = pagesBefore;
+
     // Non-admins get nothing and are refused if they call it anyway.
     loginAs(employee({ pages: ['view', 'edit', 'delete'], ads: ['view', 'edit'] }));
     assert(sandbox.buildAllPageMergeJobs().length === 0, 'a non-admin was handed a bulk merge list');
