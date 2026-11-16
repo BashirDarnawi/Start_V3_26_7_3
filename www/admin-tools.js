@@ -617,6 +617,19 @@ function ccText(en, ar) {
   return state.language === 'ar' ? ar : en;
 }
 
+// A server or network error as the admin reads it. English: the server's own sentence. Arabic: the
+// shared translation of a known refusal, else the Arabic fallback (never a raw English sentence
+// under an Arabic title); the server's words stay in the console for whoever supports the office.
+function ccErrorText(error, fallbackEn, fallbackAr) {
+  const detail = error && error.payload && error.payload.detail;
+  const raw = String((typeof detail === 'string' && detail) || (detail && detail.message) || (error && error.message) || '').trim();
+  if (state.language !== 'ar') return raw || fallbackEn;
+  const known = raw && typeof _serverRefusalText === 'function' ? _serverRefusalText(raw) : raw;
+  if (known && /[\u0600-\u06FF]/.test(known)) return known;
+  if (raw) console.warn('[control-center]', raw);
+  return fallbackAr;
+}
+
 function controlCenterPreviousMonth() {
   const now = new Date();
   const value = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -703,13 +716,13 @@ async function loadControlCenterStatus(force = false) {
     const [operations, meta] = await Promise.allSettled([apiOperationsStatus(), apiMetaAdsStatus()]);
     const errors = [];
     if (operations.status === 'fulfilled') _controlCenter.operations = operations.value;
-    else errors.push(`${ccText('Server checks', 'فحوصات الخادم')}: ${String(operations.reason?.message || ccText('unavailable', 'غير متاحة'))}`);
+    else errors.push(`${ccText('Server checks', 'فحوصات الخادم')}: ${ccErrorText(operations.reason, 'unavailable', 'غير متاحة')}`);
     if (meta.status === 'fulfilled') _controlCenter.meta = meta.value;
-    else errors.push(`${ccText('Meta', 'ميتا')}: ${String(meta.reason?.message || ccText('unavailable', 'غير متاحة'))}`);
+    else errors.push(`${ccText('Meta', 'ميتا')}: ${ccErrorText(meta.reason, 'unavailable', 'غير متاحة')}`);
     _controlCenter.error = errors.join(' | ');
     _controlCenter.loadedAt = Date.now();
   } catch (error) {
-    _controlCenter.error = String(error?.message || ccText('Could not load the server checks', 'تعذّر تحميل فحوصات الخادم'));
+    _controlCenter.error = ccErrorText(error, 'Could not load the server checks', 'تعذّر تحميل فحوصات الخادم');
   } finally {
     _controlCenter.loading = false;
     if (state.currentView === 'control-center') RenderQueue.schedule('control-center-loaded');
@@ -749,7 +762,7 @@ async function previewControlCenterMonth() {
     ].join('\n');
     window.alert(message);
   } catch (error) {
-    showNotification(ccText('Month check failed', 'فشل فحص الشهر'), String(error?.message || error), 'error');
+    showNotification(ccText('Month check failed', 'فشل فحص الشهر'), ccErrorText(error, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   }
 }
 
@@ -774,7 +787,7 @@ async function closeControlCenterMonth() {
     showNotification(ccText('Month closed safely', 'تم إقفال الشهر بأمان'), ccText(`${period} is now protected from changes.`, `${period} أصبح محمياً من التعديل.`), 'success');
     await loadControlCenterStatus(true);
   } catch (error) {
-    showNotification(ccText('Could not close month', 'تعذر إقفال الشهر'), String(error?.message || error), 'error');
+    showNotification(ccText('Could not close month', 'تعذر إقفال الشهر'), ccErrorText(error, 'Please try again.', 'لم يُقفل الشهر. راجع فحص الشهر ثم حاول مرة أخرى.'), 'error');
   }
 }
 
@@ -792,7 +805,7 @@ async function unlockControlCenterMonth(period) {
     showNotification(ccText('Month unlocked', 'تم فتح الشهر'), ccText(`${period} can be corrected now. Close it again when finished.`, `يمكن تصحيح ${period} الآن. أقفله مجدداً عند الانتهاء.`), 'success');
     await loadControlCenterStatus(true);
   } catch (error) {
-    showNotification(ccText('Could not unlock month', 'تعذر فتح الشهر'), String(error?.message || error), 'error');
+    showNotification(ccText('Could not unlock month', 'تعذر فتح الشهر'), ccErrorText(error, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   }
 }
 
@@ -807,7 +820,7 @@ async function runControlCenterBackup() {
   } catch (error) {
     // 409: a backup is already running (the daily one, or an earlier press) - busy, not failed.
     if (error?.status === 409) showNotification(ccText('Backup already running', 'النسخ الاحتياطي يعمل الآن'), ccText('It will appear under Last backup when it finishes.', 'ستظهر تحت «آخر نسخة» عند انتهائه.'), 'info');
-    else showNotification(ccText('Backup failed', 'فشل النسخ الاحتياطي'), String(error?.message || error), 'error');
+    else showNotification(ccText('Backup failed', 'فشل النسخ الاحتياطي'), ccErrorText(error, 'Please try again.', 'لم تُنشأ النسخة. حاول مرة أخرى.'), 'error');
   }
 }
 
@@ -823,9 +836,16 @@ function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
 }
 
 // ---- Subscription plans manager (owner pricing without redeploys) ----
-let _planManager = { loading: false, loadedAt: 0, failedAt: 0, version: 0, plans: [], error: '', dirty: false, saving: false };
+let _planManager = { loading: false, loadedAt: 0, failedAt: 0, version: 0, plans: [], error: '', dirty: false, saving: false, addOpen: false };
 // Mirrors the server's KNOWN_SERVICE_IDS; the server re-validates anyway.
 const PLAN_MANAGER_SERVICE_IDS = ['international_shipping', 'local_shipping', 'warehouse', 'smart_systems', 'clothes_system', 'ad_maker'];
+
+// The service's own name in the screen language (the raw id, e.g. clothes_system, showed in Arabic too).
+function planManagerServiceName(serviceId) {
+  const service = typeof SERVICES === 'object' && SERVICES ? SERVICES[String(serviceId)] : null;
+  if (!service) return String(serviceId);
+  return String((state.language === 'ar' ? service.nameAr : service.name) || serviceId);
+}
 
 async function loadPlanManager(force = false) {
   if (_planManager.loading || !isServerModeEnabled()) return;
@@ -844,7 +864,7 @@ async function loadPlanManager(force = false) {
     _planManager.dirty = false;
   } catch (error) {
     _planManager.failedAt = Date.now();
-    _planManager.error = String(error?.payload?.detail || error?.message || ccText('Could not load the plan catalog', 'تعذّر تحميل كتالوج الخطط'));
+    _planManager.error = ccErrorText(error, 'Could not load the plan catalog', 'تعذّر تحميل كتالوج الخطط');
   } finally {
     _planManager.loading = false;
     if (state.currentView === 'control-center') render();
@@ -860,6 +880,7 @@ function planManagerSetField(index, field, value) {
     // previous price until the input parses.
     const raw = String(value ?? '').trim().replace(',', '.');
     const parsed = Number(raw);
+    plan._priceText = String(value ?? '').slice(0, 20);  // a redraw shows what was typed ("12."), not "12.00"
     if (raw === '' || !Number.isFinite(parsed)) return;
     plan.priceMinor = Math.max(0, Math.round(parsed * 100));
   }
@@ -868,7 +889,7 @@ function planManagerSetField(index, field, value) {
   else if (field === 'active') plan.active = value === true;
   else if (field === 'name' || field === 'nameAr') plan[field] = String(value || '').slice(0, 80);
   _planManager.dirty = true;
-  // Update in place: a render() would redraw these id-less inputs and close the phone keyboard.
+  // Update in place: no render() while typing (a redraw from elsewhere keeps the focus through the inputs' ids).
   const save = document.getElementById('plan-manager-save');
   if (save) save.disabled = _planManager.saving;
   document.getElementById('plan-manager-dirty')?.classList.remove('hidden');
@@ -923,6 +944,7 @@ function planManagerAddBundle() {
 async function savePlanManager() {
   if (!_planManager.plans.length || _planManager.saving) return;
   _planManager.saving = true;
+  const sentPlans = JSON.stringify(_planManager.plans);
   if (state.currentView === 'control-center') render();
   try {
     const payload = await apiAdminSaveSubscriptionPlans(_planManager.plans.map(p => ({
@@ -939,14 +961,16 @@ async function savePlanManager() {
       sortOrder: Math.trunc(Number(p.sortOrder) || 0)
     })), _planManager.version);
     _planManager.version = Number(payload?.version || _planManager.version + 1);
-    _planManager.dirty = false;
-    _planManager.loadedAt = 0;
+    // Typed while this save was on its way: before, the reload below replaced it with the server's
+    // copy and the "unsaved" hint went away without a word. It stays, marked unsaved, for the next save.
+    const editedMeanwhile = JSON.stringify(_planManager.plans) !== sentPlans;
+    _planManager.dirty = editedMeanwhile;
+    _planManager.loadedAt = editedMeanwhile ? Date.now() : 0;
     showNotification(ccText('Plans saved', 'تم حفظ الخطط'), ccText(`Catalog version ${_planManager.version} is live — new purchases use it immediately.`, `الإصدار ${_planManager.version} من الكتالوج أصبح فعالاً — المشتريات الجديدة تستخدمه فوراً.`), 'success');
     if (typeof refreshSubscriptionPlans === 'function') refreshSubscriptionPlans(true).catch(() => {});
-    loadPlanManager(true);
+    if (!editedMeanwhile) loadPlanManager(true);
   } catch (error) {
-    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || ccText('Save failed', 'فشل الحفظ'));
-    showNotification(ccText('Could not save plans', 'تعذر حفظ الخطط'), String(detail), 'error');
+    showNotification(ccText('Could not save plans', 'تعذر حفظ الخطط'), ccErrorText(error, 'Save failed', 'لم تُحفظ الخطط. أعد التحميل ثم حاول مرة أخرى.'), 'error');
   } finally {
     _planManager.saving = false;
     if (state.currentView === 'control-center') render();
@@ -957,17 +981,17 @@ function renderPlanManagerSection() {
   if (!isServerModeEnabled()) return '';
   const rows = _planManager.plans.map((plan, index) => {
     const safeName = Security.escapeHtml(String(plan.name || plan.id));
-    const services = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).join(' + ');
+    const services = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).map(planManagerServiceName).join(' + ');
     return `
       <div class="management-plan-row grid grid-cols-2 items-center gap-2 rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800 sm:grid-cols-[1.2fr_1fr_90px_80px_70px_70px]">
         <div class="min-w-0">
-          <input aria-label="${state.language === 'ar' ? 'اسم الخطة بالإنجليزية' : 'Plan name in English'}" value="${safeName}" oninput="planManagerSetField(${index}, 'name', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 font-bold text-slate-800 focus:border-indigo-300 dark:text-white" />
-          <input aria-label="${state.language === 'ar' ? 'اسم الخطة بالعربية' : 'Plan name in Arabic'}" value="${Security.escapeHtml(String(plan.nameAr || ''))}" dir="rtl" oninput="planManagerSetField(${index}, 'nameAr', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 text-xs text-slate-500 focus:border-indigo-300" />
+          <input aria-label="${state.language === 'ar' ? 'اسم الخطة بالإنجليزية' : 'Plan name in English'}" id="plan-${index}-name" value="${safeName}" oninput="planManagerSetField(${index}, 'name', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 font-bold text-slate-800 focus:border-indigo-300 dark:text-white" />
+          <input aria-label="${state.language === 'ar' ? 'اسم الخطة بالعربية' : 'Plan name in Arabic'}" value="${Security.escapeHtml(String(plan.nameAr || ''))}" id="plan-${index}-name-ar" dir="rtl" oninput="planManagerSetField(${index}, 'nameAr', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 text-xs text-slate-500 focus:border-indigo-300" />
         </div>
         <div class="truncate text-xs text-slate-500" title="${Security.escapeHtml(String(plan.id))}">${Security.escapeHtml(services)}</div>
-        <label class="text-xs text-slate-500 sm:text-right">LYD<input type="number" min="0" step="0.01" value="${(Math.max(0, Number(plan.priceMinor) || 0) / 100).toFixed(2)}" oninput="planManagerSetField(${index}, 'priceLYD', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono font-bold dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="text-xs text-slate-500 sm:text-right">${ccText('Days', 'الأيام')}<input type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="text-xs text-slate-500 sm:text-right">${ccText('Order', 'الترتيب')}<input type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">LYD<input id="plan-${index}-price" type="number" min="0" step="0.01" value="${Security.escapeHtml(String(plan._priceText ?? (Math.max(0, Number(plan.priceMinor) || 0) / 100).toFixed(2)))}" oninput="planManagerSetField(${index}, 'priceLYD', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono font-bold dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">${ccText('Days', 'الأيام')}<input id="plan-${index}-days" type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">${ccText('Order', 'الترتيب')}<input id="plan-${index}-order" type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
         <label class="flex items-center justify-end gap-1 text-xs font-bold ${plan.active !== false ? 'text-emerald-600' : 'text-slate-400'}"><input type="checkbox" ${plan.active !== false ? 'checked' : ''} onchange="planManagerSetField(${index}, 'active', this.checked)" class="h-5 w-5 accent-emerald-600" />${ccText('On', 'مفعّلة')}</label>
       </div>`;
   }).join('');
@@ -983,7 +1007,7 @@ function renderPlanManagerSection() {
         </div>
         ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}
         <div class="space-y-2">${rows || `<div class="text-sm text-slate-500">${_planManager.loading ? ccText('Loading plans…', 'جارٍ تحميل الخطط…') : ccText('Press Reload to fetch the plan catalog.', 'اضغط «إعادة التحميل» لجلب كتالوج الخطط.')}</div>`}</div>
-        <details class="mt-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-700">
+        <details ${_planManager.addOpen ? 'open' : ''} ontoggle="_planManager.addOpen = this.open" class="mt-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-700">
           <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">${ccText('Add a bundle (one subscription, many systems)', 'إضافة باقة (اشتراك واحد لعدة أنظمة)')}</summary>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="text-xs font-bold text-slate-500">${ccText('Bundle id (letters/numbers/underscore)', 'معرّف الباقة (حروف إنجليزية/أرقام/شرطة سفلية)')}<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
@@ -991,7 +1015,7 @@ function renderPlanManagerSection() {
             <label class="text-xs font-bold text-slate-500">${ccText('Name (English)', 'الاسم (بالإنجليزية)')}<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
             <label class="text-xs font-bold text-slate-500">${ccText('Name (Arabic)', 'الاسم (بالعربية)')}<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
             <label class="text-xs font-bold text-slate-500">${ccText('Duration (days)', 'المدة (بالأيام)')}<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>
-            <div class="text-xs font-bold text-slate-500">${ccText('Included systems', 'الأنظمة المشمولة')}<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${sid}</span></label>`).join('')}</div></div>
+            <div class="text-xs font-bold text-slate-500">${ccText('Included systems', 'الأنظمة المشمولة')}<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${Security.escapeHtml(planManagerServiceName(sid))}</span></label>`).join('')}</div></div>
           </div>
           <button type="button" onclick="planManagerAddBundle()" class="mt-3 min-h-11 rounded-xl bg-indigo-600 px-4 font-bold text-white">${ccText('Add to list (save to publish)', 'أضف إلى القائمة (احفظ للنشر)')}</button>
         </details>

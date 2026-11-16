@@ -43,3 +43,28 @@ def test_payment_notes_drop_characters_postgresql_cannot_store():
     # A NUL or a lone surrogate is valid JSON; PostgreSQL refuses both (the request answered 500).
     assert _stored_text("paid\x00 at the office \ud800 ") == "paid at the office"
     assert _stored_text(None) == "" and _stored_text("  ملاحظة  ") == "ملاحظة"
+
+
+def test_a_tab_from_before_the_release_gets_the_reload_notice_instead_of_a_new_lazy_bundle():
+    """A tab opened before a deploy asks with the OLD main bundle's version. The new bundle could stop
+    half-way inside the old page (a dead menu until a manual reload); it now gets a small script that
+    says a new version is available. The right version and no version still get the bundle."""
+    from fastapi.testclient import TestClient
+
+    import server.main as main_module
+
+    client = TestClient(main_module.app)
+    version = main_module._asset_version(main_module._select_script_source())
+    for name in ("studio.js", "studio-staff.js", "studio-pages.js", "clothes.js", "admin-tools.js", "meta-tools.js"):
+        stale = client.get(f"/{name}", params={"v": "0ld" + version[:-3]})
+        assert stale.status_code == 200, name
+        assert stale.headers["content-type"].startswith("application/javascript"), name
+        assert "no-store" in stale.headers.get("cache-control", ""), name  # never cached under the old address
+        assert stale.text == main_module._STALE_BUILD_SCRIPT, name
+        current = client.get(f"/{name}", params={"v": version})
+        assert current.status_code == 200 and "__albayanStaleBuild" not in current.text[:2000], name
+        assert len(current.text) > 10 * len(stale.text), name
+        assert len(client.get(f"/{name}").text) == len(current.text), name
+    notice = main_module._STALE_BUILD_SCRIPT
+    assert "window.__albayanStaleBuild = true" in notice and "window.location.reload()" in notice
+    assert "innerHTML" not in notice and "يتوفر إصدار جديد" in notice

@@ -807,6 +807,16 @@ def _client_post_id(owner_id: str, raw: Any) -> str:
     return "spost_" + hashlib.sha256(f"{owner_id}:{raw}".encode("utf-8")).hexdigest()[:32]
 
 
+def _client_rule_id(owner_id: str, raw: Any) -> str:
+    """The id POST /rules gives the rule of an editor's ``operationId`` (the same for every try of one
+    create, and only for this owner); '' without one."""
+    if raw is None or raw == "":
+        return ""
+    if not isinstance(raw, str) or not _POST_OPERATION_ID_RE.fullmatch(raw):
+        raise HTTPException(status_code=400, detail="Invalid operationId")
+    return "srule_" + hashlib.sha256(f"{owner_id}:rule:{raw}".encode("utf-8")).hexdigest()[:32]
+
+
 @contextmanager
 def _post_quota_guard(owner_id: str):
     """Serialize a post quota check with the write it allows: in this process and, on PostgreSQL, across
@@ -3319,10 +3329,31 @@ def create_social_studio_router(
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
         scope = _mutation(request, user, ctx, ownerId)
+        body = dict(body or {})
+        # The editor's operationId names the rule it creates (as for posts): Save tapped again after a
+        # lost answer returns the rule the first try saved instead of a second identical one.
+        rule_id = _client_rule_id(scope.owner, body.pop("operationId", None))
+
+        def landed() -> dict[str, Any] | None:
+            entity = ctx["get_entity"](RULES_TYPE, rule_id) if rule_id else None
+            if not entity or entity.get("deleted") or str((entity.get("data") or {}).get("ownerId") or "") != scope.owner:
+                return None
+            return entity
+
+        earlier = landed()
+        if earlier:
+            return _save_rule_edit(scope, user, earlier, body)
+        from_client = bool(rule_id) and not ctx["get_entity"](RULES_TYPE, rule_id)  # a deleted rule of that name gives way to a new one
         now = _iso_now()
-        clean = {**_clean_rule(ctx, scope.owner, body or {}), "createdAt": now, "updatedAt": now, "activeSince": now_ms()}
-        rule_id = new_id("srule")
-        saved = ctx["upsert_entity"](RULES_TYPE, rule_id, clean, scope.owner, reject_existing=True)
+        clean = {**_clean_rule(ctx, scope.owner, body), "createdAt": now, "updatedAt": now, "activeSince": now_ms()}
+        rule_id = rule_id if from_client else new_id("srule")
+        try:
+            saved = ctx["upsert_entity"](RULES_TYPE, rule_id, clean, scope.owner, reject_existing=True)
+        except HTTPException:
+            earlier = landed() if from_client else None  # the other try of this create won
+            if not earlier:
+                raise
+            return _save_rule_edit(scope, user, earlier, body)
         # No rule name in the audit text (R2): an admin's message would keep it past the owner's anonymisation.
         ctx["audit"](scope.uid, "create", RULES_TYPE, rule_id, "Created auto-reply rule", {"ownerId": scope.owner})
         return _public(saved, user)
@@ -3336,7 +3367,10 @@ def create_social_studio_router(
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
         scope = _mutation(request, user, ctx, ownerId)
-        entity = _load_owned(ctx, RULES_TYPE, rule_id, scope)
+        return _save_rule_edit(scope, user, _load_owned(ctx, RULES_TYPE, rule_id, scope), body or {})
+
+    def _save_rule_edit(scope: _Scope, user: dict[str, Any], entity: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+        """PATCH /rules/{id} on a loaded rule (also a create retried with its operationId)."""
         owner_id = str(entity["data"].get("ownerId") or "")
         merged = {**entity["data"], **(body or {})}
         # P4-01: only a body that names pageRefs is held to the live-page check; otherwise the saved

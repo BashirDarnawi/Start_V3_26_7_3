@@ -1133,7 +1133,7 @@ async function socialRuleSave() {
   render();
   try {
     if (r.id) await socialApi(`/rules/${encodeURIComponent(r.id)}`, { method: 'PATCH', body });
-    else await socialApi('/rules', { method: 'POST', body });
+    else await socialApi('/rules', { method: 'POST', body: { ...body, operationId: r.opId || (r.opId = Security.generateSecureId('rule')) } });  // a retry gets the same rule, never a copy
     if (!isCurrent()) return;
     showNotification(socialText('Rule saved', 'تم حفظ القاعدة'), body.name, 'success');
     _social.platformFilter = body.platform;

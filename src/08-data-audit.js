@@ -1689,6 +1689,13 @@ function _serverRefusalText(raw) {
   const out = hit?.[state.language === 'ar' ? 1 : 2];
   return out ? (hit[0].test ? raw.replace(hit[0], out) : out) : raw;
 }
+// A caught error's text in the screen language: in Arabic never a raw English server sentence.
+function errText(e, en, ar) {
+  const raw = String(e?.message || '');
+  if (state.language !== 'ar') return raw || en;
+  const out = _serverRefusalText(raw);
+  return /[\u0600-\u06FF]/.test(out) ? out : ar;
+}
 // Clothes refusals read the Clothes map (lazy clothes.js) first: it names the product, never its id.
 function _collectionRefusalText(collectionName, raw) {
   return /^clothes/.test(collectionName) && typeof clothesServerDetailText === 'function' ? clothesServerDetailText(raw) : _serverRefusalText(raw);

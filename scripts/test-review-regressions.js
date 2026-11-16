@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const vm = require('node:vm');
 const loadBrowserSource = require('./helpers/load-browser-source');
 
 // The Clothes System is a lazy bundle: load its source on top of the startup files.
@@ -4741,6 +4742,50 @@ async function main() {
     assert.equal(await mergeFails(Object.assign(new Error(closed), { status: 423 }), { language: 'en' }), closed);
     assert.equal(await mergeFails(Object.assign(new Error('Conflict: ad has changed'), { status: 409 }), { language: 'en' }),
       'The ad changed during the merge. Refresh and try again.');
+  });
+
+  await test('2026-11-16: the "new version" notice for an out-of-date tab draws once, in the page language, and "Later" removes it', async () => {
+    const mainPy = fs.readFileSync(path.join(__dirname, '..', 'server', 'main.py'), 'utf8');
+    const match = mainPy.match(/_STALE_BUILD_SCRIPT = """([\s\S]*?)"""/);
+    assert.ok(match, 'the notice script is in server/main.py');
+    const runNotice = lang => {
+      const made = [];
+      const element = tag => {
+        const node = { tag, children: [], style: {}, attrs: {}, listeners: {}, parentNode: null,
+          setAttribute(key, value) { node.attrs[key] = String(value); },
+          appendChild(child) { child.parentNode = node; node.children.push(child); return child; },
+          removeChild(child) { node.children = node.children.filter(item => item !== child); child.parentNode = null; },
+          addEventListener(type, fn) { node.listeners[type] = fn; }, focus() { node.focused = true; } };
+        made.push(node);
+        return node;
+      };
+      const body = element('body');
+      let reloads = 0;
+      const sandbox = { window: { location: { reload() { reloads += 1; } } },
+        document: { body, documentElement: { getAttribute: key => (key === 'lang' ? lang : null) }, createElement: element,
+          getElementById: id => made.find(node => node.id === id && node.parentNode) || null } };
+      vm.createContext(sandbox);
+      vm.runInContext(match[1], sandbox);
+      vm.runInContext(match[1], sandbox);  // a second lazy bundle asked for by the same old tab
+      const overlays = body.children.filter(node => node.id === 'albayan-stale-build');
+      const texts = made.map(node => node.textContent).filter(Boolean);
+      const buttons = made.filter(node => node.tag === 'button' && node.parentNode);
+      return { sandbox, body, overlays, texts, buttons, reloads: () => reloads };
+    };
+    const en = runNotice('en');
+    assert.equal(en.sandbox.window.__albayanStaleBuild, true);
+    assert.equal(en.overlays.length, 1, 'one notice, however many bundles were asked for');
+    assert.equal(en.overlays[0].attrs.dir, 'ltr');
+    assert.deepEqual(en.buttons.map(button => button.textContent), ['Reload now', 'Later']);
+    assert.ok(en.texts.includes('A new version is available') && en.buttons[0].focused);
+    en.buttons[0].listeners.click();
+    assert.equal(en.reloads(), 1);
+    en.buttons[1].listeners.click();
+    assert.equal(en.body.children.length, 0, '"Later" removes the notice and reloads nothing');
+    assert.equal(en.reloads(), 1);
+    const ar = runNotice('ar');
+    assert.equal(ar.overlays[0].attrs.dir, 'rtl');
+    assert.ok(ar.texts.includes('يتوفر إصدار جديد') && ar.texts.every(text => !/[A-Za-z]{4}/.test(text)), ar.texts.join(' | '));
   });
 
   await test('bug hunt 2026-11-16: an ad merge started while Meta is paused, unreachable or not connected changes nothing', async () => {

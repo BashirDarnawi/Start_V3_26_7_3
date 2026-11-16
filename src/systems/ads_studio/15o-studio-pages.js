@@ -1161,7 +1161,8 @@ function studioPgRuleSave() {
   const body = studioPgRuleBody(draft);
   const call = draft.id
     ? studioApi(`/api/social-studio/rules/${encodeURIComponent(draft.id)}`, { method: 'PATCH', body })
-    : studioApi('/api/social-studio/rules', { method: 'POST', body });
+    // One operationId per new rule: Save tapped again after a lost answer gets the rule the first try saved.
+    : studioApi('/api/social-studio/rules', { method: 'POST', body: { ...body, operationId: draft.opId || (draft.opId = Security.generateSecureId('rule')) } });
   return call.then(raw => {
     if (generation !== _studioPg.generation) return null;
     const saved = studioPgCleanRule(raw);

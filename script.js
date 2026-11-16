@@ -3167,11 +3167,8 @@ async function loadCollectionFromIndexedDB(collectionName) {
       throw error;
     }
     console.error('Error loading collection from IndexedDB:', error);
-    // Local mode keeps its ONLY copy here. "Could not be read" (iOS dropped the connection while
-    // the app was in the background, a value too large to read) is not "nothing is stored":
-    // answering null made the loader start an empty list, and the next save wrote that empty list
-    // over the intact rows. Report it as an unreadable copy: it stays protected from overwrite
-    // and the next start reads it again. A server cache is simply refilled from the server.
+    // Local mode's ONLY copy: "could not be read" (iOS dropped the connection) is not "nothing
+    // stored". null made an empty list that the next save wrote over the intact rows.
     if (capturedScope === 'local' && capturedScope === _collectionStorageScope) {
       markCollectionCorrupted(name);
       const unreadable = new Error(`IndexedDB collection "${name}" could not be read`);
@@ -4129,7 +4126,7 @@ async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
 
     openServiceById(navigateToId);
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Failed to subscribe', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', errText(e, 'Failed to subscribe', 'تعذّر الاشتراك. تحقق من الرصيد ثم حاول مرة أخرى.'), 'error');
   }
 }
 
@@ -4259,7 +4256,7 @@ async function passwordResetRequestServer() {
     renderModal();
     showNotification(state.language === 'ar' ? 'تم إرسال رمز إعادة التعيين' : 'Reset Code Sent', state.language === 'ar' ? 'إذا كان هذا الحساب موجوداً، ستستلم رمز إعادة تعيين.' : 'If this account exists, you will receive a reset code.', 'success');
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشل طلب إعادة التعيين' : 'Failed to request reset'), 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', errText(e, 'Failed to request reset', 'فشل طلب إعادة التعيين'), 'error');
   }
 }
 
@@ -4287,7 +4284,7 @@ async function passwordResetConfirmServer() {
     showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إعادة تعيين كلمة المرور بنجاح. الرجاء تسجيل الدخول.' : 'Password reset successfully. Please sign in.', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'فشلت إعادة التعيين' : 'Reset Failed', e.message || (state.language === 'ar' ? 'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية' : 'Invalid or expired reset code'), 'error');
+    showNotification(state.language === 'ar' ? 'فشلت إعادة التعيين' : 'Reset Failed', errText(e, 'Invalid or expired reset code', 'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية'), 'error');
   }
 }
 
@@ -6204,9 +6201,8 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
   for (const name of PERSISTED_COLLECTIONS) {
     let loaded = null;
 
-    // The connection was lost part-way through this load (iOS closes it in the background): the
-    // collections not read yet are NOT empty. In local mode they are kept out of every save until
-    // a later start reads them; a complete inline snapshot, when there is one, is used as usual.
+    // Connection lost mid-load (iOS, in the background): what was not read yet is NOT empty.
+    // Local mode keeps it out of every save until a later start reads it.
     if (hadConnection && !db && getCollectionStorageScope() === 'local'
         && !(legacy._collectionsInline && Array.isArray(legacy[name]) && legacy[name].length)) {
       markCollectionCorrupted(name);
@@ -8904,6 +8900,13 @@ function _serverRefusalText(raw) {
   const hit = _SERVER_REFUSAL_AR.find(([en]) => en.test ? en.test(raw) : raw.startsWith(en));
   const out = hit?.[state.language === 'ar' ? 1 : 2];
   return out ? (hit[0].test ? raw.replace(hit[0], out) : out) : raw;
+}
+// A caught error's text in the screen language: in Arabic never a raw English server sentence.
+function errText(e, en, ar) {
+  const raw = String(e?.message || '');
+  if (state.language !== 'ar') return raw || en;
+  const out = _serverRefusalText(raw);
+  return /[\u0600-\u06FF]/.test(out) ? out : ar;
 }
 // Clothes refusals read the Clothes map (lazy clothes.js) first: it names the product, never its id.
 function _collectionRefusalText(collectionName, raw) {
@@ -13632,7 +13635,7 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
         showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'تغيّر الحساب أثناء تسجيل الدخول. حاول مرة أخرى.' : 'Account changed during sign-in. Please try again.', 'error');
         return;
       }
-      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
+      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', errText(e, 'Login failed', 'تعذّر تسجيل الدخول. تحقق من الاتصال ثم حاول مرة أخرى.'), 'error');
       return;
     }
   }
@@ -45621,7 +45624,7 @@ async function init() {
     }
   };
   try {
-    // Safari before 14 has only the old addListener: a throw here used to stop start-up before its only render().
+    // Safari before 14 has only addListener (a throw here stopped start-up).
     const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
     if (typeof systemTheme.addEventListener === 'function') systemTheme.addEventListener('change', onSystemThemeChange);
     else if (typeof systemTheme.addListener === 'function') systemTheme.addListener(onSystemThemeChange);
@@ -45743,9 +45746,8 @@ function maybeShowLocalDataDurabilityReminder() {
 // as soon as the page is parsed; icons render through IconQueue, which
 // retries until the library exists. (The test harness sets readyState to
 // 'loading' on purpose to keep init() from auto-running.)
-// init() had no catch: a throw late in start-up left the loading screen up for good, with no
-// login form and no message. Nothing is drawn from half-loaded data here: when the screen is
-// still empty the visitor gets a reload card (the same one render() shows), nothing else.
+// A throw late in init() left the loading screen up for good: show a reload card instead
+// (never a screen drawn from half-loaded data).
 function startAlbayan() {
   return init().catch(error => {
     console.error('[albayan] start-up failed:', error);

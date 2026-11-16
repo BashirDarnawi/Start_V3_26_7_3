@@ -374,8 +374,8 @@ def test_unsettle_cannot_reopen_a_finished_job_or_hand_it_to_someone_else(actors
 
 
 def test_a_completion_with_a_nonsense_amount_or_photo_is_refused_not_stored_as_zero(actors):
-    """Bug hunt 2026-11-16: "nan", "inf" and true were stored as "collected 0" (or 1) and the job became
-    Delivered, which the driver can never correct; a proof photo of 1 was accepted too."""
+    """Bug hunt 2026-11-16: -50, "nan", "inf" and true were stored as "collected 0" (or 1) and the job
+    became Delivered, which the driver can never correct; a proof photo of 1 was accepted too."""
     receipt = _d_receipt(actors)
     assert _patch(actors, "driver", receipt["id"], {"deliveryStatus": "In Progress"}).status_code == 200
 
@@ -385,7 +385,7 @@ def test_a_completion_with_a_nonsense_amount_or_photo_is_refused_not_stored_as_z
             "amountCollectedFromCustomer": 500, "actualDeliveryFeeCollected": 0, **changes,
         })
 
-    for odd in ("nan", "inf", True, "-1", [500], "five hundred"):
+    for odd in (-50, -0.01, "nan", "inf", True, "-1", [500], "five hundred"):
         for key in ("amountCollectedFromCustomer", "actualDeliveryFeeCollected"):
             refused = complete(**{key: odd})
             assert refused.status_code == 400 and key in refused.text, (key, odd, refused.text)
@@ -404,3 +404,20 @@ def test_a_dispatcher_cancel_needs_a_reason_even_when_only_the_status_is_sent():
     assert allowed({"deliveryStatus": "Canceled"}) is False
     assert allowed({"deliveryStatus": "Canceled", "deliveryCancelReason": "   "}) is False
     assert allowed({"deliveryStatus": "Canceled", "deliveryCancelReason": "Customer asked to wait"}) is True
+
+
+def test_the_driver_cannot_rewrite_the_trail_or_notes_of_a_finished_job(actors):
+    """Bug hunt 2026-11-16: a driver PATCH with no status skipped every terminal-state check, so the
+    history, the notes and ownerCoveredExtraFee of a Delivered job could be rewritten afterwards."""
+    receipt = _delivered(actors, 500)
+    before = _get(actors, receipt["id"])["data"]
+    for changes in ({"deliveryHistory": []}, {"driverNotes": "rewritten later"}, {"ownerCoveredExtraFee": 999}):
+        refused = _patch(actors, "driver", receipt["id"], changes)
+        assert refused.status_code == 409 and "can no longer be changed" in refused.text, (changes, refused.text)
+    after = _get(actors, receipt["id"])["data"]
+    for key in ("deliveryHistory", "driverNotes", "ownerCoveredExtraFee", "deliveryStatus"):
+        assert after.get(key) == before.get(key), key
+    # An open job is still the driver's to work on: notes go with the accept as before.
+    open_job = _d_receipt(actors)
+    accepted = _patch(actors, "driver", open_job["id"], {"deliveryStatus": "In Progress", "driverNotes": "on my way"})
+    assert accepted.status_code == 200, accepted.text

@@ -642,9 +642,8 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
   for (const name of PERSISTED_COLLECTIONS) {
     let loaded = null;
 
-    // The connection was lost part-way through this load (iOS closes it in the background): the
-    // collections not read yet are NOT empty. In local mode they are kept out of every save until
-    // a later start reads them; a complete inline snapshot, when there is one, is used as usual.
+    // Connection lost mid-load (iOS, in the background): what was not read yet is NOT empty.
+    // Local mode keeps it out of every save until a later start reads it.
     if (hadConnection && !db && getCollectionStorageScope() === 'local'
         && !(legacy._collectionsInline && Array.isArray(legacy[name]) && legacy[name].length)) {
       markCollectionCorrupted(name);

@@ -774,7 +774,7 @@ async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
 
     openServiceById(navigateToId);
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Failed to subscribe', 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', errText(e, 'Failed to subscribe', 'تعذّر الاشتراك. تحقق من الرصيد ثم حاول مرة أخرى.'), 'error');
   }
 }
 
@@ -904,7 +904,7 @@ async function passwordResetRequestServer() {
     renderModal();
     showNotification(state.language === 'ar' ? 'تم إرسال رمز إعادة التعيين' : 'Reset Code Sent', state.language === 'ar' ? 'إذا كان هذا الحساب موجوداً، ستستلم رمز إعادة تعيين.' : 'If this account exists, you will receive a reset code.', 'success');
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e.message || (state.language === 'ar' ? 'فشل طلب إعادة التعيين' : 'Failed to request reset'), 'error');
+    showNotification(state.language === 'ar' ? 'خطأ' : 'Error', errText(e, 'Failed to request reset', 'فشل طلب إعادة التعيين'), 'error');
   }
 }
 
@@ -932,7 +932,7 @@ async function passwordResetConfirmServer() {
     showNotification(state.language === 'ar' ? 'نجاح' : 'Success', state.language === 'ar' ? 'تمت إعادة تعيين كلمة المرور بنجاح. الرجاء تسجيل الدخول.' : 'Password reset successfully. Please sign in.', 'success');
     render();
   } catch (e) {
-    showNotification(state.language === 'ar' ? 'فشلت إعادة التعيين' : 'Reset Failed', e.message || (state.language === 'ar' ? 'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية' : 'Invalid or expired reset code'), 'error');
+    showNotification(state.language === 'ar' ? 'فشلت إعادة التعيين' : 'Reset Failed', errText(e, 'Invalid or expired reset code', 'رمز إعادة التعيين غير صحيح أو منتهي الصلاحية'), 'error');
   }
 }
 

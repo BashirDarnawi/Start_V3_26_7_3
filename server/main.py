@@ -3009,6 +3009,51 @@ def serve_script(request: Request):
     return FileResponse(str(src), media_type="application/javascript", headers=headers)
 
 
+# What a tab opened BEFORE the current release gets when it asks for a lazy bundle (its ?v= is the
+# old main bundle's). The new bundle was written for the new main bundle: loaded into the old one it
+# can stop half-way, which left a menu item that did nothing until a manual reload, and a Retry
+# that could never succeed. This small script says so instead and offers the reload. It also runs
+# in tabs whose (old) loaders know nothing about it; "Later" keeps whatever the person is typing.
+_STALE_BUILD_SCRIPT = """(function () {
+  window.__albayanStaleBuild = true;
+  try {
+    if (document.getElementById('albayan-stale-build') || !document.body) return;
+    var ar = String(document.documentElement.getAttribute('lang') || '').toLowerCase().indexOf('ar') === 0;
+    var overlay = document.createElement('div');
+    overlay.id = 'albayan-stale-build';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('dir', ar ? 'rtl' : 'ltr');
+    overlay.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(15,23,42,.6);font-family:inherit';
+    var card = document.createElement('div');
+    card.style.cssText = 'max-width:26rem;width:100%;background:#fff;color:#0f172a;border-radius:16px;padding:24px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.3)';
+    var title = document.createElement('div');
+    title.style.cssText = 'font-weight:800;font-size:1.125rem;margin-bottom:8px';
+    title.textContent = ar ? 'يتوفر إصدار جديد' : 'A new version is available';
+    var text = document.createElement('div');
+    text.style.cssText = 'font-size:.875rem;color:#475569;margin-bottom:16px';
+    text.textContent = ar
+      ? 'تم تحديث البيان منذ فتح هذه الصفحة. أعد التحميل لفتح هذا القسم. إن كنت تكتب شيئاً، احفظه أولاً ثم أعد التحميل.'
+      : 'Albayan was updated since this page was opened. Reload to open this section. If you are in the middle of typing something, save it first, then reload.';
+    var reload = document.createElement('button');
+    reload.type = 'button';
+    reload.style.cssText = 'min-height:44px;padding:0 20px;margin:4px;border:0;border-radius:12px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer';
+    reload.textContent = ar ? 'إعادة التحميل الآن' : 'Reload now';
+    reload.addEventListener('click', function () { window.location.reload(); });
+    var later = document.createElement('button');
+    later.type = 'button';
+    later.style.cssText = 'min-height:44px;padding:0 20px;margin:4px;border:0;border-radius:12px;background:#e2e8f0;color:#0f172a;font-weight:700;cursor:pointer';
+    later.textContent = ar ? 'لاحقاً' : 'Later';
+    later.addEventListener('click', function () { overlay.parentNode && overlay.parentNode.removeChild(overlay); });
+    card.appendChild(title); card.appendChild(text); card.appendChild(reload); card.appendChild(later);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    reload.focus();
+  } catch (_) {}
+})();
+"""
+
+
 def _serve_lazy_bundle(request: Request, name: str):
     # A lazy bundle's loader reuses the MAIN bundle's ?v= (all bundles rebuild
     # together on every deploy), so cache-match against that version.
@@ -3017,6 +3062,9 @@ def _serve_lazy_bundle(request: Request, name: str):
         raise HTTPException(status_code=500, detail="Bundle unavailable")
     v = request.query_params.get("v")
     expected = _asset_version(_select_script_source())
+    if v and v != expected:
+        # Never cached: the same URL must answer the real bundle again if this build comes back (a rollback).
+        return Response(_STALE_BUILD_SCRIPT, media_type="application/javascript", headers=_NO_STORE_HEADERS)
     headers = _ASSET_CACHE_HEADERS if v and v == expected else _NO_STORE_HEADERS
     return FileResponse(str(bundle_path), media_type="application/javascript", headers=headers)
 
@@ -11824,6 +11872,11 @@ def update_collection_item(
             current_status = str(data.get("deliveryStatus") or "").strip()
             if desired and desired == current_status:
                 raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
+            # A finished job is final for its driver (owner decision 2026-11-16). A PATCH that sent no
+            # status skipped every terminal-state check, so the trail (deliveryHistory), the driver's
+            # notes and ownerCoveredExtraFee of a Delivered or Canceled job could be rewritten later.
+            if not desired and current_status in {"Delivered", "Canceled"}:
+                raise HTTPException(status_code=409, detail=f"This delivery job is '{current_status}' and can no longer be changed")
             if "acceptedDate" in submitted_keys and desired != "In Progress":
                 raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
             if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
@@ -11949,6 +12002,11 @@ def update_collection_item(
             current_status = str(data.get("deliveryStatus") or "").strip()
             if desired and desired == current_status:
                 raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
+            # A finished job is final for its driver (owner decision 2026-11-16). A PATCH that sent no
+            # status skipped every terminal-state check, so the trail (deliveryHistory), the driver's
+            # notes and ownerCoveredExtraFee of a Delivered or Canceled job could be rewritten later.
+            if not desired and current_status in {"Delivered", "Canceled"}:
+                raise HTTPException(status_code=409, detail=f"This delivery job is '{current_status}' and can no longer be changed")
             if "acceptedDate" in submitted_keys and desired != "In Progress":
                 raise HTTPException(status_code=403, detail="acceptedDate is server-controlled")
             if submitted_keys & {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"} and desired != "Canceled":
@@ -12049,10 +12107,10 @@ def update_collection_item(
                 if not receipt_image:
                     raise HTTPException(status_code=400, detail="receiptImage is required")
 
-                # Judge what was SENT: float() reads "nan", "inf" and true, so the job was completed as
-                # "collected 0" (or 1), and Delivered is final for the driver. A proof "photo" that is a
-                # number passed too. (A negative NUMBER is still stored as 0, as test_delivery_completion_
-                # validates_fee_payer_and_fee_amount documents; a negative text is refused below.)
+                # Judge what was SENT. sanitize_json has already turned a negative number into 0, and
+                # float() reads "nan", "inf" and true: the job was completed as "collected 0" (or 1),
+                # and Delivered is final for the driver. A proof "photo" that is a number passed too.
+                # Owner decision 2026-11-16: a negative amount is refused, not stored as 0.
                 _sent_body = body.data if isinstance(body.data, dict) else {}
                 if _sent_body.get("receiptImage") is not None and not isinstance(_sent_body.get("receiptImage"), str):
                     raise HTTPException(status_code=400, detail="receiptImage must be a photo")
@@ -12064,8 +12122,8 @@ def update_collection_item(
                         _number = None if isinstance(_sent, bool) else float(_sent if isinstance(_sent, (int, float)) else str(_sent).strip())
                     except (TypeError, ValueError, OverflowError):
                         _number = None
-                    if _number is None or not math.isfinite(_number):
-                        raise HTTPException(status_code=400, detail=f"{_money_key} must be a number")
+                    if _number is None or not math.isfinite(_number) or _number < 0:
+                        raise HTTPException(status_code=400, detail=f"{_money_key} must be a number that is 0 or more")
 
                 amt_collected = _as_float(updates.get("amountCollectedFromCustomer"))
                 if amt_collected is None:

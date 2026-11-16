@@ -483,7 +483,7 @@ async function init() {
     }
   };
   try {
-    // Safari before 14 has only the old addListener: a throw here used to stop start-up before its only render().
+    // Safari before 14 has only addListener (a throw here stopped start-up).
     const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
     if (typeof systemTheme.addEventListener === 'function') systemTheme.addEventListener('change', onSystemThemeChange);
     else if (typeof systemTheme.addListener === 'function') systemTheme.addListener(onSystemThemeChange);
@@ -605,9 +605,8 @@ function maybeShowLocalDataDurabilityReminder() {
 // as soon as the page is parsed; icons render through IconQueue, which
 // retries until the library exists. (The test harness sets readyState to
 // 'loading' on purpose to keep init() from auto-running.)
-// init() had no catch: a throw late in start-up left the loading screen up for good, with no
-// login form and no message. Nothing is drawn from half-loaded data here: when the screen is
-// still empty the visitor gets a reload card (the same one render() shows), nothing else.
+// A throw late in init() left the loading screen up for good: show a reload card instead
+// (never a screen drawn from half-loaded data).
 function startAlbayan() {
   return init().catch(error => {
     console.error('[albayan] start-up failed:', error);

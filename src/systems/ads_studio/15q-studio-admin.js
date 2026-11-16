@@ -973,12 +973,15 @@ function studioAdminSave(key) {
   slot.conflict = '';
   studioAdminRedraw();
   const generation = _studioAdmin.generation;
+  const sentRaw = JSON.stringify(slot.raw);
   return studioApi(`/api/studio/admin/settings/${encodeURIComponent(name)}`, { method: 'PUT', body: { expectedVersion: slot.version, value: built.value } }).then(saved => {
     if (generation !== _studioAdmin.generation) return false;
     const record = saved && typeof saved === 'object' ? saved : {};
     slot.record = record;
     slot.version = Number.isSafeInteger(record.version) ? record.version : slot.version + 1;
-    slot.raw = studioAdminRawFrom(name, record.value && typeof record.value === 'object' ? record.value : built.value);
+    // What the admin typed while this save was on its way stays in the form (it was replaced by the
+    // saved copy without a word); the new version is kept, so the next Save sends it.
+    if (JSON.stringify(slot.raw) === sentRaw) slot.raw = studioAdminRawFrom(name, record.value && typeof record.value === 'object' ? record.value : built.value);
     slot.savedAt = Date.now();
     if (name === 'rollout' || name === 'contact' || name === 'hours' || name === 'limits' || name === 'intake') { try { studioLoadMe(0); } catch (_) {} }
     return true;

@@ -5963,9 +5963,9 @@ class TestReceiptAndAdTransactions:
             cookies=actors["driver_cookies"],
         )
         assert bad_fee.status_code == 400, bad_fee.text
-        # The refusals must not consume the receipt: it still completes, and a
-        # numeric negative fee is stored as 0, never below.
-        done = client.patch(
+        # Owner decision 2026-11-16: a numeric negative fee is refused like the text one
+        # (before, it was stored as 0 and the job was completed).
+        negative_number = client.patch(
             "/api/collections/receipts/fin_feebad_receipt",
             json={"data": {
                 "deliveryStatus": "Delivered",
@@ -5973,6 +5973,21 @@ class TestReceiptAndAdTransactions:
                 "receiptImage": "data:image/png;base64,AAAA",
                 "amountCollectedFromCustomer": 950,
                 "actualDeliveryFeeCollected": -5,
+                "deliveryFeePaidBy": "shop",
+            }},
+            cookies=actors["driver_cookies"],
+        )
+        assert negative_number.status_code == 400, negative_number.text
+        assert "actualDeliveryFeeCollected" in str(negative_number.json().get("detail") or "")
+        # The refusals must not consume the receipt: it still completes with a real fee.
+        done = client.patch(
+            "/api/collections/receipts/fin_feebad_receipt",
+            json={"data": {
+                "deliveryStatus": "Delivered",
+                "finalReceiptNo": "661003",
+                "receiptImage": "data:image/png;base64,AAAA",
+                "amountCollectedFromCustomer": 950,
+                "actualDeliveryFeeCollected": 0,
                 "deliveryFeePaidBy": "shop",
             }},
             cookies=actors["driver_cookies"],

@@ -327,6 +327,32 @@ def test_rule_create_normalizes_keywords_and_lists_in_creation_order(actors):
     assert [r["id"] for r in listed] == [rule["id"], second["id"]]
 
 
+def test_a_rule_saved_again_after_a_lost_answer_is_the_same_rule_not_a_copy(actors):
+    """2026-11-16: POST /rules had no operationId. On a weak connection the first Save stored the rule,
+    the answer was lost, and the second Save created an identical second rule."""
+    cookies = actors["a"]["cookies"]
+    body = {"name": "Lost answer", "platform": "fb", "trigger": "every", "publicReply": "Thanks!", "operationId": "rule_1794800000000_abcdef012345"}
+    before = len(client.get(f"{API}/rules", cookies=cookies).json()["rules"])
+    first = client.post(f"{API}/rules", json=body, cookies=cookies)
+    assert first.status_code == 200, first.text
+    # The retry carries what the owner changed meanwhile: it is saved onto the same rule.
+    again = client.post(f"{API}/rules", json={**body, "publicReply": "Thank you!"}, cookies=cookies)
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == first.json()["id"] and again.json()["publicReply"] == "Thank you!"
+    assert len(client.get(f"{API}/rules", cookies=cookies).json()["rules"]) == before + 1
+    # The name belongs to its owner: another customer's same operationId is another rule.
+    other = client.post(f"{API}/rules", json=body, cookies=actors["b"]["cookies"])
+    assert other.status_code == 200 and other.json()["id"] != first.json()["id"]
+    # No operationId (an older app) still creates; a malformed one is refused; a deleted rule's name is not reused.
+    assert client.post(f"{API}/rules", json={**body, "operationId": "x"}, cookies=cookies).status_code == 400
+    assert client.delete(f"{API}/rules/{first.json()['id']}", cookies=cookies).status_code == 200
+    fresh = client.post(f"{API}/rules", json=body, cookies=cookies)
+    assert fresh.status_code == 200 and fresh.json()["id"] != first.json()["id"]
+    for made in (other.json()["id"], fresh.json()["id"]):
+        owner = actors["b"]["cookies"] if made == other.json()["id"] else cookies
+        client.delete(f"{API}/rules/{made}", cookies=owner)
+
+
 def test_rule_active_since_moves_only_when_the_rule_starts_answering_other_comments(actors, monkeypatch):
     """activeSince (P1-23 follow-up): a comment Albayan reads later is answered only by rules that already
     applied to it when it was written, so switching a rule on or pointing it elsewhere moves it to now."""

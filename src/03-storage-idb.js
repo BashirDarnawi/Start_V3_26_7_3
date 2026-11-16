@@ -600,11 +600,8 @@ async function loadCollectionFromIndexedDB(collectionName) {
       throw error;
     }
     console.error('Error loading collection from IndexedDB:', error);
-    // Local mode keeps its ONLY copy here. "Could not be read" (iOS dropped the connection while
-    // the app was in the background, a value too large to read) is not "nothing is stored":
-    // answering null made the loader start an empty list, and the next save wrote that empty list
-    // over the intact rows. Report it as an unreadable copy: it stays protected from overwrite
-    // and the next start reads it again. A server cache is simply refilled from the server.
+    // Local mode's ONLY copy: "could not be read" (iOS dropped the connection) is not "nothing
+    // stored". null made an empty list that the next save wrote over the intact rows.
     if (capturedScope === 'local' && capturedScope === _collectionStorageScope) {
       markCollectionCorrupted(name);
       const unreadable = new Error(`IndexedDB collection "${name}" could not be read`);

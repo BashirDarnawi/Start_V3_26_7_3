@@ -919,6 +919,18 @@ def _clean_time(value: Any) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _real_end_time(value: Any) -> str:
+    """An ad set end time or campaign stop time, or "" when it is no real end.
+
+    Meta writes "no end date" as the zero time (1970-01-01) on some answers instead of leaving the
+    field out. Read as a date it has "passed", so a campaign that was still running was taken as
+    ended: its first read became the final one, the unspent part could be returned to the customer,
+    and later spend was never read again. No Meta ad ended before 2010.
+    """
+    stamp = _clean_time(value)
+    return "" if stamp and stamp < "2010-01-01" else stamp
+
+
 def is_studio_campaign_name(value: Any) -> bool:
     """D26: a Meta campaign whose name carries the studio code belongs to Albayan Studio.
 
@@ -8099,9 +8111,9 @@ def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any =
         status = _clean_text(ad.get("effective_status"), 40).upper()
         if status:
             counts[status] = counts.get(status, 0) + 1
-    end_times = [_clean_time(item.get("end_time")) for item in adsets or []]
+    end_times = [_real_end_time(item.get("end_time")) for item in adsets or []]
     adset_end = None if adsets is None else (max(end_times) if end_times and all(end_times) else "")
-    stop_time = _clean_time(row.get("stop_time"))
+    stop_time = _real_end_time(row.get("stop_time"))
     now = datetime.now(timezone.utc)
     # Meta has no COMPLETED status: ads stay ACTIVE after their ad sets' end time or the campaign's
     # stop time, so an end time that has passed means nothing delivers any more.

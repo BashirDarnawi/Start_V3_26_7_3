@@ -686,6 +686,10 @@ def test_campaign_results_park_the_ad_account_not_the_campaign(graph, claimed, l
     ("", "2020-01-01T00:00:00+0000", ("ACTIVE",), False),                   # the campaign's stop time passed
     ("2099-01-01T00:00:00+0000", "2020-01-01T00:00:00+0000", ("ACTIVE",), False),
     ("2099-01-01T00:00:00+0000", "", ("PAUSED",), False),                   # nothing ACTIVE
+    # 2026-11-16: Meta's zero time means "no end date", never "ended in 1970".
+    ("1970-01-01T00:00:00+0000", "", ("ACTIVE",), True),
+    ("", "1970-01-01T02:00:00+0200", ("ACTIVE",), True),
+    ("1970-01-01T00:00:00+0000", "2020-01-01T00:00:00+0000", ("ACTIVE",), False),  # a real stop time still ends it
 ])
 def test_campaign_results_deliver_only_before_meta_end_times(graph, claimed, adset_end, stop_time, ads, delivering):
     """Meta has no COMPLETED status: an ACTIVE ad whose ad set end time or campaign stop time has
@@ -694,6 +698,7 @@ def test_campaign_results_deliver_only_before_meta_end_times(graph, claimed, ads
     got = meta_ads.get_campaign_results(ACCOUNT, CAMPAIGN)
     assert got["anyAdDelivering"] is delivering
     assert got["adStatusCounts"].get("ACTIVE", 0) == ads.count("ACTIVE")  # the counts stay Meta's
+    assert not got["adsetEndTime"].startswith("1970") and not got["stopTime"].startswith("1970")  # never handed on as an end
 
 
 # ---------------------------------------------------------------------------

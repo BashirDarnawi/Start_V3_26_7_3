@@ -1268,7 +1268,7 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
         showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'تغيّر الحساب أثناء تسجيل الدخول. حاول مرة أخرى.' : 'Account changed during sign-in. Please try again.', 'error');
         return;
       }
-      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
+      showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', errText(e, 'Login failed', 'تعذّر تسجيل الدخول. تحقق من الاتصال ثم حاول مرة أخرى.'), 'error');
       return;
     }
   }
