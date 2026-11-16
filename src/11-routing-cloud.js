@@ -864,7 +864,7 @@ function startCloudSync() {
 }
 
 async function pullFromCloud() {
-  if (!state.cloudConfig.enabled) return;
+  if (!state.cloudConfig.enabled || state.serverMode) return;
   
   try {
     state.cloudSyncStatus = 'syncing';
@@ -901,7 +901,7 @@ async function pullFromCloud() {
 }
 
 async function pushToCloud() {
-  if (!state.cloudConfig.enabled) return;
+  if (!state.cloudConfig.enabled || state.serverMode) return;
   
   try {
     state.cloudSyncStatus = 'syncing';
@@ -912,8 +912,7 @@ async function pushToCloud() {
       receipts: state.receipts,
       customers: state.customers,
       pages: state.pages,
-      users: state.users,
-      logs: state.logs,
+      logs: state.logs,  // accounts (password hashes) are never uploaded
       defaultExchangeRate: state.defaultExchangeRate,
       exchangeRateHistory: state.exchangeRateHistory,
       updatedAt: Date.now()
@@ -947,6 +946,14 @@ async function pushToCloud() {
 }
 
 function mergeCloudData(remoteData) {
+  // The remote side is untrusted: clean every string and refuse the whole payload when an
+  // identifier could break out of a link or a button (the same two checks as a backup import).
+  remoteData = Security.sanitizeObject(remoteData) || {};
+  for (const name of ['ads', 'receipts', 'customers', 'pages', 'logs', 'exchangeRateHistory']) {
+    if (!Array.isArray(remoteData[name])) continue;
+    const idCheck = Security.validateRecordIdentifiers(remoteData[name], name);
+    if (!idCheck.valid) throw new Error('Cloud data refused: ' + idCheck.error);
+  }
   // Simple last-write-wins merge
   const mergeArray = (local, remote) => {
     if (!Array.isArray(remote)) return;
@@ -969,7 +976,7 @@ function mergeCloudData(remoteData) {
   mergeArray(state.receipts, remoteData.receipts);
   mergeArray(state.customers, remoteData.customers);
   mergeArray(state.pages, remoteData.pages);
-  mergeArray(state.users, remoteData.users);
+  // Accounts (roles, password hashes) are never taken from the remote side.
   mergeArray(state.logs, remoteData.logs);
   
   if (remoteData.defaultExchangeRate !== undefined) {

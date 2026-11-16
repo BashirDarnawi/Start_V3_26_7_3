@@ -1860,8 +1860,14 @@ const Security = {
         str = str.replace(/\bon\w+\s*=/gi, '');
         str = str.replace(/javascript:/gi, '');
         str = str.replace(/vbscript:/gi, '');
+        // Inside the loop: removed afterwards, "ondata:focus=" became a live "onfocus=",
+        // "javadata:script:" became "javascript:" and "on<>focus=" became "onfocus=".
+        str = str.replace(/[<>]/g, '');
+        if (!options.allowDataUrl || !/^\s*data:/i.test(str)) str = str.replace(/data:/gi, '');
         if (str === before) break;
       }
+      // Still dangerous after 8 passes (a deliberately nested value): keep nothing.
+      if (!(options.allowDataUrl && /^\s*data:/i.test(str)) && /\bon\w+\s*=|javascript:|vbscript:/i.test(str)) str = '';
       if (!options.allowDataUrl) {
         str = str.replace(/data:/gi, '');
       } else {
@@ -15121,7 +15127,7 @@ function startCloudSync() {
 }
 
 async function pullFromCloud() {
-  if (!state.cloudConfig.enabled) return;
+  if (!state.cloudConfig.enabled || state.serverMode) return;
   
   try {
     state.cloudSyncStatus = 'syncing';
@@ -15158,7 +15164,7 @@ async function pullFromCloud() {
 }
 
 async function pushToCloud() {
-  if (!state.cloudConfig.enabled) return;
+  if (!state.cloudConfig.enabled || state.serverMode) return;
   
   try {
     state.cloudSyncStatus = 'syncing';
@@ -15169,8 +15175,7 @@ async function pushToCloud() {
       receipts: state.receipts,
       customers: state.customers,
       pages: state.pages,
-      users: state.users,
-      logs: state.logs,
+      logs: state.logs,  // accounts (password hashes) are never uploaded
       defaultExchangeRate: state.defaultExchangeRate,
       exchangeRateHistory: state.exchangeRateHistory,
       updatedAt: Date.now()
@@ -15204,6 +15209,14 @@ async function pushToCloud() {
 }
 
 function mergeCloudData(remoteData) {
+  // The remote side is untrusted: clean every string and refuse the whole payload when an
+  // identifier could break out of a link or a button (the same two checks as a backup import).
+  remoteData = Security.sanitizeObject(remoteData) || {};
+  for (const name of ['ads', 'receipts', 'customers', 'pages', 'logs', 'exchangeRateHistory']) {
+    if (!Array.isArray(remoteData[name])) continue;
+    const idCheck = Security.validateRecordIdentifiers(remoteData[name], name);
+    if (!idCheck.valid) throw new Error('Cloud data refused: ' + idCheck.error);
+  }
   // Simple last-write-wins merge
   const mergeArray = (local, remote) => {
     if (!Array.isArray(remote)) return;
@@ -15226,7 +15239,7 @@ function mergeCloudData(remoteData) {
   mergeArray(state.receipts, remoteData.receipts);
   mergeArray(state.customers, remoteData.customers);
   mergeArray(state.pages, remoteData.pages);
-  mergeArray(state.users, remoteData.users);
+  // Accounts (roles, password hashes) are never taken from the remote side.
   mergeArray(state.logs, remoteData.logs);
   
   if (remoteData.defaultExchangeRate !== undefined) {
@@ -18608,7 +18621,7 @@ function renderReceiptsView() {
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
                   <div class="flex flex-wrap items-center gap-1.5">
-                    <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
+                    <span class="status-badge status-${Security.escapeHtml(String(receipt.status || '').toLowerCase())}">${trStatus(receipt.status || 'Unknown')}</span>
                     ${receiptDebtType === 'delivery' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"><i data-lucide="truck" class="w-3 h-3"></i>${isArV ? 'دين توصيل' : 'Delivery Debt'}</span>` : ''}
                     ${receiptDebtType === 'shop' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"><i data-lucide="store" class="w-3 h-3"></i>${isArV ? 'دين داخل المحل' : 'In-shop Debt'}</span>` : ''}
                   </div>
@@ -19269,7 +19282,7 @@ function renderAdsView() {
                       <!-- Read-only (user request, same as Status): delivery
                            changes happen via the Deliveries page / delivery
                            dashboard flows, not inline in this table. -->
-                      <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
+                      <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${Security.escapeHtml(String(effectiveDeliveryStatus || '').toLowerCase().replace(' ', ''))} bg-slate-100 dark:bg-slate-700">
                         ${trStatus(effectiveDeliveryStatus)}
                         ${isLinkedToDeliveryReceipt ? `<div class="text-[10px] text-slate-400 mt-0.5">${isAr ? 'عبر وصل' : 'via Receipt'}</div>` : ''}
                       </div>
@@ -20357,7 +20370,7 @@ function renderDeliveryDashboard() {
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
                         <span class="text-xs font-bold text-emerald-600">$${Number(amounts.usd || 0).toFixed(2)} (${Number(amounts.local || 0).toFixed(2)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
-                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
+                        <span class="delivery-${Security.escapeHtml(String(ad.deliveryStatus || '').toLowerCase().replace(' ', ''))} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${(() => {
                           const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
                           return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${n}</button>` : '';
@@ -34226,7 +34239,7 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
         <div>
           <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArDup ? 'رقم الوصل موجود بالفعل' : 'Receipt Number Already Exists'}</h3>
           <p class="text-sm text-slate-600 dark:text-slate-400">
-            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${receiptNumber}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
+            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${Security.escapeHtml(String(receiptNumber))}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
           </p>
         </div>
       </div>
@@ -38279,7 +38292,7 @@ function renderModal() {
                     <span class="text-xs font-medium mt-1">${isArAd ? 'سائق' : 'Driver'}</span>
                   </button>
                 </div>
-                <input type="hidden" id="ad-collection-method" value="${adData.collectionMethod || ''}" />
+                <input type="hidden" id="ad-collection-method" value="${Security.escapeHtml(String(adData.collectionMethod || ''))}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
                     <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
@@ -39465,7 +39478,7 @@ function renderModal() {
 
           <div id="refund-amount-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
             <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع (USD)' : 'Refund Amount (USD)'}</label>
-            <input type="text" inputmode="decimal" id="refund-amount" value="${refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
+            <input type="text" inputmode="decimal" id="refund-amount" value="${Security.escapeHtml(String(refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)))}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
           </div>
 
           <div id="refund-status-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
@@ -45512,7 +45525,10 @@ async function init() {
   // Check for cloud sync URL parameter (with security validation)
   const params = new URLSearchParams(window.location.search);
   const connectString = params.get('sys_connect');
-  if (connectString) {
+  if (connectString && state.serverMode) {
+    // The server is the only source of truth here: a link must never point this device's data elsewhere.
+    addSecurityLog('cloud_connect_rejected', 'sys_connect ignored in server mode');
+  } else if (connectString) {
     try {
       // Validate connect string length to prevent DoS
       if (connectString.length > 2000) {
@@ -45565,7 +45581,7 @@ async function init() {
     }
   });
   
-  if (state.cloudConfig.enabled) {
+  if (state.cloudConfig.enabled && !state.serverMode) {
     startCloudSync();
   }
 

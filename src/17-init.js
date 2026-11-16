@@ -427,7 +427,10 @@ async function init() {
   // Check for cloud sync URL parameter (with security validation)
   const params = new URLSearchParams(window.location.search);
   const connectString = params.get('sys_connect');
-  if (connectString) {
+  if (connectString && state.serverMode) {
+    // The server is the only source of truth here: a link must never point this device's data elsewhere.
+    addSecurityLog('cloud_connect_rejected', 'sys_connect ignored in server mode');
+  } else if (connectString) {
     try {
       // Validate connect string length to prevent DoS
       if (connectString.length > 2000) {
@@ -480,7 +483,7 @@ async function init() {
     }
   });
   
-  if (state.cloudConfig.enabled) {
+  if (state.cloudConfig.enabled && !state.serverMode) {
     startCloudSync();
   }
 

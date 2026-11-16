@@ -402,6 +402,13 @@ def seeded(people):
 
 def test_diagnostics_route_carries_the_operations_block_without_personal_data(people, seeded, monkeypatch):
     monkeypatch.setattr(diag, "count_submissions_today", lambda day: 0)
+
+    class _FrozenClock(datetime):  # the rows are seeded around NOW; the real clock left their 7-day window on 2026-10-07
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz else NOW.replace(tzinfo=None)
+
+    monkeypatch.setattr(diag, "datetime", _FrozenClock)
     diag.reset_storage_cache()
     reset_rate_limit(f"studio:diagnostics:{people['admin']['id']}")
     for who in ("staff", "owner"):

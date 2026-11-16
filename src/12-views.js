@@ -3285,7 +3285,7 @@ function renderReceiptsView() {
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
                   <div class="flex flex-wrap items-center gap-1.5">
-                    <span class="status-badge status-${(receipt.status || '').toLowerCase()}">${trStatus(receipt.status || 'Unknown')}</span>
+                    <span class="status-badge status-${Security.escapeHtml(String(receipt.status || '').toLowerCase())}">${trStatus(receipt.status || 'Unknown')}</span>
                     ${receiptDebtType === 'delivery' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"><i data-lucide="truck" class="w-3 h-3"></i>${isArV ? 'دين توصيل' : 'Delivery Debt'}</span>` : ''}
                     ${receiptDebtType === 'shop' ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"><i data-lucide="store" class="w-3 h-3"></i>${isArV ? 'دين داخل المحل' : 'In-shop Debt'}</span>` : ''}
                   </div>
@@ -3946,7 +3946,7 @@ function renderAdsView() {
                       <!-- Read-only (user request, same as Status): delivery
                            changes happen via the Deliveries page / delivery
                            dashboard flows, not inline in this table. -->
-                      <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${effectiveDeliveryStatus.toLowerCase().replace(' ', '')} bg-slate-100 dark:bg-slate-700">
+                      <div class="inline-block px-2 py-1 rounded-lg text-xs delivery-${Security.escapeHtml(String(effectiveDeliveryStatus || '').toLowerCase().replace(' ', ''))} bg-slate-100 dark:bg-slate-700">
                         ${trStatus(effectiveDeliveryStatus)}
                         ${isLinkedToDeliveryReceipt ? `<div class="text-[10px] text-slate-400 mt-0.5">${isAr ? 'عبر وصل' : 'via Receipt'}</div>` : ''}
                       </div>
@@ -5034,7 +5034,7 @@ function renderDeliveryDashboard() {
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
                         <span class="text-xs font-bold text-emerald-600">$${Number(amounts.usd || 0).toFixed(2)} (${Number(amounts.local || 0).toFixed(2)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
-                        <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
+                        <span class="delivery-${Security.escapeHtml(String(ad.deliveryStatus || '').toLowerCase().replace(' ', ''))} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${(() => {
                           const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
                           return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${n}</button>` : '';

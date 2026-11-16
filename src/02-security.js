@@ -173,8 +173,14 @@ const Security = {
         str = str.replace(/\bon\w+\s*=/gi, '');
         str = str.replace(/javascript:/gi, '');
         str = str.replace(/vbscript:/gi, '');
+        // Inside the loop: removed afterwards, "ondata:focus=" became a live "onfocus=",
+        // "javadata:script:" became "javascript:" and "on<>focus=" became "onfocus=".
+        str = str.replace(/[<>]/g, '');
+        if (!options.allowDataUrl || !/^\s*data:/i.test(str)) str = str.replace(/data:/gi, '');
         if (str === before) break;
       }
+      // Still dangerous after 8 passes (a deliberately nested value): keep nothing.
+      if (!(options.allowDataUrl && /^\s*data:/i.test(str)) && /\bon\w+\s*=|javascript:|vbscript:/i.test(str)) str = '';
       if (!options.allowDataUrl) {
         str = str.replace(/data:/gi, '');
       } else {

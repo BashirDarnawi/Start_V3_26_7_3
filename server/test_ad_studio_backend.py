@@ -308,6 +308,29 @@ class TestAdsStudioViewOnlyStaffPrivacy:
             "submitted campaigns must stay visible to staff"
         )
 
+    def test_edit_grant_cannot_read_or_overwrite_a_private_draft(self, actors):
+        email = "ad-studio-editgrant@tests.albayanhub.com"
+        password = "AdStudioEditGrant123!"
+        _create_user(actors["admin"], email, password, {"adCampaignRequests": ["view", "edit"]})
+        editor = _login(email, password)
+        _subscribe(editor, "editgrant")  # without it the PATCH is refused earlier (403)
+        draft = _create_campaign(
+            actors["owner"], _complete_campaign("Private Draft vs editor"), "ad_studio_editgrant_draft"
+        )
+        assert draft.status_code == 200, draft.text
+        path = "/api/collections/adCampaignRequests/ad_studio_editgrant_draft"
+        patched = client.patch(
+            path,
+            json={"data": {"name": "Overwritten by staff"}, "expectedLastModified": draft.json()["lastModified"]},
+            cookies=editor,
+        )
+        assert patched.status_code == 404, patched.text
+        assert "Private Draft vs editor" not in patched.text
+        mine = client.get(path, cookies=actors["owner"])
+        assert mine.status_code == 200, mine.text
+        assert mine.json()["lastModified"] == draft.json()["lastModified"]  # untouched
+        assert "Overwritten by staff" not in mine.text
+
     def test_owner_still_sees_their_own_draft(self, actors):
         own = _create_campaign(
             actors["owner"], _complete_campaign("Owner reads own draft"), "ad_studio_owner_reads"

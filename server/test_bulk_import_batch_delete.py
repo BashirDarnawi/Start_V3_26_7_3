@@ -135,6 +135,22 @@ class TestAdminBulkImport:
         if request.node.name != "test_online_import_is_disabled_by_default":
             monkeypatch.setattr(main_module, "ENABLE_ONLINE_IMPORT", True)
 
+    @pytest.mark.parametrize(
+        "collection",
+        ["adCampaignRequests", "socialPages", "studioSettings", "supportTickets", "metaProviderState", "metaImportState", "auditLogs"],
+    )
+    def test_router_only_collections_are_refused_and_untouched(self, admin_cookies, collection):
+        # These records are written only by their own validated routes. A raw import
+        # could forge them, and an empty list would prune every live one.
+        _seed_entity(collection, "guard_keep", {"status": "Approved"})
+        for records in ([], [{"id": "guard_forged", "status": "Approved"}]):
+            r = client.post("/api/admin/import", json={"collections": {collection: records}}, cookies=admin_cookies)
+            assert r.status_code == 405, r.text
+        assert not bool(_get_row(collection, "guard_keep")["deleted"])
+        assert _get_row(collection, "guard_forged") is None
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type = :t AND id = 'guard_keep'"), {"t": collection})
+
     def test_import_replaces_prunes_and_stamps_now(self, admin_cookies):
         t0 = now_ms()
         # This test exercises whole-collection replacement and may run after

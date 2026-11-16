@@ -2502,7 +2502,7 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
         <div>
           <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArDup ? 'رقم الوصل موجود بالفعل' : 'Receipt Number Already Exists'}</h3>
           <p class="text-sm text-slate-600 dark:text-slate-400">
-            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${receiptNumber}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
+            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${Security.escapeHtml(String(receiptNumber))}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
           </p>
         </div>
       </div>

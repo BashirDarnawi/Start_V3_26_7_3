@@ -3502,7 +3502,8 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
 
     # Always return ok to avoid account enumeration.
     if not user:
-        audit(None, "password_reset_request", "auth", email, "Password reset requested (unknown email)", {"email": email})
+        # No audit row: anyone can send these without signing in, and enough of them would
+        # push the real history (logins, permission changes) out of the capped audit log.
         return {"ok": True}
 
     token = secrets.token_urlsafe(32)
@@ -12263,6 +12264,14 @@ def update_collection_item(
                 raise HTTPException(status_code=400, detail="deliveryPersonId must be an active delivery user")
 
     if collection == AD_CAMPAIGN_COLLECTION:
+        # The same rule as the GET above: a customer's private editable draft does not exist
+        # for staff. An "edit" grant used to overwrite it and get the full record back.
+        if (
+            str(user.get("role") or "").lower() != "admin"
+            and str(creator or "") != str(user.get("id") or "")
+            and str((existing.get("data") or {}).get("status") or "Draft") not in {"Submitted", "Approved", "Rejected", "Stopped"}
+        ):
+            raise HTTPException(status_code=404, detail="Not found")
         # Ads Studio uses a status machine (Draft -> Submitted -> Reviewed).
         # Requiring the version makes the later atomic patch_entity check close
         # the race where a draft could be submitted/reviewed after this status
@@ -12700,6 +12709,10 @@ def admin_bulk_import(
             raise HTTPException(status_code=400, detail="Invalid collection name")
         if name == "users":
             raise HTTPException(status_code=400, detail="Users are not imported through this endpoint")
+        # Records that only their own validated routes may write (Studio, Social, campaign
+        # requests, Meta sync state): a raw import could forge an approved request or prune them all.
+        if name in _NON_STORE_COLLECTIONS or name == AD_CAMPAIGN_COLLECTION or re.fullmatch(r"meta[A-Za-z]*State", name):
+            raise HTTPException(status_code=405, detail=f"'{name}' cannot be imported through the online API")
         if name in PERSONAL_SCOPED_COLLECTIONS:
             raise HTTPException(
                 status_code=405,
@@ -13689,6 +13702,10 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
 
         if (body.name is not None or body.email is not None) and not _is_self:
             _need("edit")
+        if body.email is not None and not _is_self and signin_email_or_400(body.email) != str(existing.get("email") or "").lower():
+            # A new sign-in address locks its owner out (and would hand over the account the day
+            # reset e-mails exist): the same takeover guard as a password reset.
+            _refuse_unheld_target(admin, existing, "Cannot change the sign-in email of a user who holds permissions you do not", driver_template_exempt=True)
         if body.password is not None:
             if _is_self:
                 # Self password changes must verify the current password.

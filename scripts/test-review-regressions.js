@@ -1424,6 +1424,24 @@ async function main() {
   });
   // ---- Review loop r4, batch BP: ad request form parity and the studio account
 
+  await test('security scan 2026-11-16: removing data: or <> can no longer rebuild an event handler or a javascript: link', async () => {
+    const { run } = studioFixture();
+    const nested = 'java'.repeat(12) + 'javascript:' + 'script:'.repeat(12) + 'alert(1)';
+    for (const attack of ['x" autofocus ondata:focus=alert(1) y="', 'javadata:script:alert(1)', 'x" on<>focus=alert(1)', 'java<>script:alert(1)',
+      'ondata:data:click=1', 'on<data:>click=1', nested]) {
+      for (const options of ['{}', '{ allowDataUrl: true }']) {
+        const out = String(run(`Security.sanitizeInput(${JSON.stringify(attack)}, ${options})`));
+        assert.ok(!/(^|[^A-Za-z0-9_])on[a-z]+\s*=|javascript:|vbscript:|data:|[<>]/i.test(out), `${attack} ${options} -> ${out}`);
+      }
+    }
+    assert.equal(run(`Security.sanitizeObject({ status: 'x" ondata:focus=alert(1)' }).status`).includes('onfocus'), false);
+    // Ordinary text and a real photo are untouched.
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4';
+    assert.equal(run(`Security.sanitizeInput(${JSON.stringify(png)}, { allowDataUrl: true })`), png);
+    assert.equal(run(`Security.sanitizeInput('Paid on 5 = ok, online=yes')`), 'Paid on 5 = ok, yes');
+    assert.equal(run(`Security.sanitizeInput('حالة: مدفوع')`), 'حالة: مدفوع');
+  });
+
   await test('r4 BP n=27: the sanitizer keeps phone= and utm_content= in links, and still strips event handlers', async () => {
     const { run } = studioFixture();
     const wa = 'https://api.whatsapp.com/send?phone=218912345678&utm_content=spring&conversion=1';

@@ -720,7 +720,7 @@ function renderModal() {
                     <span class="text-xs font-medium mt-1">${isArAd ? 'سائق' : 'Driver'}</span>
                   </button>
                 </div>
-                <input type="hidden" id="ad-collection-method" value="${adData.collectionMethod || ''}" />
+                <input type="hidden" id="ad-collection-method" value="${Security.escapeHtml(String(adData.collectionMethod || ''))}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
                     <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
@@ -1906,7 +1906,7 @@ function renderModal() {
 
           <div id="refund-amount-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
             <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع (USD)' : 'Refund Amount (USD)'}</label>
-            <input type="text" inputmode="decimal" id="refund-amount" value="${refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
+            <input type="text" inputmode="decimal" id="refund-amount" value="${Security.escapeHtml(String(refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)))}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
           </div>
 
           <div id="refund-status-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">

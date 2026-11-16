@@ -205,8 +205,7 @@ def test_a_reset_request_for_a_long_unknown_email_is_the_neutral_ok(admin):
     response = client.post("/api/auth/password-reset/request", json={"email": email})
     assert response.status_code == 200, response.text
     assert response.json() == {"ok": True}
-    rows = _audit_rows(local)
-    assert rows and all(len(r["resource_id"]) <= 80 for r in rows), rows
+    assert not _audit_rows(local)  # since 2026-11-16 an unknown address leaves no audit row at all
     reset_rate_limit("reset:ip:testclient")
 
 
@@ -395,3 +394,29 @@ def test_a_no_op_user_patch_returns_no_other_account_without_a_users_grant(admin
     assert int(audited or 0) == 0
     deleted = client.patch(f"/api/users/{target['id']}", json={"deleted": True}, cookies=deleter["cookies"])
     assert deleted.status_code == 200, deleted.text  # the grant the deleter does hold still works
+
+
+# ---------------------------------------------------------------- security scan 2026-11-16
+
+def test_users_edit_cannot_change_the_sign_in_email_of_a_more_privileged_colleague(admin):
+    editor = _seed_user("mail-editor", permissions={"users": ["edit"]})
+    stronger = _seed_user("mail-stronger", permissions={"users": ["edit"], "receipts": ["view"]})
+    equal = _seed_user("mail-equal", permissions={"users": ["edit"]})
+    path = f"/api/users/{stronger['id']}"
+    refused = client.patch(path, json={"email": f"taken-{TAG}@tests.albayanhub.com"}, cookies=editor["cookies"])
+    assert refused.status_code == 403, refused.text
+    assert _user_row(stronger["id"])["email"] == stronger["email"]  # the owner can still sign in
+    # A name, the unchanged address, and a colleague with no extra power stay editable.
+    assert client.patch(path, json={"name": "Renamed", "email": stronger["email"]}, cookies=editor["cookies"]).status_code == 200
+    moved = client.patch(f"/api/users/{equal['id']}", json={"email": f"moved-{TAG}@tests.albayanhub.com"}, cookies=editor["cookies"])
+    assert moved.status_code == 200, moved.text
+    assert client.patch(path, json={"email": f"admin-set-{TAG}@tests.albayanhub.com"}, cookies=admin["cookies"]).status_code == 200
+
+
+def test_an_anonymous_reset_request_for_an_unknown_email_writes_no_audit_row():
+    email = f"nobody-{TAG}@tests.albayanhub.com"
+    response = client.post("/api/auth/password-reset/request", json={"email": email})
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    with db_conn() as conn:
+        rows = conn.execute(text("SELECT COUNT(*) FROM audit_logs WHERE resource_id = :email"), {"email": email}).scalar()
+    assert int(rows or 0) == 0

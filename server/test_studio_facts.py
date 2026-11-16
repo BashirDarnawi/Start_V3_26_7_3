@@ -196,7 +196,9 @@ def _page(actors, page_id: str, meta_page_id: str, platform: str = "fb", ig_user
 
 def _log(actors, log_id: str, *, platform="fb", actions=(), error="", from_id="", days_ago=0.0) -> None:
     owner = actors["customer"]["id"]
-    created = now_ms() - int(days_ago * 86_400_000)
+    # Measured from the frozen clock (DAY_1), not today's date: with the real clock the
+    # 40-day-old row slid back inside the 30-day window once the calendar passed 2026-10-05.
+    created = int(DAY_1.timestamp() * 1000) - int(days_ago * 86_400_000)
     _insert("socialReplyLog", log_id, {
         "ownerId": owner, "pageId": "spg_x", "metaPageId": FB_PAGE, "platform": platform, "ruleId": "srule_x",
         "commentId": f"c_{log_id}", "postId": "post_1", "fromId": from_id, "actions": list(actions),
