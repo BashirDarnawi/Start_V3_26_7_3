@@ -201,8 +201,8 @@ open index.html
 
 ### 2. Login
 ```
-Email: bashirdarnawi@gmail.com
-Password: 123456
+Email: admin@example.com
+Password: <your-password>
 ```
 
 ### 3. Test Customers
@@ -272,7 +272,7 @@ Password: 123456
 
 ### 7. Test Delivery Dashboard
 - Logout
-- Login as: alsharif@gmail.com / 123456
+- Login as: admin@example.com / <your-password>
 - ✅ Automatically goes to Delivery Dashboard
 - ✅ Shows stats cards
 - ✅ Shows assigned deliveries

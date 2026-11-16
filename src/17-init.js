@@ -79,12 +79,10 @@ async function init() {
       }
     } catch (_) {}
   }, 3000);
-  // Detect backend (multi-user internet mode). A packaged phone app targets a
-  // known server, so it asks /api/auth/me straight away: any definite answer
-  // proves the server is reachable AND settles the session in the same round
-  // trip (one request instead of health -> auth/me -> needs-setup). Only a
-  // network failure falls back to the health probe. Browsers keep the health
-  // probe: for them it decides whether a backend exists at all.
+  // Detect backend (multi-user internet mode). A packaged phone app targets a known server, so it
+  // asks /api/auth/me at once: a definite answer proves the server is reachable AND settles the
+  // session (one request, not health -> auth/me -> needs-setup); only a network failure falls back
+  // to the health probe. Browsers keep the probe: it decides whether a backend exists.
   const packagedMobileBoot = !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
   let bootProbe = null;
   if (packagedMobileBoot && typeof apiAuthMeProbe === 'function') {
@@ -428,7 +426,7 @@ async function init() {
   const params = new URLSearchParams(window.location.search);
   const connectString = params.get('sys_connect');
   if (connectString && state.serverMode) {
-    // The server is the only source of truth here: a link must never point this device's data elsewhere.
+    // Server mode: a link never points this device's data elsewhere.
     addSecurityLog('cloud_connect_rejected', 'sys_connect ignored in server mode');
   } else if (connectString) {
     try {
@@ -540,12 +538,10 @@ async function init() {
   }
 }
 
-// Local mode keeps ALL business data (and the in-app auto-backups) inside
-// this browser's evictable storage: iOS Safari deletes every kind of site
-// storage after 7 days of Safari use without a visit, and Chrome/Android can
-// evict under disk pressure. There is no server copy, so remind the user to
-// export backups from Settings — at most once every 5 days, and not when a
-// recent export exists (the export flow records albayanNoteBackupExported()).
+// Local mode keeps ALL data (and the auto-backups) in this browser's evictable storage: iOS
+// Safari deletes site storage after 7 days without a visit, Chrome/Android under disk pressure.
+// No server copy exists, so remind the user to export a backup: at most once every 5 days, and
+// not when a recent export exists (albayanNoteBackupExported()).
 function maybeShowLocalDataDurabilityReminder() {
   try {
     if (isPackagedMobileApp()) return;
@@ -566,12 +562,9 @@ function maybeShowLocalDataDurabilityReminder() {
   } catch (_) {}
 }
 
-// Track whether the on-screen keyboard is likely open (a text-entry element
-// has focus) via body.keyboard-open. style.css hides the fixed bottom nav
-// while it is set: iOS Safari anchors position:fixed to the layout viewport,
-// so with the keyboard up the nav otherwise floats mid-screen over the form
-// being typed into. focusout re-checks after a tick so focus moving between
-// fields (or render()'s synchronous focus restore) never flickers the class.
+// body.keyboard-open while a text field has focus: style.css hides the fixed bottom nav then
+// (iOS Safari anchors position:fixed to the layout viewport, so the nav floated over the form).
+// focusout re-checks after a tick, so moving between fields or render()'s focus restore never flickers.
 (function setupKeyboardOpenTracking() {
   function isTextEntry(el) {
     if (!el || el === document.body) return false;
@@ -600,13 +593,10 @@ function maybeShowLocalDataDurabilityReminder() {
   });
 })();
 
-// The icon library (lucide, ~400 KB) is loaded `async` in index.html, so
-// DOMContentLoaded no longer waits for it and the first server request starts
-// as soon as the page is parsed; icons render through IconQueue, which
-// retries until the library exists. (The test harness sets readyState to
-// 'loading' on purpose to keep init() from auto-running.)
-// A throw late in init() left the loading screen up for good: show a reload card instead
-// (never a screen drawn from half-loaded data).
+// The icon library (lucide, ~400 KB) loads `async` in index.html: DOMContentLoaded does not wait
+// for it; icons render through IconQueue, which retries until the library exists. (The test
+// harness sets readyState to 'loading' on purpose to keep init() from auto-running.)
+// A throw late in init() left the loading screen up for good: show a reload card.
 function startAlbayan() {
   return init().catch(error => {
     console.error('[albayan] start-up failed:', error);

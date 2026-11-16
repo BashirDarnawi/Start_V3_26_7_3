@@ -1332,7 +1332,8 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         }, 2, 300);
         if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
 
-        if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
+        if (!Array.isArray(items)) throw Object.assign(new Error('Not a list'), { code: 'INCOMPLETE_COLLECTION_LOAD' });
+        if (items.length === 0) { lastPageFull = false; break; }
 
         let lastEntity = null;
         for (const rawEntity of items) {
@@ -1674,11 +1675,9 @@ async function apiSettleReceipt(payload) {
   };
 }
 
-// The exact REVERSE of apiSettleReceipt: convert a funded PAID receipt back
-// into customer debt. The server migrates every linked ad's paid rows for
-// this receipt into its due pool in the same transaction, so the browser must
-// install the receipt AND the converted ads together — a receipt-only
-// envelope would briefly show paid ads backed by an unpaid receipt.
+// The REVERSE of apiSettleReceipt: a funded PAID receipt back into customer debt. The server
+// moves every linked ad's paid rows for it into the due pool in the same transaction, so the
+// browser installs the receipt AND the converted ads together (never paid ads on an unpaid receipt).
 async function apiUnsettleReceipt(payload) {
   const receiptId = String(payload?.receiptId || '').trim();
   if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt conversion id');
@@ -2698,11 +2697,10 @@ async function serverLoadAllData() {
 }
 
 // ---- SYSTEM-BROWSER APP LOGIN (Phase 2) ----
-// Optional sign-in for the packaged apps: the hosted login page opens in
-// Safari/Chrome and returns via the albayan://auth deep link with a ONE-TIME
-// code; the app exchanges code+verifier (PKCE-style) for the same HttpOnly
-// session. NATIVE = startAppBrowserLogin / deep-link handling; WEB = detects
-// ?app_login=1, mints the handoff code, renders "return to app".
+// Optional sign-in for the packaged apps: the hosted login page opens in Safari/Chrome and
+// returns via the albayan://auth deep link with a ONE-TIME code; the app exchanges code+verifier
+// (PKCE-style) for the same HttpOnly session. NATIVE = startAppBrowserLogin / deep-link
+// handling; WEB = detects ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
 // Native app: the pending {state, verifier} lives in Keychain/Keystore (Android restores the activity

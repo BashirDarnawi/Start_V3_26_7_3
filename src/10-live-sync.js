@@ -1451,8 +1451,7 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     }
   } catch (_) {}
 
-  // One stored row without an e-mail (an old backup, a half-imported file) used to throw here,
-  // so every account listed after it got "Could not sign in" with the right password.
+  // A stored row without an e-mail used to throw here for every account after it.
   const user = _users.find(u =>
     u && !u._deleted &&
     String(u.email || '').toLowerCase() === sanitizedEmail

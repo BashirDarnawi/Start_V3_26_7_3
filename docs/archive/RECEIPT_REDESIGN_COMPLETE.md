@@ -542,8 +542,8 @@ cd vanilla_v1
 open index.html
 
 # Login & test receipts!
-# Email: bashirdarnawi@gmail.com
-# Password: 123456
+# Email: admin@example.com
+# Password: <your-password>
 ```
 
 Everything works perfectly now!

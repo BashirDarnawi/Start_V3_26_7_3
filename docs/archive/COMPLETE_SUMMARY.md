@@ -184,8 +184,8 @@ open index.html
 
 ### Step 2: Login
 ```
-Email: bashirdarnawi@gmail.com
-Password: 123456
+Email: admin@example.com
+Password: <your-password>
 ```
 
 ### Step 3: Test Receipt Creation
@@ -217,7 +217,7 @@ Password: 123456
 
 ### Step 6: Test Delivery Dashboard
 1. Logout
-2. Login as: alsharif@gmail.com / 123456
+2. Login as: admin@example.com / <your-password>
 3. ✅ Automatically shows Delivery Dashboard
 4. Click "Accept" on a delivery
 5. Click "Collected" when paid
@@ -414,7 +414,7 @@ cd vanilla_v1
 open index.html
 ```
 
-**Login:** bashirdarnawi@gmail.com / 123456
+**Login:** admin@example.com / <your-password>
 
 **Everything works perfectly now!** 🎉
 

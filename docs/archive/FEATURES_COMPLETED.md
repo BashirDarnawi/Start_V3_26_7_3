@@ -94,8 +94,8 @@ open index.html
 
 ### 2. Login
 ```
-Email: bashirdarnawi@gmail.com
-Password: 123456
+Email: admin@example.com
+Password: <your-password>
 ```
 
 ### 3. Start Managing

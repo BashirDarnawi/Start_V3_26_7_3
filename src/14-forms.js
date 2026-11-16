@@ -1722,6 +1722,14 @@ async function _saveReceiptFromModalInner() {
     showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
+  // Picked A, then typed B's phone or name without tapping B: it saved under A.
+  const typedCustomer = document.getElementById('receipt-phone-search').value;
+  const typedKey = normalizeCustomerPhoneKey(typedCustomer), typedName = foldSearchText(typedCustomer).trim();
+  const typedRows = typedName ? getReceiptPhoneRows().filter(row => (typedKey && normalizeCustomerPhoneKey(row.phone) === typedKey) || foldSearchText(row.customer.name).trim() === typedName) : [];
+  if (typedRows.length && !typedRows.some(row => String(row.customer.id) === customerId)) {
+    showNotification(isArV ? 'عميل مختلف' : 'Different customer', isArV ? `هذا يخص «${typedRows[0].customer.name}». اختره من القائمة.` : `This belongs to "${typedRows[0].customer.name}". Pick them from the list.`, 'error');
+    return;
+  }
   // Without customers.viewContacts the other customer's phone never reached this device (the server keeps the old one).
   if (editTarget && customerId !== String(editTarget.customerId || '') && !can('customers', 'viewContacts')) {
     showNotification(isArV ? 'غير مسموح' : 'Not Allowed', isArV ? 'نقل هذا الوصل إلى عميل آخر يحتاج صلاحية عرض أرقام العملاء.' : 'Moving this receipt to another customer needs the View contacts permission.', 'warning');
@@ -4375,11 +4383,9 @@ function addAdLinkInput(value = '') {
   lucide.createIcons();
 }
 
-// "Paste link" beside "+ Add Link" — the link twin of the photos section's
-// Paste photo button. Reads the copied text (native Capacitor clipboard in
-// the packaged app, navigator.clipboard on the web), accepts only something
-// that is genuinely a web address, fills the first empty link row (adding a
-// row when none is empty), and never adds the same link twice.
+// "Paste link" beside "+ Add Link" (twin of Paste photo): reads the copied text (native
+// clipboard in the app, navigator.clipboard on the web), accepts only a real web address,
+// fills the first empty link row (adds one if none) and never adds the same link twice.
 async function pasteAdLinkFromClipboard() {
   const isArL = state.language === 'ar';
   let text = '';
@@ -5135,20 +5141,21 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   if (!input) return;
   let val = String(input.value || '');
 
-  // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
-  // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
-  // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
-  // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
-  // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
-  // decimal separator too — dropping it turned "12،5" into "125" (10x error).
+  // Normalize non-ASCII digits and separators BEFORE filtering: "12,5" became "125" (10x)
+  // and Arabic-Indic digits were deleted. The Arabic comma U+060C '،' (Arabic keyboards,
+  // amounts pasted from Arabic chats) is a decimal separator too.
   val = normalizeDigitsAscii(val).replace(/،/g, ',').replace(/٫/g, '.');  // U+066B is the decimal point: fold it first
   // Commas next to a dot or in groups of three ("1,250") are thousands
   // separators; only "12,5" is a decimal. "1,250" used to save as 1.25.
   if (val.includes(',')) {
     const grouped = /^\s*\d{1,3}(,\d{3})+(\.\d*)?\s*$/.test(val);
     if (val.includes('.') || grouped) val = val.split(',').join('');
-    else val = val.replace(',', '.');
-  }
+    else { val = val.replace(',', '.'); input._commaDot = 1; }
+  } else if (input._commaDot && maxDecimals < 3 && /^[1-9]\d*\.\d{3}$/.test(val)) {
+    // "1,000" typed key by key saved as 1.00 (pasted: 1000).
+    val = val.replace('.', '');
+    input._commaDot = 0;
+  } else if (!val.includes('.')) input._commaDot = 0;
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;

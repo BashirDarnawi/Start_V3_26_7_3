@@ -101,7 +101,7 @@ localStorage.setItem('albayan_complete_state', JSON.stringify(toSave));
 #### **Password Security**
 ```javascript
 // Before: Plain text
-password: "12345678" ❌
+password: "<your-password>" ❌
 
 // After: Hashed
 passwordHash: "3a2f5b9c8e7d6a1b4c5d8e9f0a1b2c3d..."

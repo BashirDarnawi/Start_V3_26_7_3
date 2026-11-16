@@ -247,11 +247,13 @@ from .schemas import (
 )
 from .security import (
     PBKDF2_ITERATIONS_DEFAULT, constant_time_equal, hash_password, hash_token, new_id,
-    new_session_cookie_value, normalize_signin_email, parse_session_cookie_value, signin_email_or_400, verify_password,
+    new_session_cookie_value, normalize_signin_email, parse_session_cookie_value, require_strong_password, signin_email_or_400,
+    verify_password, weak_password_reason,
 )
 from .auth_security import upgrade_password_hash_after_login
 from .user_audit import user_create_audit_metadata, user_update_audit
 from .http_security import apply_security_headers, set_security_headers
+from .store_guards import STALE_BUILD_SCRIPT as _STALE_BUILD_SCRIPT, refuse_oversized_record as _refuse_oversized_record, refuse_unseen_customer_reference
 from .profitability import validate_dollar_purchase
 from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, backup_key_state, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, scrub_actor_name_stamps_conn, stop_operations_worker
 register_redacted_type("exchangeRateHistory", ("userId",))  # P1-05: every account reads the Manager's rates; data.userId = who set one
@@ -396,7 +398,9 @@ def _is_valid_serial_number(serial: str) -> bool:
     - Auto-serial: prefix + digits, no leading zeros (S1, B2, O3, E4, ...)
     """
     serial = _canonical_receipt_number(serial)
-    return bool(re.fullmatch(r"(?:[1-9][0-9]*|[SBOE][1-9][0-9]*)", serial))
+    # At most 15 digits (12 after a letter). The key is cut at 80 characters, so one hand-made
+    # "S" + 79 nines made every later automatic S number collide with itself (409 for good).
+    return bool(re.fullmatch(r"(?:[1-9][0-9]{0,14}|[SBOE][1-9][0-9]{0,11})", serial))
 
 
 def _validate_receipt_number_fields(data: Any) -> None:
@@ -843,6 +847,16 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
             if len(obj) > MAX_DATA_URL_LENGTH:
                 raise HTTPException(status_code=413, detail="Photo is too large")
             return sanitize_str(obj, MAX_DATA_URL_LENGTH)
+        # A number sent as TEXT in a money field skipped the checks below: "-5" was stored as sent
+        # (the screens read a negative receipt) while the number -5 became 0. Numeric text in a
+        # record's OWN money fields now gets the same treatment as a number; other text is left as
+        # it was, and so are payment rows (their own validator reads them, and they are stored as typed).
+        if depth == 1 and (parent_key in FINANCIAL_AMOUNT_FIELDS or parent_key in EXCHANGE_RATE_FIELDS):
+            try:
+                float(obj.strip())
+            except (ValueError, OverflowError):
+                return sanitize_str(obj)
+            return validate_financial_amount(obj.strip(), parent_key) if parent_key in FINANCIAL_AMOUNT_FIELDS else validate_exchange_rate(obj.strip())
         return sanitize_str(obj)
     if isinstance(obj, (int, float)):
         # Validate financial amounts and exchange rates
@@ -1312,7 +1326,17 @@ def _project_entity_media_for_user(
     media_projected = _project_entity_media(
         entity, _can_include_entity_media(user, entity_type, requested)
     )
-    return _project_entity_contacts_for_user(media_projected, user)
+    projected = _project_entity_contacts_for_user(media_projected, user)
+    # The row's own columns are the truth in a single-record reply too, as in list reads. A body
+    # that carried "_deleted": true (any add or edit grant could send it) came back as sent: the
+    # device that opened the record then hid a live receipt from its lists and totals.
+    data = projected.get("data")
+    if isinstance(data, dict) and entity.get("lastModified") is not None and "deleted" in entity:
+        truth: dict[str, Any] = {"_deleted": bool(entity.get("deleted")), "_lastModified": int(entity["lastModified"])}
+        if entity.get("createdAt") is not None:
+            truth["_created"] = int(entity["createdAt"])
+        projected = {**projected, "data": {**data, **truth}}
+    return projected
 
 
 def list_entities(
@@ -1338,6 +1362,12 @@ def list_entities(
     entity_type = sanitize_str(entity_type)[:40]
     if not entity_type:
         return []
+    # A cursor past the database's bigint (?updated_since=999...9) was an unhandled OverflowError (500).
+    _bigint = 9_223_372_036_854_775_807
+    updated_since, before_created_at, after_last_modified = (
+        None if value is None else max(0, min(int(value), _bigint))
+        for value in (updated_since, before_created_at, after_last_modified)
+    )
     # Keep the per-request payload bounded to avoid memory spikes on small containers (ECS/Fargate).
     # Clients should paginate with offset.
     requested_limit = max(1, min(int(limit), 1000))
@@ -1953,6 +1983,7 @@ def upsert_entity(
             assert_financial_period_open(entity_type, clean, conn=conn)
             # Protected fields
             clean["id"] = entity_id
+            clean["_deleted"] = deleted  # the column's state, never a flag the body carried
             clean["_created"] = clean.get("_created") or created_at
             clean["createdBy"] = clean.get("createdBy") or created_by
             # Denormalized creator display name: a full-document update from a
@@ -2025,6 +2056,7 @@ def upsert_entity(
             created_by = user_id
             deleted = False
             clean["id"] = entity_id
+            clean["_deleted"] = False  # a new row is live whatever the body said
             clean["_created"] = clean.get("_created") or created_at
             # The ACTOR owns this stamp on a create. Honouring a client-supplied
             # createdBy let any account with an "add" grant attribute its record
@@ -2165,7 +2197,7 @@ def patch_entity(
     # customerName is the creation-time customer stamp that keeps a receipts/
     # ads-only role able to read who the record is for — a PATCH must never
     # rewrite either to someone else's name.
-    for k in ["id", "_created", "_lastModified", "createdBy", "createdByName", "customerName", "createdAt", "creatorId"]:
+    for k in ["id", "_created", "_lastModified", "_deleted", "createdBy", "createdByName", "customerName", "createdAt", "creatorId"]:
         if k in upd:
             del upd[k]
 
@@ -2440,6 +2472,10 @@ def _bootstrap_first_admin_if_empty():
         with db_conn() as conn:
             count = conn.execute(text("SELECT COUNT(*) FROM users WHERE deleted = false")).scalar()
             if int(count or 0) > 0:
+                return
+            if weak_password_reason(password, email, name):
+                print("[albayan] Bootstrap admin skipped: ALBAYAN_BOOTSTRAP_ADMIN_PASSWORD is too easy to guess "
+                      "(a common password, a simple sequence, only a few digits, or the account's own name). Set a stronger one.")
                 return
 
             pw = hash_password(password, iterations=PBKDF2_ITERATIONS_DEFAULT)
@@ -3009,51 +3045,6 @@ def serve_script(request: Request):
     return FileResponse(str(src), media_type="application/javascript", headers=headers)
 
 
-# What a tab opened BEFORE the current release gets when it asks for a lazy bundle (its ?v= is the
-# old main bundle's). The new bundle was written for the new main bundle: loaded into the old one it
-# can stop half-way, which left a menu item that did nothing until a manual reload, and a Retry
-# that could never succeed. This small script says so instead and offers the reload. It also runs
-# in tabs whose (old) loaders know nothing about it; "Later" keeps whatever the person is typing.
-_STALE_BUILD_SCRIPT = """(function () {
-  window.__albayanStaleBuild = true;
-  try {
-    if (document.getElementById('albayan-stale-build') || !document.body) return;
-    var ar = String(document.documentElement.getAttribute('lang') || '').toLowerCase().indexOf('ar') === 0;
-    var overlay = document.createElement('div');
-    overlay.id = 'albayan-stale-build';
-    overlay.setAttribute('role', 'alertdialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('dir', ar ? 'rtl' : 'ltr');
-    overlay.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(15,23,42,.6);font-family:inherit';
-    var card = document.createElement('div');
-    card.style.cssText = 'max-width:26rem;width:100%;background:#fff;color:#0f172a;border-radius:16px;padding:24px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.3)';
-    var title = document.createElement('div');
-    title.style.cssText = 'font-weight:800;font-size:1.125rem;margin-bottom:8px';
-    title.textContent = ar ? 'يتوفر إصدار جديد' : 'A new version is available';
-    var text = document.createElement('div');
-    text.style.cssText = 'font-size:.875rem;color:#475569;margin-bottom:16px';
-    text.textContent = ar
-      ? 'تم تحديث البيان منذ فتح هذه الصفحة. أعد التحميل لفتح هذا القسم. إن كنت تكتب شيئاً، احفظه أولاً ثم أعد التحميل.'
-      : 'Albayan was updated since this page was opened. Reload to open this section. If you are in the middle of typing something, save it first, then reload.';
-    var reload = document.createElement('button');
-    reload.type = 'button';
-    reload.style.cssText = 'min-height:44px;padding:0 20px;margin:4px;border:0;border-radius:12px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer';
-    reload.textContent = ar ? 'إعادة التحميل الآن' : 'Reload now';
-    reload.addEventListener('click', function () { window.location.reload(); });
-    var later = document.createElement('button');
-    later.type = 'button';
-    later.style.cssText = 'min-height:44px;padding:0 20px;margin:4px;border:0;border-radius:12px;background:#e2e8f0;color:#0f172a;font-weight:700;cursor:pointer';
-    later.textContent = ar ? 'لاحقاً' : 'Later';
-    later.addEventListener('click', function () { overlay.parentNode && overlay.parentNode.removeChild(overlay); });
-    card.appendChild(title); card.appendChild(text); card.appendChild(reload); card.appendChild(later);
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
-    reload.focus();
-  } catch (_) {}
-})();
-"""
-
-
 def _serve_lazy_bundle(request: Request, name: str):
     # A lazy bundle's loader reuses the MAIN bundle's ?v= (all bundles rebuild
     # together on every deploy), so cache-match against that version.
@@ -3349,6 +3340,7 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
     password = payload.password or ""
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    require_strong_password(password, email, name)  # the first Admin least of all gets "12345678"
 
     now = now_ms()
     user_id = new_id("user")
@@ -3495,6 +3487,7 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
     # Reset rate limit on successful current password verification
     reset_rate_limit(key)
 
+    require_strong_password(body.newPassword, user.get("email"), user.get("name"))
     now = now_ms()
     pw = hash_password(body.newPassword, iterations=PBKDF2_ITERATIONS_DEFAULT)
     user_id = str(user.get("id"))
@@ -3642,6 +3635,7 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
         ).mappings().first()
     if not plausible:
         raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+    require_strong_password(body.newPassword)  # the code stays usable: the person picks another password
     # PBKDF2 is deliberately expensive. Do it before taking the database lock,
     # then atomically claim the one-shot token and change the password in the
     # same transaction. The conditional UPDATE guarantees exactly one winner.
@@ -6205,6 +6199,7 @@ def _clothes_validate_and_lock_shipment_products(
     raw_lines: Any,
     *,
     postgres: bool,
+    actor: dict[str, Any] | None = None,
 ) -> None:
     try:
         lines = _clothes_parse_shipment_lines(raw_lines)
@@ -6212,7 +6207,10 @@ def _clothes_validate_and_lock_shipment_products(
         raise HTTPException(status_code=400, detail=exc.detail)
     for product_id in sorted({line["productId"] for line in lines}):
         row = _clothes_lock_row(conn, "clothesProducts", product_id, postgres=postgres)
-        if not row or bool(row["deleted"]):
+        # Another shop's product reads as missing too: a shipment naming it blocked that shop from
+        # ever deleting or emptying its own product (and the different answer told which ids exist).
+        visible = actor is None or user_has_permission(actor, "clothesProducts", "view", record_creator_id=str((row or {}).get("created_by") or ""))
+        if not row or bool(row["deleted"]) or not visible:
             raise HTTPException(status_code=409, detail=f"Shipment product is missing: {product_id}")
 
 
@@ -6240,7 +6238,7 @@ def _clothes_create_inventory_entity_atomic(
                     clean["stockApplied"] = False
                     clean["receivedAt"] = None
                     _clothes_validate_and_lock_shipment_products(
-                        conn, clean.get("lines"), postgres=postgres
+                        conn, clean.get("lines"), postgres=postgres, actor=actor
                     )
                 else:
                     raise HTTPException(status_code=400, detail="Invalid inventory collection")
@@ -6285,7 +6283,7 @@ def _clothes_patch_shipment_atomic(
                 raise HTTPException(status_code=409, detail="A received shipment cannot be edited")
             if "lines" in clean_updates:
                 _clothes_validate_and_lock_shipment_products(
-                    conn, clean_updates.get("lines"), postgres=postgres
+                    conn, clean_updates.get("lines"), postgres=postgres, actor=actor
                 )
             data.update(clean_updates)
             return _clothes_write_row(conn, row, data)
@@ -10282,6 +10280,9 @@ def mutate_ad_funding(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
+    _refuse_oversized_record(body.data)
+    _stored_ad = get_entity("ads", str(body.adId)) if body.action == "update" else None
+    _refuse_unseen_customer_reference(user, "ads", body.data, ((_stored_ad or {}).get("data") or {}))
     ad, updated_receipt_ids, replayed = _ad_mutation_atomic(user, body)
     updated_receipts: list[EntityResponse] = []
     for receipt_id in updated_receipt_ids:
@@ -11119,9 +11120,9 @@ def get_collection(
     if collection == "walletPaymentRequests":
         include_media = False  # transfer-receipt photos hydrate by id only
     _recent_delta = updated_since is not None and now_ms() - int(updated_since or 0) <= 24 * 3600 * 1000
-    if collection == "receipts" and include_media and limit > 25 and not _recent_delta:  # only a RECENT delta poll carries few rows
+    if collection in {"receipts", "ads"} and include_media and limit > 25 and not _recent_delta:  # only a RECENT delta poll carries few rows
         from .rate_limiter import check_rate_limit  # 8 MB per photo: throttle, not refuse (older clients may still ask)
-        _ok, _left, _retry_ms = check_rate_limit(f"receipts-media-list:{user['id']}", max_attempts=30, window_ms=60 * 1000)
+        _ok, _left, _retry_ms = check_rate_limit(f"{collection}-media-list:{user['id']}", max_attempts=30, window_ms=60 * 1000)
         if not _ok:
             raise HTTPException(status_code=429, detail="Too many receipt listings with media; hydrate photos by id",
                                 headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
@@ -11413,6 +11414,10 @@ def get_collection_item(
     raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def _refuse_unseen_customer_reference(user: dict[str, Any], collection: str, data: Any, existing_data: dict[str, Any] | None = None) -> None:
+    refuse_unseen_customer_reference(user, collection, data, existing_data, get_entity=get_entity)  # server/store_guards.py
+
+
 @app.post("/api/collections/{collection}", response_model=EntityResponse)
 def create_collection_item(
     collection: str,
@@ -11423,6 +11428,7 @@ def create_collection_item(
 ):
     require_same_origin(request)
     _reject_non_store_collection(collection)
+    _refuse_oversized_record(body.data)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
@@ -11438,6 +11444,7 @@ def create_collection_item(
     if collection in FINANCIAL_MUTATION_COLLECTIONS:
         raise HTTPException(status_code=405, detail="Financial mutation records are server-controlled")
     module = _module_for_collection(collection)
+    _refuse_unseen_customer_reference(user, collection, body.data)
 
     # Compatibility bridge for existing clients: old builds still POST these
     # collections through the generic route.  They now go through exactly the
@@ -11711,6 +11718,7 @@ def update_collection_item(
 ):
     require_same_origin(request)
     _reject_non_store_collection(collection)
+    _refuse_oversized_record(body.data)
     if collection in CLOTHES_BUSINESS_COLLECTIONS:
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
@@ -11733,6 +11741,7 @@ def update_collection_item(
     existing = get_entity(collection, entity_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
+    _refuse_unseen_customer_reference(user, collection, body.data, existing.get("data") or {})
 
     campaign_updates: dict[str, Any] | None = None
     if collection == AD_CAMPAIGN_COLLECTION:
@@ -12529,6 +12538,10 @@ def admin_restore_collection_item(
     ent_id = validate_entity_id(entity_id)
     if not entity_type:
         raise HTTPException(status_code=400, detail="Invalid entity type/id")
+    # The same refusal as the bulk import: records only their own routes may write (accounts, Studio,
+    # Social, campaign requests, Meta sync state). A restore of "users" wrote a shadow row of that type.
+    if entity_type in _NON_STORE_COLLECTIONS or entity_type == AD_CAMPAIGN_COLLECTION or re.fullmatch(r"meta[A-Za-z]*State", entity_type):
+        raise HTTPException(status_code=405, detail=f"'{entity_type}' cannot be restored through the online API")
     if entity_type in PERSONAL_SCOPED_COLLECTIONS:
         raise HTTPException(
             status_code=405,
@@ -13682,6 +13695,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
         if requested_role != "Employee" and not user_has_permission(admin, "users", "changeRole"):
             raise HTTPException(status_code=403, detail="users.changeRole is required to create this role")
     email = signin_email_or_400(body.email)  # the stored form must itself be a valid sign-in address
+    require_strong_password(body.password, email, body.name)
     now = now_ms()
     pw = hash_password(body.password, iterations=PBKDF2_ITERATIONS_DEFAULT)
 
@@ -13824,6 +13838,7 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     if requested_permissions is not None:
         update_fields["permissions_json"] = json_dumps(requested_permissions)
     if body.password is not None:
+        require_strong_password(body.password, body.email or existing.get("email"), body.name or existing.get("name"))
         pw = hash_password(body.password, iterations=PBKDF2_ITERATIONS_DEFAULT)
         update_fields["password_hash"] = pw.hash_hex
         update_fields["password_salt"] = pw.salt_hex

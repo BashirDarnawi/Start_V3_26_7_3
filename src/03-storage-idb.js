@@ -600,8 +600,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
       throw error;
     }
     console.error('Error loading collection from IndexedDB:', error);
-    // Local mode's ONLY copy: "could not be read" (iOS dropped the connection) is not "nothing
-    // stored". null made an empty list that the next save wrote over the intact rows.
+    // Local mode's only copy: unreadable is not empty (null let a save overwrite the rows).
     if (capturedScope === 'local' && capturedScope === _collectionStorageScope) {
       markCollectionCorrupted(name);
       const unreadable = new Error(`IndexedDB collection "${name}" could not be read`);

@@ -39,7 +39,7 @@ grep -c "fetch('http://127.0.0.1:7242" script.js
 **Old System (INSECURE):**
 ```javascript
 users: [
-  { id: 'u1', email: 'bashirdarnawi@gmail.com', password: '12345678' }
+  { id: 'u1', email: 'admin@example.com', password: '<your-password>' }
 ]
 ```
 ❌ Anyone with file access could read passwords
@@ -49,7 +49,7 @@ users: [
 users: [
   { 
     id: 'u1', 
-    email: 'bashirdarnawi@gmail.com',
+    email: 'admin@example.com',
     passwordHash: '3a2f5b9c8e7d6a1b4c5d8e9f0a1b2c3d...',
     salt: 'b4c9e3f7a2d6c1e5b9f3a7d2c6e1b5a9'
   }
@@ -58,7 +58,7 @@ users: [
 ✅ Impossible to reverse-engineer passwords
 
 **Migration Process:**
-1. User logs in with old password (e.g., "12345678")
+1. User logs in with old password (e.g., "<your-password>")
 2. System verifies against plain text
 3. **Automatic conversion:** Password → SHA-256 hash + salt
 4. Plain text deleted
@@ -68,12 +68,12 @@ users: [
 ```javascript
 // Test in browser console:
 async function testPasswordSecurity() {
-  const { hash, salt } = await Security.hashPassword('12345678');
+  const { hash, salt } = await Security.hashPassword('<your-password>');
   console.log('Hash:', hash); // 64-character hex
   console.log('Salt:', salt); // 32-character hex
   
   // Verify
-  const valid = await Security.verifyPassword('12345678', hash, salt);
+  const valid = await Security.verifyPassword('<your-password>', hash, salt);
   console.log('Valid:', valid); // true
   
   const invalid = await Security.verifyPassword('wrong', hash, salt);
@@ -373,7 +373,7 @@ showNotification('Test', '<script>alert("HACKED")</script>', 'error');
 
 ### Test 5: Password Hashing
 ```javascript
-// Login with password "12345678"
+// Login with password "<your-password>"
 // Check localStorage → users array
 // Result: No plain text password visible ✅
 ```

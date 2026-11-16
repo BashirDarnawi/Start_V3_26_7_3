@@ -3,7 +3,7 @@ import json
 from getpass import getpass
 
 from server.db import db_conn, get_engine, init_db, json_dumps, now_ms
-from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id, normalize_signin_email
+from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id, normalize_signin_email, weak_password_reason
 from sqlalchemy import text
 
 
@@ -27,6 +27,9 @@ def main():
     password = args.password or getpass("Admin password: ")
     if len(password) < 8:
         raise SystemExit("Password must be at least 8 characters")
+    if weak_password_reason(password, email, name):
+        raise SystemExit("This password is too easy to guess (a common password, a simple sequence, only a few digits, "
+                         "or the account's own name). Choose a stronger one.")
 
     pw = hash_password(password, iterations=PBKDF2_ITERATIONS_DEFAULT)
     now = now_ms()

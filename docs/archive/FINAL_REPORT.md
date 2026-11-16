@@ -402,7 +402,7 @@ open index.html
 ```
 
 ### Test Receipt Creation
-1. Login: bashirdarnawi@gmail.com / 123456
+1. Login: admin@example.com / <your-password>
 2. Click "Receipts"
 3. Click "New Receipt"
 4. ✅ **Modal opens with ALL fields**
@@ -645,8 +645,8 @@ cd vanilla_v1
 open index.html
 
 # Login
-Email: bashirdarnawi@gmail.com
-Password: 123456
+Email: admin@example.com
+Password: <your-password>
 
 # Test receipts (the main fix!)
 1. Click "Receipts"

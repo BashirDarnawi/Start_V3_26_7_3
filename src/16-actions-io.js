@@ -59,8 +59,8 @@ function stopAd(id) {
   }
   
   const customer = state.customers.find(c => c.id === ad.customerId);
-  const adAmountUSD = ad.amountUSD || 0;
-  const currentSpentUSD = ad.spentUSD || 0;
+  const adAmountUSD = Number(ad.amountUSD) || 0;
+  const currentSpentUSD = Number(ad.spentUSD) || 0;
   // Prefill Meta's trusted spend but keep it editable: Meta may still charge after a pause and the
   // owner's later statement can be more accurate. The amount saved here is final.
   const metaSpendUSD = metaAdRealSpendUSD(ad);
@@ -796,6 +796,7 @@ async function updateExchangeRate(value) {
     return;
   }
   const previousRate = state.defaultExchangeRate;
+  if (rate === previousRate) return;  // blur + click both call this
   state.defaultExchangeRate = rate;
   const record = {
     id: generateId('rate'),
@@ -1041,8 +1042,7 @@ function exportData() {
   };
   
   const dataStr = JSON.stringify(exportState);  // compact: photos are inline, a pretty-printed file can outgrow the import cap
-  // The file is still handed over (it is the user's data), but it is never called a backup:
-  // the import refuses anything above the same limit.
+  // Still handed over, never called a backup: the import refuses a file this large.
   const backupTooLargeToRestore = (typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES;
   if (backupTooLargeToRestore) {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
@@ -1099,7 +1099,6 @@ function exportData() {
   }
 
   if (backupTooLargeToRestore && !serverPartialSnapshot) {
-    // Before: "exported successfully" and the backup reminder went quiet for 5 days, for a file that cannot be restored.
     addAuditLog('Export', 'system', 'Local data exported, but the file is above the import limit and cannot be restored');
     showNotification(
       state.language === 'ar' ? 'تم التصدير، لكنه ليس نسخة احتياطية' : 'Exported, but not a usable backup',

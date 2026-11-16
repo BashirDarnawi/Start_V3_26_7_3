@@ -2181,7 +2181,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(trStatus(item.status || ''))}</p>
+                    <p class="text-[11px] text-slate-500">${canViewFinancials ? `$${(Number(item.value) || 0).toFixed(2)} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
                   <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
                 </div>
@@ -2752,6 +2752,7 @@ function renderReceiptsView() {
     // Date filter
     if (state.receiptDateFilter !== 'all') {
       const receiptDate = new Date(receipt.createdAt || receipt.startDate);
+      if (isNaN(receiptDate)) return false;
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -5868,7 +5869,7 @@ function renderAuditView() {
     if (state.auditActionFilter !== 'all' && log.action !== state.auditActionFilter) return false;
     
     // Category filter
-    if (state.auditCategoryFilter !== 'all' && log.category !== state.auditCategoryFilter) return false;
+    if (state.auditCategoryFilter !== 'all' && (log.category || 'general') !== state.auditCategoryFilter) return false;
     
     // Severity filter
     if (state.auditSeverityFilter !== 'all' && log.severity !== state.auditSeverityFilter) return false;

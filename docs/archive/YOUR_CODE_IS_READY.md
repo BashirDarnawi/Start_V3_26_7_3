@@ -75,7 +75,7 @@ Fixed 8 places where code would crash if data was missing:
 ### You Can Now:
 
 1. **Open the app** - Double-click `index.html`
-2. **Login safely** - Use: `bashirdarnawi@gmail.com` / `123456`
+2. **Login safely** - Use: `admin@example.com` / `<your-password>`
 3. **Use all features** - Everything works:
    - ✅ Add/Edit/Delete customers
    - ✅ Create receipts

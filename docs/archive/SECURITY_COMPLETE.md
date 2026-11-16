@@ -126,7 +126,7 @@ index.html
 
 ### 2. **First Login**
 Your existing passwords will **automatically upgrade** to hashed:
-- Login with current password (e.g., "12345678")
+- Login with current password (e.g., "<your-password>")
 - System hashes it automatically
 - Plain text deleted
 - Next login uses hash ✅
@@ -191,7 +191,7 @@ runAllSecurityTests();
 ### BEFORE (INSECURE):
 ```javascript
 // ❌ Plain text password
-password: "12345678"
+password: "<your-password>"
 
 // ❌ No XSS protection
 innerHTML = `<div>${userInput}</div>`

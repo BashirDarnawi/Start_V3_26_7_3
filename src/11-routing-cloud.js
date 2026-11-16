@@ -165,12 +165,10 @@ function updateUrlParams(newParams, replace = false) {
   const search = params.toString();
   const newUrl = window.location.pathname + (search ? '?' + search : '');
 
-  // Stamp modal-pushed entries so closeModal() can tell "the top entry was
-  // pushed for this dialog" and consume it with history.back() instead of
-  // leaving a dead same-URL entry stacked (Back then degraded into N no-op
-  // presses on phones). The timestamp lets the overlay observer
-  // (01b-mobile-runtime.js) skip its sentinel for surfaces whose opener
-  // already created a history entry (tracked modals, collect-receipt).
+  // Stamp modal-pushed entries so closeModal() knows "the top entry was pushed for this dialog"
+  // and consumes it with history.back() (a dead same-URL entry made Back N no-op presses on
+  // phones). The timestamp lets the overlay observer (01b-mobile-runtime.js) skip its sentinel
+  // for surfaces whose opener already made a history entry (tracked modals, collect-receipt).
   const entryState = { view: state.currentView, params: newParams, albayanModal: !!newParams.modal };
   if (newParams.modal) _albayanLastModalUrlPushAt = Date.now();
 
@@ -179,12 +177,10 @@ function updateUrlParams(newParams, replace = false) {
     // restore path re-runs the real modal openers, whose own updateUrlParams
     // call must not push a DUPLICATE entry for the address being restored.
     const samePlace = newUrl === window.location.pathname + window.location.search;
-    // Consume a live overlay sentinel (a chooser/palette surface replaced by
-    // this modal in the same gesture — New Receipt chooser, command-palette
-    // quick actions) by REPLACING it instead of stacking on top: a stranded
-    // sentinel costs the user one dead Back press plus a scroll jump after
-    // the modal closes. Mirrors navigateToInternal; see the overlay history
-    // model in 01b-mobile-runtime.js.
+    // Consume a live overlay sentinel (a chooser/palette surface this modal replaces in the same
+    // gesture: New Receipt chooser, command-palette quick actions) by REPLACING it: a stranded
+    // sentinel costs one dead Back press plus a scroll jump after the modal closes. Mirrors
+    // navigateToInternal; see the overlay history model in 01b-mobile-runtime.js.
     const topWasOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
     if (replace || samePlace || topWasOverlaySentinel) {
       window.history.replaceState(entryState, '', newUrl);
@@ -946,8 +942,7 @@ async function pushToCloud() {
 }
 
 function mergeCloudData(remoteData) {
-  // The remote side is untrusted: clean every string and refuse the whole payload when an
-  // identifier could break out of a link or a button (the same two checks as a backup import).
+  // Untrusted remote data: the same two checks as a backup import.
   remoteData = Security.sanitizeObject(remoteData) || {};
   for (const name of ['ads', 'receipts', 'customers', 'pages', 'logs', 'exchangeRateHistory']) {
     if (!Array.isArray(remoteData[name])) continue;
@@ -976,7 +971,7 @@ function mergeCloudData(remoteData) {
   mergeArray(state.receipts, remoteData.receipts);
   mergeArray(state.customers, remoteData.customers);
   mergeArray(state.pages, remoteData.pages);
-  // Accounts (roles, password hashes) are never taken from the remote side.
+  // Accounts are never taken from the remote side.
   mergeArray(state.logs, remoteData.logs);
   
   if (remoteData.defaultExchangeRate !== undefined) {

@@ -3417,7 +3417,9 @@ function closeReceiptPhotoViewer(restoreFocus = true) {
 function handleDeliveryReceiptPhotoUpload(fileList) {
   const file = fileList && fileList.length ? fileList[0] : null;
   if (!file) return;
+  const forDelivery = _deliveryCompletionOpen?.id;
   compressImageToDataUrl(file).then((dataUrl) => {
+    if (forDelivery !== _deliveryCompletionOpen?.id) return;  // another form is open now
     if (!isSafeReceiptPhotoSource(dataUrl)) {
       // A valid image over the cap must say "too large", not "unsupported" —
       // telling a driver their JPG is not a JPG misdirects the retry.

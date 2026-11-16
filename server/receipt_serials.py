@@ -89,9 +89,10 @@ def issue_free_auto_serial(
     for row in conn.execute(text(scan_sql), {"receipt_id": receipt_id}).mappings().all():
         keys = {canonical(row.get(f"f_{field.lower()}")) for field in _NUMBER_FIELDS} - {""}
         taken = taken or serial in keys
-        numbers = [int(key[1:]) for key in keys if re.fullmatch(prefix + r"[0-9]+", key)]
+        # Numbers longer than the format allows (stored before the limit) never set the next one.
+        numbers = [int(key[1:]) for key in keys if re.fullmatch(prefix + r"[0-9]{1,12}", key)]
         own_serial = canonical(row.get("f_serialnumber"))
-        if prefix == "S" and re.fullmatch(r"[0-9]+", own_serial) and _legacy_s_digits(row):
+        if prefix == "S" and re.fullmatch(r"[0-9]{1,12}", own_serial) and _legacy_s_digits(row):
             numbers.append(int(own_serial))
         highest = max([highest, *numbers])
     if not taken:

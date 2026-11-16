@@ -1689,7 +1689,7 @@ function _serverRefusalText(raw) {
   const out = hit?.[state.language === 'ar' ? 1 : 2];
   return out ? (hit[0].test ? raw.replace(hit[0], out) : out) : raw;
 }
-// A caught error's text in the screen language: in Arabic never a raw English server sentence.
+// An error's text in the screen language (never raw English in Arabic).
 function errText(e, en, ar) {
   const raw = String(e?.message || '');
   if (state.language !== 'ar') return raw || en;

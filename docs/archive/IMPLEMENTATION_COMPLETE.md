@@ -345,7 +345,7 @@ cd vanilla_v1
 open index.html
 ```
 
-**Login:** bashirdarnawi@gmail.com / 123456
+**Login:** admin@example.com / <your-password>
 
 ### Try These Workflows:
 

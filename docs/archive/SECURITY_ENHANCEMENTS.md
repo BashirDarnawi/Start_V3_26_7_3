@@ -24,7 +24,7 @@ fetch('http://127.0.0.1:7242/ingest/...', {...data...})
 ### 2. ❌ Plain Text Passwords (FIXED)
 **Before:** Passwords stored as plain text
 ```javascript
-password: '12345678'  // Anyone could read this!
+password: '<your-password>'  // Anyone could read this!
 ```
 **After:** SHA-256 hashed passwords with unique salts
 ```javascript
@@ -201,7 +201,7 @@ Existing plain-text passwords will **automatically migrate** to hashed passwords
 ```javascript
 // Check storage usage
 await getStorageEstimate()
-// Returns: { usage: 12345678, quota: 1000000000, usagePercentage: "1.23" }
+// Returns: { usage: <your-password>, quota: 1000000000, usagePercentage: "1.23" }
 ```
 
 ---

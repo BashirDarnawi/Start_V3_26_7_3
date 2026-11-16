@@ -4157,8 +4157,9 @@ async function handleModalSubmit() {
             }
           }
 
-          const updated = await apiUpdateUser(state.modalData.id, payload);
-          const idx = state.users.findIndex(u => u.id === state.modalData.id);
+          const editedUserId = state.modalData.id;  // Cancel empties modalData
+          const updated = await apiUpdateUser(editedUserId, payload);
+          const idx = state.users.findIndex(u => u.id === editedUserId);
           if (idx !== -1 && updated) {
             state.users[idx] = { ...state.users[idx], ...updated, _lastModified: Date.now(), _deleted: false };
             markCollectionDirty('users');
@@ -4318,6 +4319,12 @@ async function handleModalSubmit() {
 
       const selectedCustomers = Array.from(document.querySelectorAll('.page-customer-item'))
         .map(item => item.getAttribute('data-customer-id'));
+      // A rename must not drop links to customers this account cannot see.
+      if (isEdit && !can('customers', 'view')) {
+        for (const cid of getPageCustomerIds(state.pages.find(p => p.id === state.modalData.id)).map(String)) {
+          if (!selectedCustomers.includes(cid) && !state.customers.some(c => String(c.id) === cid)) selectedCustomers.push(cid);
+        }
+      }
 
       if (selectedCustomers.length === 0) {
         showNotification(
@@ -4725,7 +4732,7 @@ async function deleteReceipt(id) {
     return;
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
-  const amountUSD = receipt?.amountUSD?.toFixed(2) || '0.00';
+  const amountUSD = (Number(receipt?.amountUSD) || 0).toFixed(2);
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
@@ -4805,7 +4812,7 @@ async function deleteAd(id) {
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
-  const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
+  const amountUSD = (Number(ad?.amountUSD) || 0).toFixed(2);
   // Say where the money goes: a deleted ad's allocations stop counting, so its funded amount is free again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100

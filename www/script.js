@@ -1860,13 +1860,12 @@ const Security = {
         str = str.replace(/\bon\w+\s*=/gi, '');
         str = str.replace(/javascript:/gi, '');
         str = str.replace(/vbscript:/gi, '');
-        // Inside the loop: removed afterwards, "ondata:focus=" became a live "onfocus=",
-        // "javadata:script:" became "javascript:" and "on<>focus=" became "onfocus=".
+        // Inside the loop: stripped afterwards, "ondata:focus=" became a live "onfocus=".
         str = str.replace(/[<>]/g, '');
         if (!options.allowDataUrl || !/^\s*data:/i.test(str)) str = str.replace(/data:/gi, '');
         if (str === before) break;
       }
-      // Still dangerous after 8 passes (a deliberately nested value): keep nothing.
+      // Still dangerous after 8 passes: keep nothing.
       if (!(options.allowDataUrl && /^\s*data:/i.test(str)) && /\bon\w+\s*=|javascript:|vbscript:/i.test(str)) str = '';
       if (!options.allowDataUrl) {
         str = str.replace(/data:/gi, '');
@@ -3167,8 +3166,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
       throw error;
     }
     console.error('Error loading collection from IndexedDB:', error);
-    // Local mode's ONLY copy: "could not be read" (iOS dropped the connection) is not "nothing
-    // stored". null made an empty list that the next save wrote over the intact rows.
+    // Local mode's only copy: unreadable is not empty (null let a save overwrite the rows).
     if (capturedScope === 'local' && capturedScope === _collectionStorageScope) {
       markCollectionCorrupted(name);
       const unreadable = new Error(`IndexedDB collection "${name}" could not be read`);
@@ -6201,8 +6199,7 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
   for (const name of PERSISTED_COLLECTIONS) {
     let loaded = null;
 
-    // Connection lost mid-load (iOS, in the background): what was not read yet is NOT empty.
-    // Local mode keeps it out of every save until a later start reads it.
+    // Connection lost mid-load: what was not read yet is NOT empty (kept out of every save).
     if (hadConnection && !db && getCollectionStorageScope() === 'local'
         && !(legacy._collectionsInline && Array.isArray(legacy[name]) && legacy[name].length)) {
       markCollectionCorrupted(name);
@@ -8901,7 +8898,7 @@ function _serverRefusalText(raw) {
   const out = hit?.[state.language === 'ar' ? 1 : 2];
   return out ? (hit[0].test ? raw.replace(hit[0], out) : out) : raw;
 }
-// A caught error's text in the screen language: in Arabic never a raw English server sentence.
+// An error's text in the screen language (never raw English in Arabic).
 function errText(e, en, ar) {
   const raw = String(e?.message || '');
   if (state.language !== 'ar') return raw || en;
@@ -10413,7 +10410,8 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         }, 2, 300);
         if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
 
-        if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
+        if (!Array.isArray(items)) throw Object.assign(new Error('Not a list'), { code: 'INCOMPLETE_COLLECTION_LOAD' });
+        if (items.length === 0) { lastPageFull = false; break; }
 
         let lastEntity = null;
         for (const rawEntity of items) {
@@ -10755,11 +10753,9 @@ async function apiSettleReceipt(payload) {
   };
 }
 
-// The exact REVERSE of apiSettleReceipt: convert a funded PAID receipt back
-// into customer debt. The server migrates every linked ad's paid rows for
-// this receipt into its due pool in the same transaction, so the browser must
-// install the receipt AND the converted ads together — a receipt-only
-// envelope would briefly show paid ads backed by an unpaid receipt.
+// The REVERSE of apiSettleReceipt: a funded PAID receipt back into customer debt. The server
+// moves every linked ad's paid rows for it into the due pool in the same transaction, so the
+// browser installs the receipt AND the converted ads together (never paid ads on an unpaid receipt).
 async function apiUnsettleReceipt(payload) {
   const receiptId = String(payload?.receiptId || '').trim();
   if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt conversion id');
@@ -11779,11 +11775,10 @@ async function serverLoadAllData() {
 }
 
 // ---- SYSTEM-BROWSER APP LOGIN (Phase 2) ----
-// Optional sign-in for the packaged apps: the hosted login page opens in
-// Safari/Chrome and returns via the albayan://auth deep link with a ONE-TIME
-// code; the app exchanges code+verifier (PKCE-style) for the same HttpOnly
-// session. NATIVE = startAppBrowserLogin / deep-link handling; WEB = detects
-// ?app_login=1, mints the handoff code, renders "return to app".
+// Optional sign-in for the packaged apps: the hosted login page opens in Safari/Chrome and
+// returns via the albayan://auth deep link with a ONE-TIME code; the app exchanges code+verifier
+// (PKCE-style) for the same HttpOnly session. NATIVE = startAppBrowserLogin / deep-link
+// handling; WEB = detects ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
 // Native app: the pending {state, verifier} lives in Keychain/Keystore (Android restores the activity
@@ -13818,8 +13813,7 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     }
   } catch (_) {}
 
-  // One stored row without an e-mail (an old backup, a half-imported file) used to throw here,
-  // so every account listed after it got "Could not sign in" with the right password.
+  // A stored row without an e-mail used to throw here for every account after it.
   const user = _users.find(u =>
     u && !u._deleted &&
     String(u.email || '').toLowerCase() === sanitizedEmail
@@ -14458,12 +14452,10 @@ function updateUrlParams(newParams, replace = false) {
   const search = params.toString();
   const newUrl = window.location.pathname + (search ? '?' + search : '');
 
-  // Stamp modal-pushed entries so closeModal() can tell "the top entry was
-  // pushed for this dialog" and consume it with history.back() instead of
-  // leaving a dead same-URL entry stacked (Back then degraded into N no-op
-  // presses on phones). The timestamp lets the overlay observer
-  // (01b-mobile-runtime.js) skip its sentinel for surfaces whose opener
-  // already created a history entry (tracked modals, collect-receipt).
+  // Stamp modal-pushed entries so closeModal() knows "the top entry was pushed for this dialog"
+  // and consumes it with history.back() (a dead same-URL entry made Back N no-op presses on
+  // phones). The timestamp lets the overlay observer (01b-mobile-runtime.js) skip its sentinel
+  // for surfaces whose opener already made a history entry (tracked modals, collect-receipt).
   const entryState = { view: state.currentView, params: newParams, albayanModal: !!newParams.modal };
   if (newParams.modal) _albayanLastModalUrlPushAt = Date.now();
 
@@ -14472,12 +14464,10 @@ function updateUrlParams(newParams, replace = false) {
     // restore path re-runs the real modal openers, whose own updateUrlParams
     // call must not push a DUPLICATE entry for the address being restored.
     const samePlace = newUrl === window.location.pathname + window.location.search;
-    // Consume a live overlay sentinel (a chooser/palette surface replaced by
-    // this modal in the same gesture — New Receipt chooser, command-palette
-    // quick actions) by REPLACING it instead of stacking on top: a stranded
-    // sentinel costs the user one dead Back press plus a scroll jump after
-    // the modal closes. Mirrors navigateToInternal; see the overlay history
-    // model in 01b-mobile-runtime.js.
+    // Consume a live overlay sentinel (a chooser/palette surface this modal replaces in the same
+    // gesture: New Receipt chooser, command-palette quick actions) by REPLACING it: a stranded
+    // sentinel costs one dead Back press plus a scroll jump after the modal closes. Mirrors
+    // navigateToInternal; see the overlay history model in 01b-mobile-runtime.js.
     const topWasOverlaySentinel = !!(window.history.state && window.history.state.overlaySentinel);
     if (replace || samePlace || topWasOverlaySentinel) {
       window.history.replaceState(entryState, '', newUrl);
@@ -15239,8 +15229,7 @@ async function pushToCloud() {
 }
 
 function mergeCloudData(remoteData) {
-  // The remote side is untrusted: clean every string and refuse the whole payload when an
-  // identifier could break out of a link or a button (the same two checks as a backup import).
+  // Untrusted remote data: the same two checks as a backup import.
   remoteData = Security.sanitizeObject(remoteData) || {};
   for (const name of ['ads', 'receipts', 'customers', 'pages', 'logs', 'exchangeRateHistory']) {
     if (!Array.isArray(remoteData[name])) continue;
@@ -15269,7 +15258,7 @@ function mergeCloudData(remoteData) {
   mergeArray(state.receipts, remoteData.receipts);
   mergeArray(state.customers, remoteData.customers);
   mergeArray(state.pages, remoteData.pages);
-  // Accounts (roles, password hashes) are never taken from the remote side.
+  // Accounts are never taken from the remote side.
   mergeArray(state.logs, remoteData.logs);
   
   if (remoteData.defaultExchangeRate !== undefined) {
@@ -17547,7 +17536,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">$${item.value.toFixed(2)} • ${Security.escapeHtml(trStatus(item.status || ''))}</p>
+                    <p class="text-[11px] text-slate-500">${canViewFinancials ? `$${(Number(item.value) || 0).toFixed(2)} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
                   <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
                 </div>
@@ -18118,6 +18107,7 @@ function renderReceiptsView() {
     // Date filter
     if (state.receiptDateFilter !== 'all') {
       const receiptDate = new Date(receipt.createdAt || receipt.startDate);
+      if (isNaN(receiptDate)) return false;
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -21234,7 +21224,7 @@ function renderAuditView() {
     if (state.auditActionFilter !== 'all' && log.action !== state.auditActionFilter) return false;
     
     // Category filter
-    if (state.auditCategoryFilter !== 'all' && log.category !== state.auditCategoryFilter) return false;
+    if (state.auditCategoryFilter !== 'all' && (log.category || 'general') !== state.auditCategoryFilter) return false;
     
     // Severity filter
     if (state.auditSeverityFilter !== 'all' && log.severity !== state.auditSeverityFilter) return false;
@@ -27650,7 +27640,9 @@ function closeReceiptPhotoViewer(restoreFocus = true) {
 function handleDeliveryReceiptPhotoUpload(fileList) {
   const file = fileList && fileList.length ? fileList[0] : null;
   if (!file) return;
+  const forDelivery = _deliveryCompletionOpen?.id;
   compressImageToDataUrl(file).then((dataUrl) => {
+    if (forDelivery !== _deliveryCompletionOpen?.id) return;  // another form is open now
     if (!isSafeReceiptPhotoSource(dataUrl)) {
       // A valid image over the cap must say "too large", not "unsupported" —
       // telling a driver their JPG is not a JPG misdirects the retry.
@@ -33489,6 +33481,14 @@ async function _saveReceiptFromModalInner() {
     showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
+  // Picked A, then typed B's phone or name without tapping B: it saved under A.
+  const typedCustomer = document.getElementById('receipt-phone-search').value;
+  const typedKey = normalizeCustomerPhoneKey(typedCustomer), typedName = foldSearchText(typedCustomer).trim();
+  const typedRows = typedName ? getReceiptPhoneRows().filter(row => (typedKey && normalizeCustomerPhoneKey(row.phone) === typedKey) || foldSearchText(row.customer.name).trim() === typedName) : [];
+  if (typedRows.length && !typedRows.some(row => String(row.customer.id) === customerId)) {
+    showNotification(isArV ? 'عميل مختلف' : 'Different customer', isArV ? `هذا يخص «${typedRows[0].customer.name}». اختره من القائمة.` : `This belongs to "${typedRows[0].customer.name}". Pick them from the list.`, 'error');
+    return;
+  }
   // Without customers.viewContacts the other customer's phone never reached this device (the server keeps the old one).
   if (editTarget && customerId !== String(editTarget.customerId || '') && !can('customers', 'viewContacts')) {
     showNotification(isArV ? 'غير مسموح' : 'Not Allowed', isArV ? 'نقل هذا الوصل إلى عميل آخر يحتاج صلاحية عرض أرقام العملاء.' : 'Moving this receipt to another customer needs the View contacts permission.', 'warning');
@@ -36142,11 +36142,9 @@ function addAdLinkInput(value = '') {
   lucide.createIcons();
 }
 
-// "Paste link" beside "+ Add Link" — the link twin of the photos section's
-// Paste photo button. Reads the copied text (native Capacitor clipboard in
-// the packaged app, navigator.clipboard on the web), accepts only something
-// that is genuinely a web address, fills the first empty link row (adding a
-// row when none is empty), and never adds the same link twice.
+// "Paste link" beside "+ Add Link" (twin of Paste photo): reads the copied text (native
+// clipboard in the app, navigator.clipboard on the web), accepts only a real web address,
+// fills the first empty link row (adds one if none) and never adds the same link twice.
 async function pasteAdLinkFromClipboard() {
   const isArL = state.language === 'ar';
   let text = '';
@@ -36902,20 +36900,21 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   if (!input) return;
   let val = String(input.value || '');
 
-  // Normalize non-ASCII numerals/separators BEFORE filtering, so an Arabic
-  // keyboard entry is not corrupted: previously "12,5" (comma decimal) became
-  // "125" (a 10x error) and Arabic-Indic digits were deleted entirely.
-  // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
-  // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
-  // decimal separator too — dropping it turned "12،5" into "125" (10x error).
+  // Normalize non-ASCII digits and separators BEFORE filtering: "12,5" became "125" (10x)
+  // and Arabic-Indic digits were deleted. The Arabic comma U+060C '،' (Arabic keyboards,
+  // amounts pasted from Arabic chats) is a decimal separator too.
   val = normalizeDigitsAscii(val).replace(/،/g, ',').replace(/٫/g, '.');  // U+066B is the decimal point: fold it first
   // Commas next to a dot or in groups of three ("1,250") are thousands
   // separators; only "12,5" is a decimal. "1,250" used to save as 1.25.
   if (val.includes(',')) {
     const grouped = /^\s*\d{1,3}(,\d{3})+(\.\d*)?\s*$/.test(val);
     if (val.includes('.') || grouped) val = val.split(',').join('');
-    else val = val.replace(',', '.');
-  }
+    else { val = val.replace(',', '.'); input._commaDot = 1; }
+  } else if (input._commaDot && maxDecimals < 3 && /^[1-9]\d*\.\d{3}$/.test(val)) {
+    // "1,000" typed key by key saved as 1.00 (pasted: 1000).
+    val = val.replace('.', '');
+    input._commaDot = 0;
+  } else if (!val.includes('.')) input._commaDot = 0;
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
@@ -41759,8 +41758,9 @@ async function handleModalSubmit() {
             }
           }
 
-          const updated = await apiUpdateUser(state.modalData.id, payload);
-          const idx = state.users.findIndex(u => u.id === state.modalData.id);
+          const editedUserId = state.modalData.id;  // Cancel empties modalData
+          const updated = await apiUpdateUser(editedUserId, payload);
+          const idx = state.users.findIndex(u => u.id === editedUserId);
           if (idx !== -1 && updated) {
             state.users[idx] = { ...state.users[idx], ...updated, _lastModified: Date.now(), _deleted: false };
             markCollectionDirty('users');
@@ -41920,6 +41920,12 @@ async function handleModalSubmit() {
 
       const selectedCustomers = Array.from(document.querySelectorAll('.page-customer-item'))
         .map(item => item.getAttribute('data-customer-id'));
+      // A rename must not drop links to customers this account cannot see.
+      if (isEdit && !can('customers', 'view')) {
+        for (const cid of getPageCustomerIds(state.pages.find(p => p.id === state.modalData.id)).map(String)) {
+          if (!selectedCustomers.includes(cid) && !state.customers.some(c => String(c.id) === cid)) selectedCustomers.push(cid);
+        }
+      }
 
       if (selectedCustomers.length === 0) {
         showNotification(
@@ -42327,7 +42333,7 @@ async function deleteReceipt(id) {
     return;
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
-  const amountUSD = receipt?.amountUSD?.toFixed(2) || '0.00';
+  const amountUSD = (Number(receipt?.amountUSD) || 0).toFixed(2);
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
@@ -42407,7 +42413,7 @@ async function deleteAd(id) {
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
-  const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
+  const amountUSD = (Number(ad?.amountUSD) || 0).toFixed(2);
   // Say where the money goes: a deleted ad's allocations stop counting, so its funded amount is free again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
@@ -43527,8 +43533,8 @@ function stopAd(id) {
   }
   
   const customer = state.customers.find(c => c.id === ad.customerId);
-  const adAmountUSD = ad.amountUSD || 0;
-  const currentSpentUSD = ad.spentUSD || 0;
+  const adAmountUSD = Number(ad.amountUSD) || 0;
+  const currentSpentUSD = Number(ad.spentUSD) || 0;
   // Prefill Meta's trusted spend but keep it editable: Meta may still charge after a pause and the
   // owner's later statement can be more accurate. The amount saved here is final.
   const metaSpendUSD = metaAdRealSpendUSD(ad);
@@ -44264,6 +44270,7 @@ async function updateExchangeRate(value) {
     return;
   }
   const previousRate = state.defaultExchangeRate;
+  if (rate === previousRate) return;  // blur + click both call this
   state.defaultExchangeRate = rate;
   const record = {
     id: generateId('rate'),
@@ -44509,8 +44516,7 @@ function exportData() {
   };
   
   const dataStr = JSON.stringify(exportState);  // compact: photos are inline, a pretty-printed file can outgrow the import cap
-  // The file is still handed over (it is the user's data), but it is never called a backup:
-  // the import refuses anything above the same limit.
+  // Still handed over, never called a backup: the import refuses a file this large.
   const backupTooLargeToRestore = (typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES;
   if (backupTooLargeToRestore) {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
@@ -44567,7 +44573,6 @@ function exportData() {
   }
 
   if (backupTooLargeToRestore && !serverPartialSnapshot) {
-    // Before: "exported successfully" and the backup reminder went quiet for 5 days, for a file that cannot be restored.
     addAuditLog('Export', 'system', 'Local data exported, but the file is above the import limit and cannot be restored');
     showNotification(
       state.language === 'ar' ? 'تم التصدير، لكنه ليس نسخة احتياطية' : 'Exported, but not a usable backup',
@@ -45220,12 +45225,10 @@ async function init() {
       }
     } catch (_) {}
   }, 3000);
-  // Detect backend (multi-user internet mode). A packaged phone app targets a
-  // known server, so it asks /api/auth/me straight away: any definite answer
-  // proves the server is reachable AND settles the session in the same round
-  // trip (one request instead of health -> auth/me -> needs-setup). Only a
-  // network failure falls back to the health probe. Browsers keep the health
-  // probe: for them it decides whether a backend exists at all.
+  // Detect backend (multi-user internet mode). A packaged phone app targets a known server, so it
+  // asks /api/auth/me at once: a definite answer proves the server is reachable AND settles the
+  // session (one request, not health -> auth/me -> needs-setup); only a network failure falls back
+  // to the health probe. Browsers keep the probe: it decides whether a backend exists.
   const packagedMobileBoot = !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
   let bootProbe = null;
   if (packagedMobileBoot && typeof apiAuthMeProbe === 'function') {
@@ -45569,7 +45572,7 @@ async function init() {
   const params = new URLSearchParams(window.location.search);
   const connectString = params.get('sys_connect');
   if (connectString && state.serverMode) {
-    // The server is the only source of truth here: a link must never point this device's data elsewhere.
+    // Server mode: a link never points this device's data elsewhere.
     addSecurityLog('cloud_connect_rejected', 'sys_connect ignored in server mode');
   } else if (connectString) {
     try {
@@ -45681,12 +45684,10 @@ async function init() {
   }
 }
 
-// Local mode keeps ALL business data (and the in-app auto-backups) inside
-// this browser's evictable storage: iOS Safari deletes every kind of site
-// storage after 7 days of Safari use without a visit, and Chrome/Android can
-// evict under disk pressure. There is no server copy, so remind the user to
-// export backups from Settings — at most once every 5 days, and not when a
-// recent export exists (the export flow records albayanNoteBackupExported()).
+// Local mode keeps ALL data (and the auto-backups) in this browser's evictable storage: iOS
+// Safari deletes site storage after 7 days without a visit, Chrome/Android under disk pressure.
+// No server copy exists, so remind the user to export a backup: at most once every 5 days, and
+// not when a recent export exists (albayanNoteBackupExported()).
 function maybeShowLocalDataDurabilityReminder() {
   try {
     if (isPackagedMobileApp()) return;
@@ -45707,12 +45708,9 @@ function maybeShowLocalDataDurabilityReminder() {
   } catch (_) {}
 }
 
-// Track whether the on-screen keyboard is likely open (a text-entry element
-// has focus) via body.keyboard-open. style.css hides the fixed bottom nav
-// while it is set: iOS Safari anchors position:fixed to the layout viewport,
-// so with the keyboard up the nav otherwise floats mid-screen over the form
-// being typed into. focusout re-checks after a tick so focus moving between
-// fields (or render()'s synchronous focus restore) never flickers the class.
+// body.keyboard-open while a text field has focus: style.css hides the fixed bottom nav then
+// (iOS Safari anchors position:fixed to the layout viewport, so the nav floated over the form).
+// focusout re-checks after a tick, so moving between fields or render()'s focus restore never flickers.
 (function setupKeyboardOpenTracking() {
   function isTextEntry(el) {
     if (!el || el === document.body) return false;
@@ -45741,13 +45739,10 @@ function maybeShowLocalDataDurabilityReminder() {
   });
 })();
 
-// The icon library (lucide, ~400 KB) is loaded `async` in index.html, so
-// DOMContentLoaded no longer waits for it and the first server request starts
-// as soon as the page is parsed; icons render through IconQueue, which
-// retries until the library exists. (The test harness sets readyState to
-// 'loading' on purpose to keep init() from auto-running.)
-// A throw late in init() left the loading screen up for good: show a reload card instead
-// (never a screen drawn from half-loaded data).
+// The icon library (lucide, ~400 KB) loads `async` in index.html: DOMContentLoaded does not wait
+// for it; icons render through IconQueue, which retries until the library exists. (The test
+// harness sets readyState to 'loading' on purpose to keep init() from auto-running.)
+// A throw late in init() left the loading screen up for good: show a reload card.
 function startAlbayan() {
   return init().catch(error => {
     console.error('[albayan] start-up failed:', error);

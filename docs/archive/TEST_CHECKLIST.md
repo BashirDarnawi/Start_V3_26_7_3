@@ -17,8 +17,8 @@
 ---
 
 ### Step 2: Login
-1. Enter email: `bashirdarnawi@gmail.com`
-2. Enter password: `123456`
+1. Enter email: `admin@example.com`
+2. Enter password: `<your-password>`
 3. Click "Sign In"
 
 **✅ Success:** You see the Analytics Dashboard  
@@ -158,8 +158,8 @@ If 5+ steps fail:
 
 ### Problem: Login doesn't work
 **Try:**
-- Make sure email is exactly: `bashirdarnawi@gmail.com`
-- Make sure password is exactly: `123456`
+- Make sure email is exactly: `admin@example.com`
+- Make sure password is exactly: `<your-password>`
 - No extra spaces
 
 ### Problem: Blank page

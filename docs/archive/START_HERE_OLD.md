@@ -30,8 +30,8 @@ python3 -m http.server 8000
 
 ### 2. Login
 ```
-Email: bashirdarnawi@gmail.com
-Password: 123456
+Email: admin@example.com
+Password: <your-password>
 ```
 
 ### 3. Start Using!
@@ -199,7 +199,7 @@ const PAYMENT_METHODS = [
 - Try different browser
 
 ### Login not working?
-- Use default credentials: bashirdarnawi@gmail.com / 123456
+- Use default credentials: admin@example.com / <your-password>
 - Check browser console for errors
 
 ## 🎓 What You Learned

@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass
 
 from fastapi import HTTPException
@@ -40,6 +41,70 @@ def signin_email_or_400(raw: object) -> str:
         return normalize_signin_email(raw)
     except ValueError:
         raise HTTPException(status_code=400, detail="Not a valid sign-in email") from None
+
+
+# Passwords an attacker tries first. Online guessing is throttled, so what matters is the short
+# list everybody knows: this is that list plus the patterns below, not a strength meter.
+_COMMON_PASSWORDS = frozenset("""
+password password1 password12 password123 password1234 passw0rd p@ssw0rd p@ssword p@ssw0rd1 pass1234 pass12345
+12345678 123456789 1234567890 0123456789 87654321 987654321 11111111 00000000 12341234 11223344 12344321 123123123
+1q2w3e4r 1q2w3e4r5t 1qaz2wsx 1qazxsw2 qwerty123 qwerty12 qwertyui qwertyuiop asdfghjk asdfghjkl zxcvbnm1 q1w2e3r4
+abcd1234 abc12345 abcdefgh a1b2c3d4 aa123456 a1234567 a12345678 123456a 123456aa 123456ab 123456abc 1234qwer qwer1234
+iloveyou iloveyou1 sunshine princess football baseball superman starwars whatever trustno1 welcome1 welcome123
+letmein1 letmein123 changeme changeme1 changeme123 default1 secret123 secret12 master123 monkey123 dragon123
+admin123 admin1234 admin12345 admin@123 admin2024 admin2025 admin2026 administrator root1234 toor1234 test1234
+testtest test12345 user1234 guest1234 login123 temp1234 demo1234 hello123 hello1234 internet computer mustang1
+michael1 jennifer jordan23 liverpool chelsea1 arsenal1 barcelona realmadrid juventus manchester ronaldo7 messi10
+mohamed123 mohammed123 ahmed123 ahmed1234 ali123456 mahmoud123 mustafa123 abdullah123 libya123 libya2011 libya2024
+libya2025 libya2026 tripoli123 benghazi123 misrata123 bismillah allah123 allahakbar albayan albayan1 albayan123
+albayan2024 albayan2025 albayan2026 albayanhub
+""".split())
+_GUESSABLE_WORDS = frozenset({"albayan", "albayanhub", "admin", "administrator", "password", "welcome", "qwerty", "letmein", "login"})
+WEAK_PASSWORD_DETAIL = (
+    "This password is too easy to guess. Use at least 8 characters that are not a common password, "
+    "a simple sequence, only a few digits, or your own name or e-mail. "
+    "كلمة المرور سهلة التخمين. استخدم 8 أحرف على الأقل، وليست كلمة شائعة أو تسلسلاً بسيطاً أو أرقاماً قليلة أو اسمك أو بريدك."
+)
+
+
+def weak_password_reason(password: object, *identity: object) -> str | None:
+    """Why a NEW password is refused, or None. ``identity``: the account's e-mail and name.
+
+    Refused: under 8 characters, a well-known password, one or two repeated characters, a straight
+    run ("12345678", "abcdefgh"), fewer than 10 digits and nothing else, or a known word, the
+    e-mail name or a part of the person's name followed only by digits and symbols ("albayan2026").
+    Passwords already stored are not touched; this is asked when one is set or changed.
+    """
+    text = unicodedata.normalize("NFKC", str(password or ""))
+    folded = text.casefold().strip()
+    if len(text) < 8:
+        return "short"
+    if folded in _COMMON_PASSWORDS:
+        return "common"
+    if len(set(folded)) <= 2:
+        return "repeated"
+    if folded.isdigit() and len(folded) < 10:
+        return "digits"
+    steps = {ord(b) - ord(a) for a, b in zip(folded, folded[1:])}
+    if steps in ({1}, {-1}):
+        return "sequence"
+    words = set(_GUESSABLE_WORDS)
+    for item in identity:
+        own = unicodedata.normalize("NFKC", str(item or "")).casefold().strip()
+        if own:
+            words.add(own)
+            words.add(own.split("@")[0])
+            words.update(part for part in re.split(r"[\s@._+-]+", own) if len(part) >= 4)
+    base = folded.rstrip("0123456789!@#$%^&*()._-+=?~ ")
+    if len(base) >= 3 and base in words:
+        return "guessable"
+    return None
+
+
+def require_strong_password(password: object, *identity: object) -> None:
+    """HTTP 400 with one bilingual sentence for a password weak_password_reason refuses."""
+    if weak_password_reason(password, *identity):
+        raise HTTPException(status_code=400, detail=WEAK_PASSWORD_DETAIL)
 
 
 def new_id(prefix: str) -> str:

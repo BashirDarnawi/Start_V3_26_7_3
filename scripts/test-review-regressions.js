@@ -4745,9 +4745,9 @@ async function main() {
   });
 
   await test('2026-11-16: the "new version" notice for an out-of-date tab draws once, in the page language, and "Later" removes it', async () => {
-    const mainPy = fs.readFileSync(path.join(__dirname, '..', 'server', 'main.py'), 'utf8');
-    const match = mainPy.match(/_STALE_BUILD_SCRIPT = """([\s\S]*?)"""/);
-    assert.ok(match, 'the notice script is in server/main.py');
+    const guardsPy = fs.readFileSync(path.join(__dirname, '..', 'server', 'store_guards.py'), 'utf8');
+    const match = guardsPy.match(/STALE_BUILD_SCRIPT = """([\s\S]*?)"""/);
+    assert.ok(match, 'the notice script is in server/store_guards.py');
     const runNotice = lang => {
       const made = [];
       const element = tag => {
@@ -4786,6 +4786,90 @@ async function main() {
     const ar = runNotice('ar');
     assert.equal(ar.overlays[0].attrs.dir, 'rtl');
     assert.ok(ar.texts.includes('يتوفر إصدار جديد') && ar.texts.every(text => !/[A-Za-z]{4}/.test(text)), ar.texts.join(' | '));
+  });
+
+  await test('round 3 (2026-11-16): a money box typed key by key reads "1,000" as one thousand, and still reads a comma as the decimal mark', async () => {
+    const { sandbox } = loadBrowserSource();
+    const typed = (text, decimals) => {
+      const input = { value: '', selectionStart: 0, setSelectionRange() {} };
+      for (const key of text) { input.value += key; input.selectionStart = input.value.length; sandbox.sanitizeMoneyInput(input, decimals); }
+      return input.value;
+    };
+    const pasted = (text, decimals) => { const input = { value: text, selectionStart: text.length, setSelectionRange() {} }; sandbox.sanitizeMoneyInput(input, decimals); return input.value; };
+    // Before: "1,000" typed on a keyboard became 1.00 and the receipt was saved as 1 (pasted, it was 1000).
+    for (const [text, expected] of [['1,000', '1000'], ['10,000', '10000'], ['1,250', '1250'], ['2,500', '2500'], ['1,250.50', '1250.50'], ['1,000,000', '1000000'], ['250,000', '250000']]) {
+      assert.equal(typed(text), expected, `typed ${text}`);
+      assert.equal(pasted(text), expected, `pasted ${text}`);
+    }
+    // A comma as the decimal key (phones set to the Libyan region), Arabic digits and the Arabic comma still work.
+    for (const [text, expected] of [['12,5', '12.5'], ['1,25', '1.25'], ['0,5', '0.5'], ['0,125', '0.12'], ['١٢,٥', '12.5'], ['12،5', '12.5'], ['1250', '1250'], ['7.125', '7.12']]) {
+      assert.equal(typed(text), expected, `typed ${text}`);
+    }
+    // A rate box (4 decimals) never treats its comma as a thousands mark.
+    assert.equal(typed('6,905', 4), '6.905');
+    assert.equal(typed('7,1255', 4), '7.1255');
+    // Deleting back to before the comma forgets it.
+    const input = { value: '', selectionStart: 0, setSelectionRange() {} };
+    for (const value of ['1', '1,', '1.0', '1', '1.', '1.2', '1.25', '1.250']) { input.value = value; sandbox.sanitizeMoneyInput(input, 2); }
+    assert.equal(input.value, '1.25', 'a dot the user typed is a decimal point, never a thousands mark');
+  });
+
+  await test('round 3 (2026-11-16): a photo still being prepared for one delivery never lands in the next delivery\'s form', async () => {
+    const { sandbox, run } = loadBrowserSource();
+    let form = { hidden: { dataset: {} } };
+    sandbox.document.getElementById = id => (id === 'delivery-receipt-image-data' ? form.hidden : null);
+    let release;
+    sandbox.__gate = new Promise(resolve => { release = resolve; });
+    run('compressImageToDataUrl = function () { return globalThis.__gate.then(() => "data:image/jpeg;base64,/9j/photoOfA"); }; isSafeReceiptPhotoSource = function () { return true; }; updateReceiptDeliveryCompletionComputed = function () {};');
+    const settle = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); };
+    // The driver picks the photo in receipt A's form, closes it and opens receipt B's before the photo is ready.
+    run("_deliveryCompletionOpen = { id: 'A', lastMod: 1 };");
+    sandbox.handleDeliveryReceiptPhotoUpload([{ name: 'a.jpg' }]);
+    run("_deliveryCompletionOpen = { id: 'B', lastMod: 1 };");
+    form = { hidden: { dataset: {} } };
+    release();
+    await settle();
+    assert.equal(form.hidden.dataset.imageData, undefined, 'before: A\'s proof photo filled B\'s required photo');
+    // The same form still gets its own photo.
+    sandbox.__gate = Promise.resolve();
+    sandbox.handleDeliveryReceiptPhotoUpload([{ name: 'b.jpg' }]);
+    await settle();
+    assert.equal(form.hidden.dataset.imageData, 'data:image/jpeg;base64,/9j/photoOfA');
+  });
+
+  await test('round 3 (2026-11-16): a receipt is not saved under the picked customer when the box now holds another customer\'s phone or name', async () => {
+    const attempt = async (typedText, { language = 'en' } = {}) => {
+      const { sandbox, state, run } = loadBrowserSource();
+      state.language = language;
+      state.customers = [
+        { id: 'cust-aaaaaaaa1', name: 'Ali Shop', phones: ['0911111111'], platform: 'Facebook' },
+        { id: 'cust-bbbbbbbb2', name: 'Bashir Store', phones: ['+218 92 222 2222'], platform: 'Facebook' }
+      ];
+      state.receipts = [];
+      run('getCustomersVisibleToCurrentUser = function () { return state.customers; }; _receiptPhotoUploadsInFlight = 0; _receiptPhoneRowsCache = null;');
+      const fields = { 'receipt-editing-id': { value: '' }, 'receipt-customer-id': { value: 'cust-aaaaaaaa1' }, 'receipt-phone-search': { value: typedText } };
+      const asked = [];
+      sandbox.document.getElementById = id => { asked.push(id); return fields[id] || null; };
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+      let reachedPastGuard = false;
+      try { await sandbox._saveReceiptFromModalInner(); } catch (_) { reachedPastGuard = true; }  // the stub form has no amount fields: going on throws
+      return { notes, reachedPastGuard: reachedPastGuard || asked.length > 4 };
+    };
+    // Customer A is picked; the box holds customer B's phone (any spelling of it) or B's name: refused, B is named.
+    for (const typedText of ['0922222222', '+218922222222', '٠٩٢٢٢٢٢٢٢٢', 'Bashir Store', '  bashir store ']) {
+      const { notes, reachedPastGuard } = await attempt(typedText);
+      assert.deepEqual(notes.map(note => [note.title, note.type]), [['Different customer', 'error']], typedText);
+      assert.ok(notes[0].message.includes('Bashir Store'), notes[0].message);
+      assert.equal(reachedPastGuard, false, `${typedText}: nothing else of the form is read`);
+    }
+    const arabic = await attempt('0922222222', { language: 'ar' });
+    assert.ok(arabic.notes[0].title === 'عميل مختلف' && arabic.notes[0].message.includes('Bashir Store'));
+    // The picked customer's own phone or name, and a number that belongs to nobody (a receipt-only contact), go on.
+    for (const typedText of ['0911111111', 'Ali Shop', '0915555555', '']) {
+      const { notes } = await attempt(typedText);
+      assert.equal(notes.filter(note => note.title === 'Different customer').length, 0, typedText);
+    }
   });
 
   await test('bug hunt 2026-11-16: an ad merge started while Meta is paused, unreachable or not connected changes nothing', async () => {

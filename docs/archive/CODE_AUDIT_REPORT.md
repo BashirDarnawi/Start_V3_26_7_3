@@ -97,8 +97,8 @@ Your app is **PRODUCTION READY** (for local use). You can:
 
 1. **Open `index.html`** in any modern browser
 2. **Login** with:
-   - Email: `bashirdarnawi@gmail.com`
-   - Password: `123456`
+   - Email: `admin@example.com`
+   - Password: `<your-password>`
 3. **Start using** all features immediately
 
 ### Features Working:
