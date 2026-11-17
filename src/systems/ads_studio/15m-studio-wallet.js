@@ -1439,6 +1439,7 @@ async function studioAccountPut(number) {
 function studioAccountSave() {
   const account = _studioAccount;
   if (account.saving) return;
+  account.formError = '';  // a failed save's message made every later press return before sending
   const number = studioParsePhone(account.draftNumber);
   if (!number) account.formError = adsStudioText('Type a WhatsApp number such as 091 234 5678 or +218 91 234 5678.', 'اكتب رقم واتساب مثل 091 234 5678، أو الرقم الدولي كاملاً مع رمز الدولة.');
   else if (!account.draftConsent) account.formError = adsStudioText(STUDIO_ERROR_TEXTS.CONSENT_REQUIRED[0], STUDIO_ERROR_TEXTS.CONSENT_REQUIRED[1]);

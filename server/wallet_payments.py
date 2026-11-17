@@ -70,6 +70,7 @@ def _lean_payment_entity(entity: dict[str, Any]) -> dict[str, Any]:
     lean["data"] = data
     return lean
 MAX_OPEN_PAYMENT_REQUESTS = 5
+MAX_PAYMENT_REQUESTS_PER_DAY = 30  # created per account in 24 hours, cancelled ones included (each can hold a 5 MB photo)
 MIN_PAYMENT_REQUEST_MINOR = 100  # kept for backward references ($1.00)
 # currency -> minimum charge in minor units (1.00 of each).
 WALLET_PAYMENT_CURRENCIES = {"USD": 100, "LYD": 100}
@@ -737,17 +738,19 @@ def create_wallet_payments_router(
                     if not same:
                         raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
                     return _for_viewer(prior, user)  # a replay may find it confirmed by now
-                open_count = 0
+                # Only ``status`` and the creation time are read. This used to load every request the
+                # account ever made WITH its receipt photo (up to 5 MB each, kept after a cancel) under
+                # the wallet lock; create, attach, cancel in a loop grew that without any bound.
+                open_count = made_today = 0
+                day_ago = now_ms() - 24 * 3600 * 1000
                 for row in conn.execute(
-                    text(
-                        "SELECT data_json FROM entities WHERE type = :type "
-                        "AND deleted = false AND created_by = :uid"
-                    ),
+                    text(json_fields_select_sql(("status",), ("created_at",), "type = :type AND deleted = false AND created_by = :uid")),
                     {"type": WALLET_PAYMENT_COLLECTION, "uid": uid},
                 ).mappings().all():
-                    data = json_loads(row.get("data_json") or "{}") or {}
-                    if str(data.get("status") or "") == "pending":
-                        open_count += 1
+                    open_count += str(row.get("f_status") or "") == "pending"
+                    made_today += int(row.get("created_at") or 0) >= day_ago
+                if made_today >= MAX_PAYMENT_REQUESTS_PER_DAY:
+                    raise HTTPException(status_code=429, detail="Too many charge requests today. Try again tomorrow, or ask the office.")
                 if open_count >= MAX_OPEN_PAYMENT_REQUESTS:
                     raise HTTPException(
                         status_code=409,

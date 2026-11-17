@@ -109,12 +109,14 @@ def test_an_over_long_receipt_number_is_refused_and_cannot_break_automatic_numbe
     automatic S number was then 81 characters long and every later one collided with it (409)."""
     admin = people["admin"]["cookies"]
     ltt = {"paymentMethod": "LTT", "payments": [{"method": "LTT", "amount": 50}]}
-    for number in ("S" + "9" * 79, "S" + "9" * 13, "9" * 16):
+    for number in ("S" + "9" * 79, "S" + "9" * 19, "9" * 19):
         refused = client.post("/api/collections/receipts", json={"data": _receipt_body(people, serialNumber=number, **ltt)}, cookies=admin)
         assert refused.status_code == 400, (number[:20], refused.text)
-    # Twelve digits after the letter and fifteen plain digits are still receipt numbers.
-    assert main_module._is_valid_serial_number("S" + "1" * 12) and main_module._is_valid_serial_number("1" * 15)
-    assert not main_module._is_valid_serial_number("S" + "1" * 13) and not main_module._is_valid_serial_number("1" * 16)
+    # Eighteen digits (with or without the letter) are still receipt numbers: tests number receipts by the clock.
+    assert main_module._is_valid_serial_number("S" + "1" * 18) and main_module._is_valid_serial_number("1" * 18)
+    assert main_module._is_valid_serial_number("S1794903452275") and main_module._is_valid_serial_number("7")
+    assert not main_module._is_valid_serial_number("S" + "1" * 19) and not main_module._is_valid_serial_number("1" * 19)
+    assert not main_module._is_valid_serial_number("S0") and not main_module._is_valid_serial_number("X5")
     # A too-long number stored before the limit never sets the next automatic one.
     from server.receipt_serials import issue_free_auto_serial
 

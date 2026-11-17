@@ -132,6 +132,21 @@ def scan_entity_rows(rows: Iterable[Mapping[str, Any]], issue_limit: int = 200) 
             records[entity_type][entity_id] = {field: data[field] for field in kept if field in data}
         if _has_non_finite_number(data):
             issue("error", "non_finite_number", entity_type, entity_id, "Record contains NaN or an infinite number")
+        # Traces of the text-cleaner bypass closed on 2026-11-17 (server/test_round3_sanitizer_2026_11_17.py):
+        # a field name stored with a space or an angle bracket at its edge was on its way to becoming a
+        # server-owned field, and a user-to-user transfer under a server-reserved key let a campaign
+        # withdrawal pay that transfer back out of nothing.
+        decorated = [key for key in data if isinstance(key, str) and (key != key.strip() or "<" in key or ">" in key)]
+        if decorated:
+            issue("error", "decorated_field_name", entity_type, entity_id,
+                  f"Record holds {len(decorated)} field name(s) with a space or an angle bracket at the edge; check it for forged server-owned fields")
+        if entity_type == "walletTransactions" and str(data.get("type") or "") == "transfer":
+            from .main import _RESERVED_IDEMPOTENCY_PREFIXES
+
+            wallet_key = str(data.get("idempotencyKey") or "").strip()
+            if wallet_key.split(":", 1)[0] + ":" in _RESERVED_IDEMPOTENCY_PREFIXES:
+                issue("error", "forged_reserved_wallet_key", entity_type, entity_id,
+                      "A user-to-user transfer carries a key reserved for the server's own wallet operations; review both wallets")
 
     phone_owners: dict[str, set[str]] = defaultdict(set)
     for customer_id, data in records.get("customers", {}).items():

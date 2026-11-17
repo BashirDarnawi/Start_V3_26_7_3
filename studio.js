@@ -11,6 +11,9 @@
 
 let _adsStudioActiveTab = 'dashboard';
 let _adsStudioWizardStep = 1;
+// The id of the NEW request this wizard is creating, minted once: a second Save after a lost answer
+// meets its own stored draft (addRecord's 409 path) instead of creating a second request.
+let _adsStudioNewDraftId = '';
 let _adsStudioEditingId = '';
 let _adsStudioEditingBaseline = 0;
 let _adsStudioDraft = null;
@@ -55,7 +58,7 @@ function resetAdsStudioSessionState() {
   }
   _adsStudioActiveTab = 'dashboard';
   _adsStudioWizardStep = 1;
-  _adsStudioEditingId = '';
+  _adsStudioEditingId = _adsStudioNewDraftId = '';
   _adsStudioEditingBaseline = 0;
   _adsStudioDraft = null;
   _adsStudioSearch = '';
@@ -2115,7 +2118,7 @@ async function duplicateAdsStudioCampaign(id, button = null, extend = false) {
     const sourceDays = adsStudioCampaignDays(src);
     const durationDays = sourceDays >= 1 && sourceDays <= 366 ? sourceDays : 7;
     _adsStudioPhotoToken++;
-    _adsStudioEditingId = '';
+    _adsStudioEditingId = _adsStudioNewDraftId = '';
     _adsStudioEditingBaseline = 0;
     _adsStudioWizardStep = 1;
     _adsStudioConfirmationChecked = false;
@@ -2216,7 +2219,7 @@ function onAdsStudioSearch(value) {
 
 function beginAdsStudioCampaign() {
   _adsStudioPhotoToken++;
-  _adsStudioEditingId = '';
+  _adsStudioEditingId = _adsStudioNewDraftId = '';
   _adsStudioEditingBaseline = 0;
   _adsStudioWizardStep = 1;
   _adsStudioDraft = newAdsStudioDraft();
@@ -3498,7 +3501,7 @@ async function saveAdsStudioDraftOnce(closeAfter = true, stabilityAttempt = 0) {
     }
     saved = await updateRecord(state.adCampaignRequests, id, payload, _adsStudioEditingBaseline || current._lastModified);
   } else {
-    id = Security.generateSecureId('campaign');
+    id = (_adsStudioNewDraftId ||= Security.generateSecureId('campaign'));
     saved = await addRecord(state.adCampaignRequests, { id, ...payload, status: 'Draft', createdAt: new Date().toISOString() });
   }
   if (!saved) {
@@ -3522,6 +3525,7 @@ async function saveAdsStudioDraftOnce(closeAfter = true, stabilityAttempt = 0) {
     && saveUserId === String(state.currentUser?.id || '');
   if (!sameSaveContext) return null;
   _adsStudioEditingId = id;
+  _adsStudioNewDraftId = '';
   if (current) {
     const liveDraft = _adsStudioDraft;
     _adsStudioDraft = {
@@ -3638,7 +3642,7 @@ async function submitAdsStudioCampaignOnce(id) {
     }
     showNotification(adsStudioText('Sent for review', 'تم الإرسال للمراجعة'), adsStudioText('Your team can now review this campaign.', 'يمكن للفريق الآن مراجعة هذه الحملة.'), 'success');
     _adsStudioDraft = null;
-    _adsStudioEditingId = '';
+    _adsStudioEditingId = _adsStudioNewDraftId = '';
     _adsStudioEditingBaseline = 0;
     _adsStudioConfirmationChecked = false;
     _adsStudioActiveTab = 'campaigns';
@@ -12469,6 +12473,7 @@ async function studioAccountPut(number) {
 function studioAccountSave() {
   const account = _studioAccount;
   if (account.saving) return;
+  account.formError = '';  // a failed save's message made every later press return before sending
   const number = studioParsePhone(account.draftNumber);
   if (!number) account.formError = adsStudioText('Type a WhatsApp number such as 091 234 5678 or +218 91 234 5678.', 'اكتب رقم واتساب مثل 091 234 5678، أو الرقم الدولي كاملاً مع رمز الدولة.');
   else if (!account.draftConsent) account.formError = adsStudioText(STUDIO_ERROR_TEXTS.CONSENT_REQUIRED[0], STUDIO_ERROR_TEXTS.CONSENT_REQUIRED[1]);

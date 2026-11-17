@@ -4872,6 +4872,46 @@ async function main() {
     }
   });
 
+  await test('round 3 (2026-11-17): a clothes order attempt left by a lost answer is not reused by the next sale typed in a new form', async () => {
+    const { sandbox, run } = loadBrowserSource();
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '15b-clothes.js'), 'utf8'));
+    const sale = { customerName: 'زبون', lines: [{ productId: 'p1', color: 'Red', size: 'M', qty: 1 }], paymentStatus: 'Paid' };
+    const attempt = (draftId) => JSON.parse(run(`JSON.stringify((a => ({ orderId: a.orderId, key: a.idempotencyKey }))(getClothesOrderMutationAttempt('create', '', null, ${JSON.stringify(sale)}, ${JSON.stringify(draftId)})))`));
+    const first = attempt('clothes_order_FORM1');
+    // The same form pressed again after a lost answer meets its own order (same id, same key).
+    assert.deepEqual(attempt('clothes_order_FORM1'), first);
+    // Before: a NEW form with the same fields got FORM1's id and key, the server replayed the first
+    // order, and the app said "Order created" although no second order existed and no stock was taken.
+    assert.equal(first.orderId, 'clothes_order_FORM1');
+    const second = attempt('clothes_order_FORM2');
+    assert.equal(second.orderId, 'clothes_order_FORM2', 'a new form is a new order, never a replay of the last one');
+    assert.ok(String(run(`_clothesPendingOrderMutations.get('create').fingerprint`)).includes('clothes_order_FORM2'));
+    // Edits are tied to the order and its version, as before: the same press is one attempt.
+    const editAttempt = version => run(`getClothesOrderMutationAttempt('update', 'order-1', ${version}, ${JSON.stringify(sale)})`);
+    assert.equal(editAttempt(5), editAttempt(5));
+    assert.notEqual(editAttempt(5), editAttempt(6));
+  });
+
+  await test('round 3 (2026-11-17): the classic campaign wizard sends ONE id for a new request, however often Save is pressed after a lost answer', async () => {
+    const { sandbox, state, run } = studioFixture();
+    state.currentUser = { id: 'u1', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn'] } };
+    state.adCampaignRequests = [];
+    const sent = [];
+    sandbox.addRecord = async (_list, record) => { sent.push(record.id); return false; };  // the server stored it, the answer never arrived
+    sandbox.showNotification = () => {};
+    run(`var __campaignIds = 0; Security.generateSecureId = prefix => prefix + '_' + (++__campaignIds);`);  // one new id per call, whatever the clock says
+    run(`_adsStudioEditingId = _adsStudioNewDraftId = ''; _adsStudioEditingBaseline = 0; _adsStudioDraft = { ...newAdsStudioDraft(), name: 'Offer' };`);
+    await run('saveAdsStudioDraftOnce(false)');
+    await run('saveAdsStudioDraftOnce(false)');
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0], sent[1], 'before: a second id, so a second request appeared after the next sync');
+    assert.ok(/^campaign[_-]/.test(String(sent[0])));
+    // A new wizard starts a new request.
+    run(`resetAdsStudioSessionState(); _adsStudioDraft = { ...newAdsStudioDraft(), name: 'Another' };`);
+    await run('saveAdsStudioDraftOnce(false)');
+    assert.notEqual(sent[2], sent[0]);
+  });
+
   await test('bug hunt 2026-11-16: an ad merge started while Meta is paused, unreachable or not connected changes nothing', async () => {
     const mergeWith = async status => {
       const { sandbox, state, run } = loadBrowserSource();

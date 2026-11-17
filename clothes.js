@@ -35,7 +35,9 @@ function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, o
   const act = String(action || '');
   const id = String(orderId || '');
   const slot = act === 'create' ? 'create' : `${act}:${id}`;
-  const fingerprint = JSON.stringify({ act, id, expectedLastModified: expectedLastModified ?? null, operationData });
+  // A create is tied to ITS form (draftId): an attempt left by a lost answer was reused by the next
+  // identical sale in a new form, which then "succeeded" with no second order and no stock taken.
+  const fingerprint = JSON.stringify({ act, id, form: act === 'create' ? String(draftId || '') : '', expectedLastModified: expectedLastModified ?? null, operationData });
   const prior = _clothesPendingOrderMutations.get(slot);
   if (prior?.fingerprint === fingerprint) return prior;
   const attempt = {

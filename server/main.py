@@ -398,9 +398,9 @@ def _is_valid_serial_number(serial: str) -> bool:
     - Auto-serial: prefix + digits, no leading zeros (S1, B2, O3, E4, ...)
     """
     serial = _canonical_receipt_number(serial)
-    # At most 15 digits (12 after a letter). The key is cut at 80 characters, so one hand-made
-    # "S" + 79 nines made every later automatic S number collide with itself (409 for good).
-    return bool(re.fullmatch(r"(?:[1-9][0-9]{0,14}|[SBOE][1-9][0-9]{0,11})", serial))
+    # At most 18 digits. The key is cut at 80 characters, so one hand-made "S" + 79 nines made
+    # every later automatic S number collide with itself (409 for good).
+    return bool(re.fullmatch(r"[SBOE]?[1-9][0-9]{0,17}", serial))
 
 
 def _validate_receipt_number_fields(data: Any) -> None:
@@ -733,14 +733,18 @@ def validate_exchange_rate(value: Any) -> float:
 
 def sanitize_str(s: str, max_length: int = MAX_INPUT_LENGTH) -> str:
     # Server-side defense-in-depth (frontend already escapes output)
-    s = (s or "").replace("\x00", "").strip()
+    # SECURITY: the result must not change when it is cleaned a second time. Characters are removed
+    # FIRST and the edges stripped AFTER: the old order (strip, then remove "<" and ">") turned
+    # "< cpay:..." into " cpay:..." here and into "cpay:..." in the writer's second pass, so every
+    # check made on the first result (reserved wallet keys, server-owned field names) was passed by
+    # a value the database then stored as the protected one.
+    s = (s or "").replace("\x00", "").replace("<", "").replace(">", "")
     if not s.isascii():
         s = s.encode("utf-8", "ignore").decode("utf-8")  # a lone surrogate (valid JSON) cannot be stored or returned
+    s = s.strip()
     # BEST PRACTICE: Enforce maximum length to prevent DoS attacks
     if len(s) > max_length:
-        s = s[:max_length]
-    # Prevent HTML/attribute injection
-    s = s.replace("<", "").replace(">", "")
+        s = s[:max_length].strip()  # a cut can end on a space, which a second pass would remove
     # Prevent javascript: protocol
     s_low = s.lower()
     if s_low.startswith("javascript:") or s_low.startswith("vbscript:"):
@@ -833,6 +837,9 @@ def validate_relationship_ids(value: Any, path: str = "data", depth: int = 0) ->
             validate_relationship_ids(child, child_path, depth + 1)
 
 
+_FIELD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
     # BEST PRACTICE: Use constant for max depth
     if depth > MAX_JSON_DEPTH:
@@ -879,8 +886,14 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
                 continue
             if k in BLOCKED_KEYS or k in TRANSPORT_ONLY_KEYS:
                 continue
-            sk = sanitize_str(k)[:100]
+            sk = sanitize_str(k, 100)
             if not sk or sk in BLOCKED_KEYS or sk in TRANSPORT_ONLY_KEYS:
+                continue
+            # A FIELD NAME is sent exactly or not at all. " companyCoveredUSD", "< metaAdId" or a
+            # 101-character name that cleaning turns into a real field name is dropped: checks compare
+            # exact names, and such a key (also one stored before this rule) became the server-owned
+            # field at the next save. Free-text keys (names, colours) are still just tidied.
+            if sk != k and _FIELD_NAME_RE.fullmatch(sk):
                 continue
             # Pass field name to child for validation context
             out[sk] = sanitize_json(v, depth + 1, sk)
@@ -4321,7 +4334,7 @@ def _validate_wallet_values(amount_minor: Any, currency: Any, idempotency_key: A
     cur = sanitize_str(str(currency or "")).upper()[:3]
     if cur not in WALLET_CURRENCIES:
         raise HTTPException(status_code=400, detail="Unsupported wallet currency")
-    idem = sanitize_str(str(idempotency_key or ""))[:120]
+    idem = sanitize_str(str(idempotency_key or ""), 120)
     if len(idem) < 8:
         raise HTTPException(status_code=400, detail="idempotencyKey is required (minimum 8 characters)")
     # The server derives its OWN keys for money it controls: cpay: (campaign

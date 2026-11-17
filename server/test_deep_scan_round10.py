@@ -105,7 +105,17 @@ def test_relationship_id_smuggled_through_a_rewritten_key_is_refused(staff):
                     json={"id": f"r10_cust_{TAG}", "data": {"name": "Smuggle", "phones": [f"09{secrets.randbelow(10**8):08d}"],
                                                             "customer<Id": "../x y"}},
                     cookies=staff["admin"])
-    assert r.status_code == 400, r.text
+    # Since 2026-11-17 a field name that cleaning would turn into another one ("customer<Id" ->
+    # "customerId") is dropped before anything reads it: either answer is safe as long as the
+    # smuggled id is never stored.
+    assert r.status_code in (200, 400), r.text
+    if r.status_code == 200:
+        assert "customerId" not in r.json()["data"] and "../x y" not in r.text
+    # A relationship id under its real name is still refused.
+    plain = client.post("/api/collections/customers",
+                        json={"data": {"name": "Smuggle", "phones": [f"09{secrets.randbelow(10**8):08d}"], "customerId": "../x y"}},
+                        cookies=staff["admin"])
+    assert plain.status_code == 400, plain.text
 
 
 # ---------------------------------------------------------------- full backup: a busy slot never burns the daily quota
