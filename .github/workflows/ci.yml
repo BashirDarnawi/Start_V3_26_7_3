@@ -57,7 +57,7 @@ jobs:
       - name: Generated files must be committed
         run: git diff --exit-code -- script.js studio.js studio-staff.js studio-pages.js clothes.js admin-tools.js meta-tools.js assets/tailwind.css www
       - name: Dependencies must have no known high-severity vulnerability
-        run: npm audit --audit-level=high
+        run: node scripts/npm-audit-check.js
 
   browser-e2e:
     # One `playwright test` run per leg: each leg gets its own runner, its own

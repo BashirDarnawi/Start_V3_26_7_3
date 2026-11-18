@@ -151,7 +151,7 @@ jobs:
       - name: Dependencies must have no known high-severity vulnerability today
         # CI audited them when the commit was pushed; a release days later must
         # not inherit an advisory published since. Cheap, no test re-run.
-        run: npm audit --audit-level=high
+        run: node scripts/npm-audit-check.js
       - name: Build immutable release image
         # Built from the COMMITTED bundles (script.js, studio.js, www/...): the
         # CI run the gate requires proves they are exactly what the source

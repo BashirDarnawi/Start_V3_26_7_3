@@ -74,7 +74,7 @@ assert.ok(publishJob.includes('environment: production'), 'The production enviro
 assert.ok(workflow.includes('docker save "$IMAGE:${{ needs.release.outputs.release }}"') && workflow.includes('docker load <'), 'The published image is the smoke-tested one, handed over as an artifact');
 assert.ok(workflow.includes('overwrite: true'), 'A re-run of all jobs must be able to replace the image artifact');
 assert.ok(workflow.includes('actions: read'), 'The gate needs permission to read CI runs');
-assert.ok(workflow.includes('npm audit --audit-level=high') && workflow.includes('pip_audit --no-deps'), 'Advisories published after the CI run must still block a release');
+assert.ok(workflow.includes('node scripts/npm-audit-check.js') && fs.readFileSync(path.join(__dirname, 'npm-audit-check.js'), 'utf8').includes("'high', 'critical'") && workflow.includes('pip_audit --no-deps'), 'Advisories published after the CI run must still block a release');
 assert.ok(workflow.includes('"${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF_TYPE}" == "tag"'), 'A manual run must never rebuild an existing rollback tag');
 const order = ['Load the smoke-tested image', 'Log in to Docker Hub', 'Publish immutable release image', 'Confirm Docker Hub holds a single linux/amd64 manifest', 'Refuse to move latest backwards', 'Publish latest image'];
 let cursor = -1;

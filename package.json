@@ -36,9 +36,9 @@
     "test": "npm run test:architecture && npm run test:mobile-config && npm run test:build-safety && npm run test:js && npm run test:mobile-ui && npm run test:design-shell && npm run test:money && npm run test:profitability && npm run test:review-regressions && npm run test:session-regressions && npm run test:social-native-regressions && npm run test:import-boundaries && npm run test:system-boundaries && npm run test:clothes-submit-boundaries && npm run test:sync-persistence-work && npm run test:render-performance && npm run test:legacy-data && npm run test:backend",
     "verify:generated": "node scripts/verify-artifacts.js",
     "verify:mobile": "node scripts/verify-artifacts.js --include-native",
-    "release:quality": "npm run build && npm run sync:www && npm test && npm run verify:generated && npm audit --audit-level=high && npm run test:e2e",
+    "release:quality": "npm run build && npm run sync:www && npm test && npm run verify:generated && node scripts/npm-audit-check.js && npm run test:e2e",
     "release:prepare": "npm run release:quality && npm run sync:mobile && npm run verify:mobile",
-    "release:check": "npm test && npm run verify:mobile && npm audit --audit-level=high && npm run test:e2e",
+    "release:check": "npm test && npm run verify:mobile && node scripts/npm-audit-check.js && npm run test:e2e",
     "release:image": "npm run release:quality && docker build -t bashird/albayan:latest -f server/Dockerfile .",
     "release:image:push": "node scripts/publish-image.js",
     "release:github": "node scripts/release-github.js"
