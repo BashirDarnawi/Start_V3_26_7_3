@@ -1227,6 +1227,30 @@ async function main() {
     f.state.language = 'ar';
     assert.equal(f.sandbox.getWorkspaceViewTitle('plans'), 'الباقات والاشتراكات');
   });
+  await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
+    const f = frameFixture(frameAdmin, 'customers');
+    const unnamed = html => {
+      const labelled = new Set(Array.from(html.matchAll(/<label[^>]*\sfor="([^"]+)"/g), m => m[1]));
+      return Array.from(html.matchAll(/<select\b[^>]*>/g), m => m[0])
+        .filter(tag => !/\saria-label="[^"]+"/.test(tag) && !labelled.has((tag.match(/\sid="([^"]+)"/) || [])[1]))
+        .map(tag => tag.slice(0, 90));
+    };
+    for (const language of ['en', 'ar']) {
+      f.state.language = language;
+      for (const [view, draw] of [['customers', 'renderCustomersView'], ['receipts', 'renderReceiptsView'], ['ads', 'renderAdsView'], ['wallet', 'renderWalletView']]) {
+        f.state.currentView = view;
+        const html = String(f.sandbox[draw]());
+        assert.ok(/<select\b/.test(html), `${view}: the screen drew its filters`);
+        assert.deepEqual(unnamed(html), [], `${language} ${view}: before, a screen reader announced these as an unnamed list`);
+      }
+    }
+    f.state.language = 'ar';
+    const receipts = String(f.sandbox.renderReceiptsView());
+    for (const name of ['الحالة', 'الدفع', 'الفترة', 'نوع الدين', 'التحصيل', 'الترتيب']) assert.ok(receipts.includes(`aria-label="${name}"`), name);
+    f.state.language = 'en';
+    f.state.liquidityTracking = null;
+    assert.ok(/id="liquidity-start-date"[^>]*aria-label="Start date"/.test(String(f.sandbox.renderAnalyticsView())), 'the Liquidity start-date field is named');
+  });
   await test('audit export pages by the last row cursor and a failed page downloads nothing (n=7)', async () => {
     const { sandbox } = loadBrowserSource();
     const notes = [];

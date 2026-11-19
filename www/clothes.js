@@ -1802,7 +1802,7 @@ function renderClothesShipmentsTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
-        <select onchange="setClothesShipmentStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
+        <select aria-label="${t('status')}" onchange="setClothesShipmentStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
           <option value="all" ${_clothesShipmentStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
           ${CLOTHES_SHIPMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesShipmentStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>
@@ -2720,11 +2720,11 @@ function renderClothesOrdersTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
-        <select onchange="setClothesOrderStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
+        <select aria-label="${t('status')}" onchange="setClothesOrderStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
           <option value="all" ${_clothesOrderStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
           ${CLOTHES_ORDER_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>
-        <select onchange="setClothesOrderPaymentFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
+        <select aria-label="${isAr ? 'الدفع' : 'Payment'}" onchange="setClothesOrderPaymentFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
           <option value="all" ${_clothesOrderPaymentFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل حالات الدفع' : 'All payments'}</option>
           ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderPaymentFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>

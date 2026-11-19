@@ -844,7 +844,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-amount" type="text" inputmode="decimal" min="0" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="0" oninput="sanitizeMoneyInput(this)" />
               </div>
               <div>
-                <label class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
+                <label for="wallet-transfer-currency" class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
                 <select id="wallet-transfer-currency" class="w-full px-4 py-3 glass-input rounded-xl">
                   ${currencyOptions}
                 </select>

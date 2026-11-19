@@ -301,3 +301,16 @@ pre.font-sans { font-family: inherit; }
 @media (max-width: 900px) {
   .app-main .hub-shell > .flex:first-child > .alb-mark:first-child { display: none; }
 }
+
+/* Tablets (600-900 px wide, a normal height): a dialog is a centred window as wide as its content needs,
+   not a sheet stretched along the bottom edge. While a field is in use it keeps the top position the
+   phone rules give it, so nothing moves under the finger when the keyboard opens. */
+@media (min-width: 600px) and (max-width: 900px) and (min-height: 501px) {
+  .app-dialog-overlay > .app-dialog-panel { margin: auto !important; }
+  .app-dialog-overlay > .app-dialog-panel.app-dialog-input-engaged { margin-top: 0 !important; }
+  .app-dialog-overlay > .app-dialog-panel.max-w-sm { max-width: 24rem !important; }
+  .app-dialog-overlay > .app-dialog-panel.max-w-md { max-width: 28rem !important; }
+  .app-dialog-overlay > .app-dialog-panel.max-w-lg { max-width: 32rem !important; }
+  .app-dialog-overlay > .app-dialog-panel.max-w-xl { max-width: 36rem !important; }
+  .app-dialog-overlay > .app-dialog-panel.max-w-2xl { max-width: min(100%, 42rem) !important; }
+}

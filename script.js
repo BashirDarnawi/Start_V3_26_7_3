@@ -17267,7 +17267,7 @@ function renderAnalyticsView() {
         const startDay = liquidity.tracking ? (d => new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10))(new Date(liquidity.startDate)) : '';
         const dateControl = isCurrentUserAdmin() ? `
             <div class="flex items-center gap-2 flex-wrap">
-              <input type="date" id="liquidity-start-date" ${startDay ? `value="${startDay}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
+              <input type="date" id="liquidity-start-date" ${startDay ? `value="${startDay}"` : ''} aria-label="${isAr ? 'تاريخ البداية' : 'Start date'}" class="glass-input px-3 py-2 rounded-lg text-sm" />
               <button onclick="updateLiquidityTrackingStart(document.getElementById('liquidity-start-date').value)"
                 class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
                 ${liquidity.tracking ? (isAr ? 'تغيير تاريخ البداية' : 'Change start date') : (isAr ? 'ابدأ التتبّع' : 'Start tracking')}
@@ -17613,7 +17613,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
           ) + coverableAdDebtUSD) * 100) / 100;
           const receiptsLabel = isAr ? `الوصولات ${linkedReceiptCount}` : `Receipts ${linkedReceiptCount}`;
           const linkedReceiptsButton = canSeeReceipts
-            ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(isAr ? `عرض ${linkedReceiptCount} من وصولات العميل ${c.name || ''}` : `View ${linkedReceiptCount} receipts linked to ${c.name || 'this customer'}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
+            ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(`${receiptsLabel}: ${c.name || ''}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
                 <i data-lucide="receipt" class="w-4 h-4"></i><span>${receiptsLabel}</span>
               </button>`
             : '';
@@ -17878,7 +17878,7 @@ function renderCustomersView() {
           <div class="customer-filter-controls workspace-filter-grid">
             <!-- Sort Dropdown -->
             <div class="relative min-w-0">
-              <select id="customer-sort" onchange="state.customerSort = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+              <select id="customer-sort" aria-label="${isAr ? 'الترتيب' : 'Sort'}" onchange="state.customerSort = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="newest" ${state.customerSort === 'newest' ? 'selected' : ''}>${isAr ? 'الأحدث أولاً' : 'Newest First'}</option>
                 <option value="oldest" ${state.customerSort === 'oldest' ? 'selected' : ''}>${isAr ? 'الأقدم أولاً' : 'Oldest First'}</option>
                 <option value="lastActive" ${state.customerSort === 'lastActive' ? 'selected' : ''}>${isAr ? 'آخر نشاط (حديثاً)' : 'Last Active (Recently)'}</option>
@@ -17896,7 +17896,7 @@ function renderCustomersView() {
             
             <!-- Financial Filter -->
             ${canSeeCustomerBalances ? `<div class="relative min-w-0">
-              <select id="customer-financial-filter" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+              <select id="customer-financial-filter" aria-label="${isAr ? 'الحالة المالية' : 'Financial status'}" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
                 <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
                 <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
@@ -18129,7 +18129,7 @@ function renderReceiptsView() {
           <!-- Filter Dropdowns -->
           <div class="receipt-filter-controls workspace-filter-grid">
             <!-- Status Filter -->
-            <select onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${t('status')}" onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
               <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ ${isArV ? 'مدفوع' : 'Paid'}</option>
               <option value="not_paid" ${['not_paid', 'pending', 'unpaid', 'not-paid'].includes(state.receiptStatusFilter) ? 'selected' : ''}>⏳ ${isArV ? 'غير مدفوع / دين' : 'Unpaid / Debt'}</option>
@@ -18138,7 +18138,7 @@ function renderReceiptsView() {
             </select>
             
             <!-- Payment Method Filter -->
-            <select onchange="updateReceiptFilter('payment', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptPaymentFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isArV ? 'الدفع' : 'Payment'}" onchange="updateReceiptFilter('payment', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptPaymentFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptPaymentFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل طرق الدفع' : 'All Payments'}</option>
               <option value="cash" ${state.receiptPaymentFilter === 'cash' ? 'selected' : ''}>💵 ${isArV ? 'نقدي' : 'Cash'}</option>
               <option value="usdt" ${state.receiptPaymentFilter === 'usdt' ? 'selected' : ''}>💎 USDT</option>
@@ -18147,7 +18147,7 @@ function renderReceiptsView() {
             </select>
             
             <!-- Date Filter -->
-            <select onchange="updateReceiptFilter('date', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptDateFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isArV ? 'الفترة' : 'Period'}" onchange="updateReceiptFilter('date', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptDateFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الأوقات' : 'All Time'}</option>
               <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 ${isArV ? 'اليوم' : 'Today'}</option>
               <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'آخر 7 أيام' : 'Last 7 days'}</option>
@@ -18155,7 +18155,7 @@ function renderReceiptsView() {
             </select>
 
             <!-- Customer Debt Source Filter -->
-            <select onchange="updateReceiptFilter('debt', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${(state.receiptDebtFilter || 'all') !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isArV ? 'نوع الدين' : 'Debt type'}" onchange="updateReceiptFilter('debt', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${(state.receiptDebtFilter || 'all') !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${(state.receiptDebtFilter || 'all') === 'all' ? 'selected' : ''}>${isArV ? 'كل أنواع الديون' : 'All Debt Types'}</option>
               <option value="any-debt" ${state.receiptDebtFilter === 'any-debt' ? 'selected' : ''}>${isArV ? 'أي دين' : 'Any Debt'}</option>
               <option value="delivery-debt" ${state.receiptDebtFilter === 'delivery-debt' ? 'selected' : ''}>🚚 ${isArV ? 'دين توصيل' : 'Delivery Debt'}</option>
@@ -18164,14 +18164,14 @@ function renderReceiptsView() {
             </select>
             
             <!-- Collected Filter -->
-            <select onchange="updateReceiptFilter('collected', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptCollectedFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isArV ? 'التحصيل' : 'Collection'}" onchange="updateReceiptFilter('collected', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptCollectedFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptCollectedFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل حالات التحصيل' : 'All Collection'}</option>
               <option value="collected" ${state.receiptCollectedFilter === 'collected' ? 'selected' : ''}>✓ ${isArV ? 'مُحصَّل' : 'Collected'}</option>
               <option value="not-collected" ${state.receiptCollectedFilter === 'not-collected' ? 'selected' : ''}>○ ${isArV ? 'غير مُحصَّل' : 'Not Collected'}</option>
             </select>
             
             <!-- Sort By -->
-            <select onchange="updateReceiptFilter('sort', this.value)" class="receipt-sort-control px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
+            <select aria-label="${isArV ? 'الترتيب' : 'Sort'}" onchange="updateReceiptFilter('sort', this.value)" class="receipt-sort-control px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer">
               <option value="newest" ${state.receiptSortBy === 'newest' ? 'selected' : ''}>🕐 ${isArV ? 'الأحدث أولاً' : 'Newest First'}</option>
               <option value="oldest" ${state.receiptSortBy === 'oldest' ? 'selected' : ''}>🕐 ${isArV ? 'الأقدم أولاً' : 'Oldest First'}</option>
               <option value="amount-high" ${state.receiptSortBy === 'amount-high' ? 'selected' : ''}>💰 ${isArV ? 'الأعلى مبلغاً' : 'Highest Amount'}</option>
@@ -19011,18 +19011,18 @@ function renderAdsView() {
         </div>` : ''}
         <div id="ads-advanced-filters" class="workspace-advanced-panel ${adAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${adAdvancedFiltersOpen ? 'false' : 'true'}">
           <div class="ad-filter-controls workspace-filter-grid">
-          <select onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
+          <select aria-label="${t('status')}" onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
             ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
           </select>
-          <select onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
+          <select aria-label="${isAr ? 'الدفع' : 'Payment'}" onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل طرق الدفع' : 'All Payments'}</option>
             <option value="pending_setup" ${adF.payment === 'pending_setup' ? 'selected' : ''}>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</option>
             <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>${isAr ? 'مدفوع' : 'Paid'}</option>
             <option value="not_paid" ${adF.payment === 'not_paid' ? 'selected' : ''}>${isAr ? 'غير مدفوع' : 'Not Paid'}</option>
             <option value="wont_pay" ${adF.payment === 'wont_pay' ? 'selected' : ''}>${isAr ? 'لن يدفع' : "Won't Pay"}</option>
           </select>
-          <select onchange="updateAdFilter('page', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm max-w-[180px]">
+          <select aria-label="${isAr ? 'الصفحة' : 'Page'}" onchange="updateAdFilter('page', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm max-w-[180px]">
             <option value="all" ${(adF.page || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الصفحات' : 'All Pages'}</option>
             ${visiblePages.map(p => `<option value="${Security.escapeHtml(p.id)}" ${adF.page === p.id ? 'selected' : ''}>${Security.escapeHtml(p.name || '')}</option>`).join('')}
           </select>
@@ -19496,7 +19496,7 @@ function renderDeliveriesView(logOnly) {
           ${roleLower === 'delivery' ? ''
             : `<label class="ops-status-editor"><span class="sr-only">${isAr ? 'الحالة' : 'Status'}</span><select onchange="updateDeliveryStatus('${safeId}', this.value)" class="ops-select">${statusChoices.map(s => `<option value="${esc(s)}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>`}
           <button type="button" onclick="showDeliveryDetails('${safeId}')" class="ops-button ops-button--quiet"><i data-lucide="arrow-up-right" class="w-4 h-4"></i><span>${isAr ? 'التفاصيل' : 'Details'}</span></button>
-          ${canShareDeliveryReceiptToWhatsApp(ad) ? `<button type="button" data-receipt-id="${safeId}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="ops-button ops-button--whatsapp" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}"><i data-lucide="message-circle" class="w-4 h-4"></i><span>WhatsApp</span></button>` : ''}
+          ${canShareDeliveryReceiptToWhatsApp(ad) ? `<button type="button" data-receipt-id="${safeId}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="ops-button ops-button--whatsapp" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على WhatsApp' : 'Share delivery information to WhatsApp'}"><i data-lucide="message-circle" class="w-4 h-4"></i><span>WhatsApp</span></button>` : ''}
           ${active ? `<button type="button" onclick="openDeliveryCancelModal('${safeId}')" class="ops-button ops-button--quiet ops-button--danger"><i data-lucide="x-circle" class="w-4 h-4"></i><span>${t('cancel')}</span></button>` : ''}
           ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' && statusChoices.includes('Office') ? `<button type="button" onclick="removeDeliveryMission('${safeId}')" class="ops-button ops-button--icon ops-button--danger" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}" aria-label="${isAr ? 'حذف المهمة' : 'Delete Mission'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
         </footer>
@@ -23005,7 +23005,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-amount" type="text" inputmode="decimal" min="0" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="0" oninput="sanitizeMoneyInput(this)" />
               </div>
               <div>
-                <label class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
+                <label for="wallet-transfer-currency" class="block text-sm font-medium mb-2">${isRTL ? 'العملة' : 'Currency'}</label>
                 <select id="wallet-transfer-currency" class="w-full px-4 py-3 glass-input rounded-xl">
                   ${currencyOptions}
                 </select>

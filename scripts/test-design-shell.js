@@ -306,4 +306,32 @@ check('the Arabic font is bundled with its licence and used after Inter', () => 
   assert.equal(ranges.length, 4);
   assert(ranges.every(range => range === 'U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFC'));
 });
+check('the shared frame: 264 px sidebar, a 72 px rail from 901 to 1279 px that opens for pointer and keyboard, mirrored without physical offsets', () => {
+  const frame = layoutCss.slice(layoutCss.indexOf('The shared frame (redesign M4)'));
+  assert(frame.length > 2000, 'the frame block is in assets/workspace-layout.css');
+  assert(frame.includes('.app-shell > .app-sidebar { width: 264px; }'));
+  assert(frame.includes('.app-shell > .app-sidebar ~ .app-main { margin-left: 0; margin-right: 0; margin-inline-start: 264px; }'));
+  const rail = frame.slice(frame.indexOf('@media (min-width: 901px) and (max-width: 1279.98px)'));
+  assert(rail.includes('.app-shell > .app-sidebar { width: 72px;') && rail.includes('.app-shell > .app-sidebar ~ .app-main { margin-inline-start: 72px; }'));
+  assert(rail.includes('.app-shell > .app-sidebar:focus-within { width: 264px;'), 'the keyboard opens the rail');
+  assert(rail.includes('@media (hover: hover)') && rail.includes('.app-shell > .app-sidebar:hover { width: 264px;'), 'so does a pointer that can hover');
+  // A closed rail keeps every name for screen readers: clipped, never display:none.
+  const closed = rail.slice(rail.indexOf('.app-sidebar:not(:hover):not(:focus-within) :is(.frame-link > span'));
+  assert(closed.includes('clip-path: inset(50%)') && !/\.frame-link > span[^}]*display: none/.test(rail));
+  // The frame's own rules place nothing with left/right: Arabic mirrors through logical properties.
+  const own = frame.slice(0, frame.indexOf('/* Wide screens: theme, language and sign-out'));
+  assert(!/[\s;{](left|right|margin-left|margin-right|padding-left|padding-right):\s*\d/.test(own.replace('margin-left: 0; margin-right: 0;', '')), 'a physical offset in the frame block');
+  // Phones keep 44 px lines in the drawer and in both menus.
+  assert(frame.includes('@media (max-width: 900px) {\n  .app-sidebar .frame-link { min-height: 44px; }\n  .frame-menu-list :is(button, a) { min-height: 44px; }'));
+});
+check('tablets get centred dialogs with their own width; the top position while a field is in use is kept', () => {
+  const tablet = layoutCss.slice(layoutCss.indexOf('@media (min-width: 600px) and (max-width: 900px) and (min-height: 501px)'));
+  assert(tablet.includes('.app-dialog-overlay > .app-dialog-panel { margin: auto !important; }'));
+  assert(tablet.includes('.app-dialog-overlay > .app-dialog-panel.app-dialog-input-engaged { margin-top: 0 !important; }'));
+  for (const [name, width] of [['sm', '24rem'], ['md', '28rem'], ['lg', '32rem'], ['xl', '36rem']]) {
+    assert(tablet.includes(`.app-dialog-overlay > .app-dialog-panel.max-w-${name} { max-width: ${width} !important; }`), name);
+  }
+  // The phone sheet rule this sits on top of is still there, for widths under 600 px.
+  assert(styleCss.includes('@media (max-width: 900px) and (min-height: 501px) {\n  .app-dialog-overlay > .app-dialog-panel {\n    margin-top: auto !important;\n    margin-bottom: 0 !important;'));
+});
 console.log(`${passed} shell presentation checks passed.`);
