@@ -874,11 +874,6 @@ function getCapacitorPlugin(name) {
   catch (_) { return null; }
 }
 
-function nativeFeatureAvailable(name, method = '') {
-  const plugin = getCapacitorPlugin(name);
-  return !!(plugin && (!method || typeof plugin[method] === 'function'));
-}
-
 async function _addNativeListener(plugin, eventName, handler) {
   if (!plugin?.addListener) return null;
   try {
@@ -2511,58 +2506,6 @@ const DataIntegrity = {
     return obj;
   }
 };
-
-// ==========================================
-// NUMBER PARSING UTILITIES - Strict validation
-// ==========================================
-
-/**
- * Parse a value to a number with strict validation.
- * Unlike parseFloat("123abc") which returns 123, this returns NaN for invalid input.
- * 
- * @param {any} value - Value to parse
- * @param {object} options - Optional configuration
- * @param {number} options.min - Minimum allowed value (returns NaN if below)
- * @param {number} options.max - Maximum allowed value (returns NaN if above)
- * @param {number} options.defaultValue - Value to return if parsing fails (default: NaN)
- * @returns {number} Parsed number or defaultValue if invalid
- */
-function strictParseNumber(value, options = {}) {
-  const { min, max, defaultValue = NaN } = options;
-  
-  // Handle null/undefined
-  if (value === null || value === undefined || value === '') {
-    return defaultValue;
-  }
-  
-  // If already a number
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return defaultValue;
-    if (min !== undefined && value < min) return defaultValue;
-    if (max !== undefined && value > max) return defaultValue;
-    return value;
-  }
-  
-  // Strict string parsing - the entire string must be a valid number
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed === '') return defaultValue;
-    
-    // Check if string is a valid number format (including scientific notation)
-    // This is stricter than parseFloat - it rejects "123abc"
-    if (!/^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
-      return defaultValue;
-    }
-    
-    const num = Number(trimmed);
-    if (!Number.isFinite(num)) return defaultValue;
-    if (min !== undefined && num < min) return defaultValue;
-    if (max !== undefined && num > max) return defaultValue;
-    return num;
-  }
-  
-  return defaultValue;
-}
 // ==========================================
 // LARGE DATA STORAGE - IndexedDB for big datasets
 // ==========================================
@@ -2844,43 +2787,6 @@ function idbGet(storeName, key) {
       const store = tx.objectStore(storeName);
       const req = store.get(key);
       req.onsuccess = () => resolve(req.result ?? null);
-      req.onerror = () => reject(req.error);
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
-
-/** Store one value, serialized on the write queue. */
-function idbPut(storeName, value) {
-  if (!db) return Promise.resolve(false);
-  return new Promise((resolve, reject) => {
-    const task = () => {
-      return new Promise((innerResolve, innerReject) => {
-        try {
-          const tx = db.transaction([storeName], 'readwrite');
-          const store = tx.objectStore(storeName);
-          const req = store.put(value);
-          req.onsuccess = () => innerResolve(true);
-          req.onerror = () => innerReject(req.error);
-        } catch (e) {
-          innerReject(e);
-        }
-      });
-    };
-    idbTransactionQueue.push(() => task().then(resolve).catch(reject));
-    processIdbQueue();
-  });
-}
-
-function idbDelete(storeName, key) {
-  if (!db) return Promise.resolve(false);
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction([storeName], 'readwrite');
-      const store = tx.objectStore(storeName);
-      const req = store.delete(key);
-      req.onsuccess = () => resolve(true);
       req.onerror = () => reject(req.error);
     } catch (e) {
       reject(e);
@@ -34515,11 +34421,6 @@ function getReceiptsForAd(customerId, pageId) {
   });
 }
 
-function getReceiptRemainingUSD(receipt) {
-  const usage = getReceiptUsageStats(receipt);
-  return usage.remainingUSD || 0;
-}
-
 function initAdFunding(adData = {}) {
   // COPY each allocation (the form must not mutate the saved ad before Save) and show 2 decimals:
   // stop-ad math leaves float residue (50.000000000000001).
@@ -36124,14 +36025,6 @@ function normalizeAdDriverBudgetUSD(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) return 0;
   return Math.round(amount * 100) / 100;
-}
-
-function getOriginalUnpaidDriverBudgetUSD() {
-  const ad = state.modalData;
-  if (!ad) return 0;
-  const isDriverDebt = getAdPaymentState(ad) === 'not_paid'
-    && String(ad.collectionMethod || '').toLowerCase() === 'driver';
-  return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
 }
 
 function getOriginalUnpaidAdBudgetUSD() {

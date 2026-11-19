@@ -37,11 +37,6 @@ function getCapacitorPlugin(name) {
   catch (_) { return null; }
 }
 
-function nativeFeatureAvailable(name, method = '') {
-  const plugin = getCapacitorPlugin(name);
-  return !!(plugin && (!method || typeof plugin[method] === 'function'));
-}
-
 async function _addNativeListener(plugin, eventName, handler) {
   if (!plugin?.addListener) return null;
   try {

@@ -286,43 +286,6 @@ function idbGet(storeName, key) {
   });
 }
 
-/** Store one value, serialized on the write queue. */
-function idbPut(storeName, value) {
-  if (!db) return Promise.resolve(false);
-  return new Promise((resolve, reject) => {
-    const task = () => {
-      return new Promise((innerResolve, innerReject) => {
-        try {
-          const tx = db.transaction([storeName], 'readwrite');
-          const store = tx.objectStore(storeName);
-          const req = store.put(value);
-          req.onsuccess = () => innerResolve(true);
-          req.onerror = () => innerReject(req.error);
-        } catch (e) {
-          innerReject(e);
-        }
-      });
-    };
-    idbTransactionQueue.push(() => task().then(resolve).catch(reject));
-    processIdbQueue();
-  });
-}
-
-function idbDelete(storeName, key) {
-  if (!db) return Promise.resolve(false);
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction([storeName], 'readwrite');
-      const store = tx.objectStore(storeName);
-      const req = store.delete(key);
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => reject(req.error);
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
-
 /** Puts and deletes in ONE transaction: all commit or none, so an interrupted save (close,
  * crash, quota) never mixes new chunks with old under a stale meta. Same write queue; never
  * await between the calls (the transaction would auto-commit early). */

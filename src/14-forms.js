@@ -2823,11 +2823,6 @@ function getReceiptsForAd(customerId, pageId) {
   });
 }
 
-function getReceiptRemainingUSD(receipt) {
-  const usage = getReceiptUsageStats(receipt);
-  return usage.remainingUSD || 0;
-}
-
 function initAdFunding(adData = {}) {
   // COPY each allocation (the form must not mutate the saved ad before Save) and show 2 decimals:
   // stop-ad math leaves float residue (50.000000000000001).
@@ -4432,14 +4427,6 @@ function normalizeAdDriverBudgetUSD(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) return 0;
   return Math.round(amount * 100) / 100;
-}
-
-function getOriginalUnpaidDriverBudgetUSD() {
-  const ad = state.modalData;
-  if (!ad) return 0;
-  const isDriverDebt = getAdPaymentState(ad) === 'not_paid'
-    && String(ad.collectionMethod || '').toLowerCase() === 'driver';
-  return isDriverDebt ? normalizeAdDriverBudgetUSD(ad.amountUSD) : 0;
 }
 
 function getOriginalUnpaidAdBudgetUSD() {
