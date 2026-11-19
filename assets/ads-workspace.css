@@ -571,14 +571,17 @@ html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {
    .studio-help itself (light and dark) and every surface uses the --ui-* tokens. A status never
    stands alone: each chip has its icon and words. Every control is at least 44px; long subjects,
    numbers and messages wrap; nothing may widen the page. */
-.studio-help, .studio-stop-sheet {
+/* Defined for the whole page: the unread badge in the Studio header, and any
+   status pill shown outside the help screens, use these colours too. Scoped to
+   the help screens only, the badge had no background and its count was invisible. */
+:root, .studio-help, .studio-stop-sheet {
   --studio-help-slate-fg: #475569; --studio-help-slate-bg: #f1f5f9;
   --studio-help-amber-fg: #92400e; --studio-help-amber-bg: #fef3c7;
   --studio-help-blue-fg: #1d4ed8; --studio-help-blue-bg: #dbeafe;
   --studio-help-green-fg: #166534; --studio-help-green-bg: #dcfce7;
   --studio-help-rose-fg: #be123c; --studio-help-rose-bg: #ffe4e6;
 }
-html.dark :is(.studio-help, .studio-stop-sheet) {
+html.dark, html.dark :is(.studio-help, .studio-stop-sheet) {
   --studio-help-slate-fg: #cbd5e1; --studio-help-slate-bg: #1e293b;
   --studio-help-amber-fg: #fcd34d; --studio-help-amber-bg: #422006;
   --studio-help-blue-fg: #93c5fd; --studio-help-blue-bg: #172554;
