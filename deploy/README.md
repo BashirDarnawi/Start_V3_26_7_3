@@ -82,8 +82,9 @@ One-time setup in Meta (owner):
    Sync shows the exact value with a Copy button). Keep **Strict Mode** and
    **Enforce HTTPS** on.
 5. The person who presses Connect needs a role on the Meta app (admin,
-   developer or tester) while the app is not live, and must be an admin of the
-   Meta business.
+   developer or tester), even when the app is live: with Standard Access, Meta
+   lets only people who have a role on the app grant these permissions. They
+   must also be an admin of the Meta business.
 6. In Meta Business Settings, a **system user** must already exist with the ad
    accounts and Pages assigned to it. If several exist, Albayan asks which one
    to use.
