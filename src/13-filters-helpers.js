@@ -5855,15 +5855,6 @@ async function uncollectReceipt(receiptId) {
   if (window.lucide) lucide.createIcons();
 }
 
-// Back-compat shim: old callers of the boolean toggle now route to the new
-// amount-based flow (open the modal to collect, or undo).
-function toggleReceiptCollected(receiptId) {
-  const receipt = state.receipts.find(r => r.id === receiptId);
-  if (!receipt) return;
-  if (receipt.collected) uncollectReceipt(receiptId);
-  else openCollectReceiptModal(receiptId);
-}
-
 // "Existing balance" mode for the NEXT new receipt: the normal receipt form, saved tagged
 // CARRIED_BALANCE (own colour + badge), its amount being the customer's REMAINING balance. Reset
 // on every modal open, so a normal receipt is never tagged.

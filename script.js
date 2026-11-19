@@ -3992,24 +3992,6 @@ function getSubscriptionExpiryForCurrentUser(serviceId) {
   return best;
 }
 
-// "Active until <date>" line for service cards, with a Renew link once
-// fewer than 7 days remain. Empty when there is no dated subscription.
-function renderSubscriptionStatusBadge(serviceId, isRTL) {
-  const expiry = getSubscriptionExpiryForCurrentUser(serviceId);
-  if (!expiry) return '';
-  const daysLeft = Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
-  let dateLabel = '';
-  try { dateLabel = new Date(expiry).toLocaleDateString(isRTL ? 'ar-LY' : 'en-GB'); } catch (_) { dateLabel = String(expiry); }
-  const soon = daysLeft <= 7;
-  const safeId = Security.escapeHtml(String(serviceId));
-  return `
-    <div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-bold ${soon ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}">
-      <i data-lucide="calendar-clock" class="w-3.5 h-3.5"></i>
-      <span>${isRTL ? 'نشط حتى' : 'Active until'} ${Security.escapeHtml(dateLabel)}</span>
-      ${soon ? `<span onclick="event.stopPropagation(); showSubscriptionModal('${safeId}')" role="button" tabindex="0" class="underline cursor-pointer">${isRTL ? 'جدّد الآن' : 'Renew now'}</span>` : ''}
-    </div>`;
-}
-
 // Plans (single service + bundles containing it) for the paywall, smallest
 // first. Server catalog when available; legacy client offer as fallback.
 function getPlansForService(serviceId) {
@@ -30063,15 +30045,6 @@ async function uncollectReceipt(receiptId) {
   if (window.lucide) lucide.createIcons();
 }
 
-// Back-compat shim: old callers of the boolean toggle now route to the new
-// amount-based flow (open the modal to collect, or undo).
-function toggleReceiptCollected(receiptId) {
-  const receipt = state.receipts.find(r => r.id === receiptId);
-  if (!receipt) return;
-  if (receipt.collected) uncollectReceipt(receiptId);
-  else openCollectReceiptModal(receiptId);
-}
-
 // "Existing balance" mode for the NEXT new receipt: the normal receipt form, saved tagged
 // CARRIED_BALANCE (own colour + badge), its amount being the customer's REMAINING balance. Reset
 // on every modal open, so a normal receipt is never tagged.
@@ -34632,30 +34605,6 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   return Math.round(total * 100) / 100;
 }
 
-function handleAdCustomerChange(customerId, preserveFunding = false) {
-  // Reset page and funding when customer changes
-  const pageSelect = document.getElementById('ad-page');
-  if (pageSelect) {
-    const pages = getPagesForCustomer(customerId);
-    pageSelect.innerHTML = `<option value="">${state.language === 'ar' ? 'اختر صفحة' : 'Select page'}</option>${pages.map(p => `<option value="${Security.escapeHtml(p.id)}">${Security.escapeHtml(p.name)}</option>`).join('')}`;
-    if (preserveFunding && state.modalData?.pageId && pages.some(p => p.id === state.modalData.pageId)) {
-      pageSelect.value = state.modalData.pageId;
-    } else {
-      pageSelect.value = '';
-    }
-  }
-
-  state.tempAdFunding = state.tempAdFunding || { allocations: [] };
-  if (!preserveFunding) {
-    state.tempAdFunding.allocations = [];
-    // MERGED funding is customer-scoped too. It used to survive a customer
-    // change, so an ad could be funded from ANOTHER customer's receipt.
-    clearAdMergeFunding();
-  }
-
-  renderAdFundingList();
-}
-
 // Receipts belong to a customer: whenever the ad's customer/page changes, the
 // merged-funds allocations from the previous customer must go with it.
 function clearAdMergeFunding() {
@@ -37413,19 +37362,6 @@ function selectLostOption(value) {
   if (window.lucide) lucide.createIcons();
 }
 
-
-function toggleCollection(btn, type) {
-  const wrapper = btn.parentElement;
-  const input = wrapper.querySelector('input');
-  input.value = type;
-  
-  const buttons = wrapper.querySelectorAll('button');
-  buttons.forEach(b => {
-    b.className = 'px-3 py-1 text-[10px] font-bold rounded-md transition-all text-slate-400 hover:text-slate-600';
-  });
-  
-  btn.className = 'px-3 py-1 text-[10px] font-bold rounded-md transition-all bg-white shadow text-indigo-600';
-}
 
 // REMOVED DUPLICATE updateReceiptTotals() - the correct version is defined earlier in the file
 

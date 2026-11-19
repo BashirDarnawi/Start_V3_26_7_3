@@ -643,24 +643,6 @@ function getSubscriptionExpiryForCurrentUser(serviceId) {
   return best;
 }
 
-// "Active until <date>" line for service cards, with a Renew link once
-// fewer than 7 days remain. Empty when there is no dated subscription.
-function renderSubscriptionStatusBadge(serviceId, isRTL) {
-  const expiry = getSubscriptionExpiryForCurrentUser(serviceId);
-  if (!expiry) return '';
-  const daysLeft = Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
-  let dateLabel = '';
-  try { dateLabel = new Date(expiry).toLocaleDateString(isRTL ? 'ar-LY' : 'en-GB'); } catch (_) { dateLabel = String(expiry); }
-  const soon = daysLeft <= 7;
-  const safeId = Security.escapeHtml(String(serviceId));
-  return `
-    <div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-bold ${soon ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}">
-      <i data-lucide="calendar-clock" class="w-3.5 h-3.5"></i>
-      <span>${isRTL ? 'نشط حتى' : 'Active until'} ${Security.escapeHtml(dateLabel)}</span>
-      ${soon ? `<span onclick="event.stopPropagation(); showSubscriptionModal('${safeId}')" role="button" tabindex="0" class="underline cursor-pointer">${isRTL ? 'جدّد الآن' : 'Renew now'}</span>` : ''}
-    </div>`;
-}
-
 // Plans (single service + bundles containing it) for the paywall, smallest
 // first. Server catalog when available; legacy client offer as fallback.
 function getPlansForService(serviceId) {

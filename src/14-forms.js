@@ -2888,30 +2888,6 @@ function getEditingAdExistingAllocationUSD(receiptId, kind = 'receipt') {
   return Math.round(total * 100) / 100;
 }
 
-function handleAdCustomerChange(customerId, preserveFunding = false) {
-  // Reset page and funding when customer changes
-  const pageSelect = document.getElementById('ad-page');
-  if (pageSelect) {
-    const pages = getPagesForCustomer(customerId);
-    pageSelect.innerHTML = `<option value="">${state.language === 'ar' ? 'اختر صفحة' : 'Select page'}</option>${pages.map(p => `<option value="${Security.escapeHtml(p.id)}">${Security.escapeHtml(p.name)}</option>`).join('')}`;
-    if (preserveFunding && state.modalData?.pageId && pages.some(p => p.id === state.modalData.pageId)) {
-      pageSelect.value = state.modalData.pageId;
-    } else {
-      pageSelect.value = '';
-    }
-  }
-
-  state.tempAdFunding = state.tempAdFunding || { allocations: [] };
-  if (!preserveFunding) {
-    state.tempAdFunding.allocations = [];
-    // MERGED funding is customer-scoped too. It used to survive a customer
-    // change, so an ad could be funded from ANOTHER customer's receipt.
-    clearAdMergeFunding();
-  }
-
-  renderAdFundingList();
-}
-
 // Receipts belong to a customer: whenever the ad's customer/page changes, the
 // merged-funds allocations from the previous customer must go with it.
 function clearAdMergeFunding() {
@@ -5669,19 +5645,6 @@ function selectLostOption(value) {
   if (window.lucide) lucide.createIcons();
 }
 
-
-function toggleCollection(btn, type) {
-  const wrapper = btn.parentElement;
-  const input = wrapper.querySelector('input');
-  input.value = type;
-  
-  const buttons = wrapper.querySelectorAll('button');
-  buttons.forEach(b => {
-    b.className = 'px-3 py-1 text-[10px] font-bold rounded-md transition-all text-slate-400 hover:text-slate-600';
-  });
-  
-  btn.className = 'px-3 py-1 text-[10px] font-bold rounded-md transition-all bg-white shadow text-indigo-600';
-}
 
 // REMOVED DUPLICATE updateReceiptTotals() - the correct version is defined earlier in the file
 
