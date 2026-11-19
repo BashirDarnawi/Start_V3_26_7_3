@@ -1059,3 +1059,64 @@ def test_stale_choice_rows_are_removed(graph, admins):
     mc.save_record(mc.CHOICE_ID, {"expiresAt": 9e15})
     _callback(admins["two"], state=state, code=AUTH_CODE)
     assert _result_code() == "no_system_user" and not mc.load_record(mc.CHOICE_ID)
+
+
+def test_paged_reads_every_page_and_stops_at_the_cap(monkeypatch):
+    # Facebook splits long lists into pages; the reader must follow "after" until there is no "next",
+    # and stop asking once it holds `cap` rows (no account beyond the first page may be dropped silently).
+    calls = []
+    pages = {
+        "": {"data": [{"id": "1"}, {"id": "2"}], "paging": {"cursors": {"after": "c1"}, "next": "https://x/next1"}},
+        "c1": {"data": [{"id": "3"}, {"id": "4"}], "paging": {"cursors": {"after": "c2"}, "next": "https://x/next2"}},
+        "c2": {"data": [{"id": "5"}], "paging": {"cursors": {"after": "c3"}}},  # no "next": the last page
+    }
+
+    def fake_graph(method, path, *, token="", params=None, **_kwargs):
+        calls.append((method, path, dict(params or {})))
+        return pages[(params or {}).get("after", "")]
+
+    monkeypatch.setattr(routes, "_graph", fake_graph)
+    rows = routes._paged("me/adaccounts", "token-value", "account_id,name", cap=500)
+    assert [row["id"] for row in rows] == ["1", "2", "3", "4", "5"]
+    assert [call[2].get("after", "") for call in calls] == ["", "c1", "c2"]
+    assert all(call[2]["limit"] == routes.PAGE_SIZE for call in calls)
+
+    calls.clear()
+    rows = routes._paged("me/adaccounts", "token-value", "account_id,name", cap=3)
+    assert [row["id"] for row in rows] == ["1", "2", "3"]
+    assert len(calls) == 2  # it stopped asking once it held 3 rows
+
+    calls.clear()
+    pages[""] = {"data": [{"id": "9"}], "paging": {"cursors": {"after": "c1"}}}  # a cursor but no "next"
+    assert [row["id"] for row in routes._paged("me/businesses", "token-value", "id,name", cap=25)] == ["9"]
+    assert len(calls) == 1
+
+
+def test_first_connect_starts_the_real_worker_when_no_hosting_key_existed(env):
+    # At boot with no hosting key the worker returns early; the first Connect must start it for real.
+    # The two loops are replaced by quiet stand-ins so the test makes no Graph call.
+    import threading
+
+    env.setenv("ALBAYAN_META_ACCESS_TOKEN", "")
+    env.setenv("ALBAYAN_META_BACKGROUND_SYNC", "true")
+
+    def quiet_loop(stop, *_args):
+        stop.wait(5)
+
+    env.setattr(meta_ads, "_worker_loop", quiet_loop)
+    env.setattr(meta_ads, "_media_worker_loop", quiet_loop)
+    env.setattr(meta_ads, "_refresh_meta_provider_state", lambda **_kwargs: None)
+    meta_ads.stop_meta_ads_worker()
+    meta_ads.start_meta_ads_worker()  # the boot call: no key yet, so nothing starts
+    assert not (meta_ads._WORKER_THREAD and meta_ads._WORKER_THREAD.is_alive())
+
+    _store()
+    meta_ads.meta_connection_changed()
+    worker, media = meta_ads._WORKER_THREAD, meta_ads._MEDIA_WORKER_THREAD
+    try:
+        assert worker is not None and worker.is_alive() and worker.name == "albayan-meta-ads-sync"
+        assert media is not None and media.is_alive()
+        assert threading.current_thread() is not worker
+    finally:
+        meta_ads.stop_meta_ads_worker()
+    assert not worker.is_alive() and not media.is_alive()
