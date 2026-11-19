@@ -314,3 +314,9 @@ pre.font-sans { font-family: inherit; }
   .app-dialog-overlay > .app-dialog-panel.max-w-xl { max-width: 36rem !important; }
   .app-dialog-overlay > .app-dialog-panel.max-w-2xl { max-width: min(100%, 42rem) !important; }
 }
+
+/* Wide screens: the page and the top bar use up to 1440 px of the space beside the sidebar
+   (they stopped at 1280 px, which left the Ads table cramped on a 1920 px monitor). */
+@media (min-width: 901px) {
+  .app-main > .app-content, .workspace-topbar > div { max-width: 1440px; }
+}

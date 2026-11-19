@@ -945,9 +945,9 @@ function renderClothesProductCard(p) {
     return `
       <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${chipClass}">
         <span>${Security.escapeHtml(label)}</span>
-        <button type="button" ${which} onclick="adjustClothesVariantQty('${p.id}', this.dataset.color, this.dataset.size, -1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1">−</button>
+        <button type="button" ${which} onclick="adjustClothesVariantQty('${p.id}', this.dataset.color, this.dataset.size, -1)" style="touch-action: manipulation" class="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-rose-200 dark:hover:bg-rose-800 flex items-center justify-center leading-none" title="-1" aria-label="${Security.escapeHtml(`${isAr ? 'إنقاص قطعة' : 'Remove one piece'}: ${label}`)}">−</button>
         <span class="font-bold">${qty}</span>
-        <button type="button" ${which} onclick="adjustClothesVariantQty('${p.id}', this.dataset.color, this.dataset.size, 1)" style="touch-action: manipulation" class="w-4 h-4 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1">+</button>
+        <button type="button" ${which} onclick="adjustClothesVariantQty('${p.id}', this.dataset.color, this.dataset.size, 1)" style="touch-action: manipulation" class="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-emerald-200 dark:hover:bg-emerald-800 flex items-center justify-center leading-none" title="+1" aria-label="${Security.escapeHtml(`${isAr ? 'إضافة قطعة' : 'Add one piece'}: ${label}`)}">+</button>
       </span>
     `;
   }).join('');
