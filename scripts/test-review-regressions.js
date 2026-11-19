@@ -1218,6 +1218,17 @@ async function main() {
     await keep.sandbox.metaFbDisconnect();
     assert.deepEqual(keep.calls.filter(c => c.method === 'POST').map(c => [c.url, c.body]), [['/api/meta-ads/connection/disconnect', {}]]);
     assert.equal(metaFbState(keep.html()), 'not-connected');
+    assert.deepEqual(keep.notes.map(n => n.type), ['success'], 'a revocable key needs no manual step');
+
+    // The stored key could not be read: the server says so, and the admin is told to remove the keys in Meta.
+    for (const language of ['en', 'ar']) {
+      const unreadable = await metaFbDialog({ language, fb: { ...metaFbBase(), reconnectNeeded: true }, routes: { '/api/meta-ads/connection/disconnect': () => ({ ok: true, code: 'disconnected', revoked: false, manualStep: 'server text', status: metaFbBase() }) } });
+      await unreadable.sandbox.metaFbDisconnect();
+      const warning = unreadable.notes.find(n => n.type === 'warning');
+      assert.ok(warning, `${language}: a warning notice follows the success notice`);
+      assert.ok(language === 'en' ? warning.message.includes('Meta Business Settings') && warning.message.includes('System users') : warning.message.includes('مستخدمي النظام'), warning.message);
+      assert.ok(!warning.message.includes('server text'), 'the notice uses its own fixed text');
+    }
 
     // A new opening starts clean: no ticks, pick or draft from the previous admin.
     keep.run("metaFbUi.ticks = ['111']; metaFbUi.pick = '61002'; metaFbUi.configDraft = '55555'; metaFbUi.error = 'old';");

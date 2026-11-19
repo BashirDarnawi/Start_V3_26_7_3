@@ -772,10 +772,12 @@ function metaFbDisconnect() {
     ? 'فصل فيسبوك؟ سيُحذف المفتاح المحفوظ، ويعود Albayan إلى مفتاح إعدادات الاستضافة إن وُجد.'
     : 'Disconnect Facebook? The stored key is removed and Albayan goes back to the hosting-settings key, if one is set.';
   if (!confirm(question)) return null;
-  return metaFbPost('disconnect', '/disconnect', {}, () => {
+  return metaFbPost('disconnect', '/disconnect', {}, result => {
     metaFbUi.ticks = null;
     metaFbUi.pick = '';
     showNotification(isAr ? 'تم الفصل' : 'Disconnected', metaFbText('disconnected', isAr), 'success');
+    // The stored key could not be read, so Meta was not asked to cancel it: the owner removes it by hand.
+    if (result?.manualStep) showNotification(isAr ? 'خطوة يدوية' : 'One manual step', isAr ? 'تعذّرت قراءة المفتاح المحفوظ، فلم يُطلب من ميتا إلغاؤه. في إعدادات الأعمال على ميتا افتح مستخدمي النظام، واختر مستخدم النظام واحذف مفاتيحه.' : 'The stored key could not be read, so Meta was not asked to cancel it. In Meta Business Settings, open System users, choose the system user and remove its keys.', 'warning');
     metaAdsLoadConnection();
   });
 }
