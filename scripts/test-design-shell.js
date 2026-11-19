@@ -321,8 +321,9 @@ check('the shared frame: 264 px sidebar, a 72 px rail from 901 to 1279 px that o
   // The frame's own rules place nothing with left/right: Arabic mirrors through logical properties.
   const own = frame.slice(0, frame.indexOf('/* Wide screens: theme, language and sign-out'));
   assert(!/[\s;{](left|right|margin-left|margin-right|padding-left|padding-right):\s*\d/.test(own.replace('margin-left: 0; margin-right: 0;', '')), 'a physical offset in the frame block');
-  // Phones keep 44 px lines in the drawer and in both menus.
+  // Phones keep 44 px lines in the drawer and in both menus; so does a touch screen of any width.
   assert(frame.includes('@media (max-width: 900px) {\n  .app-sidebar .frame-link { min-height: 44px; }\n  .frame-menu-list :is(button, a) { min-height: 44px; }'));
+  assert(frame.includes('@media (pointer: coarse) {\n  .app-sidebar .frame-link, .frame-menu-list :is(button, a) { min-height: 44px; }'));
 });
 check('tablets get centred dialogs with their own width; the top position while a field is in use is kept', () => {
   const tablet = layoutCss.slice(layoutCss.indexOf('@media (min-width: 600px) and (max-width: 900px) and (min-height: 501px)'));

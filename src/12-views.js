@@ -1517,6 +1517,7 @@ function renderNoAccessView() {
           <i data-lucide="log-out" class="w-5 h-5 inline mr-2"></i>
           ${t('logout')}
         </button>
+        <div class="mt-6">${renderAlwaysAvailableAccountLinks()}</div>
       </div>
     </div>
   `;
