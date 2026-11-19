@@ -611,7 +611,11 @@ function shellToggleRow(kind, id) {
   const button = document.getElementById(buttonId);
   const open = button ? button.getAttribute('aria-expanded') === 'true' : shellRowIsOpen(kind, id);
   if (open) { _shellExpanded.delete(key); _shellCollapsed.add(key); }
-  else { _shellExpanded.add(key); _shellCollapsed.delete(key); }
+  else {
+    // From 1280 px the details show in one panel beside the list (workspace-layout.css): one record at a time there.
+    if (typeof matchMedia === 'function' && matchMedia('(min-width: 1280px)').matches) for (const other of [..._shellExpanded]) if (other.startsWith(`${kind}:`)) _shellExpanded.delete(other);
+    _shellExpanded.add(key); _shellCollapsed.delete(key);
+  }
   render();
   // Rendering replaces the button; preserve keyboard focus without jumping
   // the page back to its top or opening an unrelated record.
@@ -675,7 +679,7 @@ function shellListRow({ kind, id, avatar, title, sub, trailing = '', facts = '',
       ${shellSummaryButton({ kind, id, avatar, title, sub, trailing, open })}
       ${!open && facts ? `<dl class="workspace-record-facts">${facts}</dl>` : ''}
       ${!open && actions ? `<footer class="workspace-record-actions">${actions}</footer>` : ''}
-      ${card ? `<div id="${shellRowDomId(kind, id, 'details')}" class="shell-row-body" aria-labelledby="${shellRowDomId(kind, id, 'toggle')}"${open ? '' : ' hidden'}>${card}</div>` : ''}
+      ${card ? `<div id="${shellRowDomId(kind, id, 'details')}" class="shell-row-body" aria-labelledby="${shellRowDomId(kind, id, 'toggle')}"${open ? '' : ' hidden'}>${open ? `<button type="button" class="shell-panel-close" data-shell-kind="${safeKind}" data-shell-id="${safeId}" onclick="shellToggleRow(this.dataset.shellKind, this.dataset.shellId)"><i data-lucide="x"></i>${state.language === 'ar' ? 'إغلاق' : 'Close'}</button>` : ''}${card}</div>` : ''}
     </article>`;
 }
 

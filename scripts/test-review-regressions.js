@@ -1342,6 +1342,20 @@ async function main() {
     const loading = String(bare.run('renderMainApp()'));
     assert.ok(loading.includes('<b>Clothes System</b>') && loading.includes('<nav class="workspace-sidebar-nav"></nav>') && loading.includes('class="frame-menu frame-account"') && !loading.includes('frame-locked'));
   });
+  await test('redesign round 2: the Filters button keeps its full name, in two parts, so a phone can show the first word and a screen reader still says both', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    state.expandedFilterPanels = { receipts: false };
+    const name = html => (String(html).match(/<span>(.*?<\/span>)<\/span>/) || [])[1];
+    assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 0)), 'Filters<span>&nbsp;&amp; sort</span>');
+    state.expandedFilterPanels = { receipts: true };
+    assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 2)), 'Hide<span> filters</span>');
+    assert.ok(String(sandbox.renderWorkspaceFilterToggle('receipts', 2)).includes('<span class="workspace-filter-count">2</span>'), 'the count of filters in force stays');
+    state.language = 'ar';
+    assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 0)), 'إخفاء<span> الفلاتر</span>');
+    state.expandedFilterPanels = { receipts: false };
+    assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 0)), 'الفلاتر<span> والترتيب</span>');
+  });
   // Redesign round 2: the browser's confirm and prompt boxes are gone everywhere. The app asks in its own
   // box (appConfirm, appPrompt): same question, same answer, in the app's look and language.
   const questionBoxFixture = (language = 'en') => {

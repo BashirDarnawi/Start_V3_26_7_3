@@ -48,6 +48,22 @@ migration. Existing records use the new views automatically.
   visible outside. **Details / Hide** retains all advanced controls, including
   print, collection, transfer, permissions and deletion. The overview's repeated
   facts/actions are removed while the full card is open.
+  From 1280 px **Details** opens the full card in a panel that takes the second
+  column, with a Close button, and the list keeps the first column; one record
+  is open at a time there (`shellToggleRow`). The panel is the card's own
+  `.shell-row-body`, placed by the "Details beside the list" block of
+  `assets/workspace-layout.css`; no markup is moved, and a browser without
+  `:has()` keeps the in-place details. Below 1280 px the details open in place
+  and several may stay open.
+- On phones (up to 600 px) the first record comes sooner: the **Filters**
+  button sits beside the search (its full name, "Filters & sort", stays in the
+  button for screen readers), the quick filters lose their small icons so they
+  fit one row, Customers shows its three totals in one row, and Deliveries
+  shows the four stage counters and the delivery log before the money summary.
+  Only decoration is left out there; every figure, filter and action stays.
+- The Home screen (Analytics) starts once: its name is in the frame's top bar
+  and in one `sr-only` heading; the figures under the opening block are a
+  section ("Breakdowns"), not a second page title.
 - At the user's September 15 request, Ads use their previous compact desktop
   table and expandable phone summaries, not the tall campaign-card redesign.
   Photos, creator, customer charge, Meta budget/spend, dates, account/history,

@@ -346,4 +346,63 @@ check('wide screens: messages sit at the bottom beside the sidebar, and keep the
   // The phone and the dialog-open position is the rule that was always there.
   assert(styleCss.includes('#notification-container {\n  pointer-events: none;\n  top: calc(4rem + var(--app-safe-top));'));
 });
+check('wide screens: a record opens its details in a panel beside the list, one at a time; narrower screens open in place and keep every opened one', () => {
+  // The rule lives in shellToggleRow: at 1280 px and wider, opening a record closes the others of its list.
+  let wide = false;
+  context.matchMedia = query => ({ matches: wide && query === '(min-width: 1280px)' });
+  const open = (kind, id) => { toggled = 'false'; context.shellToggleRow(kind, id); };
+  const isOpen = (kind, id) => context.shellRowIsOpen(kind, id);
+  open('receipts', 'p1'); open('receipts', 'p2'); open('customers', 'c1');
+  assert.deepEqual([isOpen('receipts', 'p1'), isOpen('receipts', 'p2'), isOpen('customers', 'c1')], [true, true, true], 'in place, several records stay open');
+  wide = true;
+  open('receipts', 'p3');
+  assert.deepEqual([isOpen('receipts', 'p1'), isOpen('receipts', 'p2'), isOpen('receipts', 'p3')], [false, false, true], 'beside the list there is one panel: the record just opened');
+  assert.equal(isOpen('customers', 'c1'), true, 'another list keeps its own opened record');
+  toggled = 'true'; context.shellToggleRow('receipts', 'p3');
+  assert.equal(isOpen('receipts', 'p3'), false, 'Hide and Close close it');
+  delete context.matchMedia;
+  open('receipts', 'p4');
+  assert.equal(isOpen('receipts', 'p4'), true, 'a browser without matchMedia opens in place');
+  // The open record carries the panel's Close button (drawn only in the panel); a closed one does not.
+  const opened = context.shellListRow({ kind: 'receipts', id: "r'1", title: 'Customer', sub: '#1', avatar: 'a', card: '<div class="glass-panel">FULL CARD</div>', open: true });
+  assert(/<div id="[a-z0-9-]+" class="shell-row-body" aria-labelledby="[a-z0-9-]+"><button type="button" class="shell-panel-close" data-shell-kind="receipts" data-shell-id="r&#39;1" onclick="shellToggleRow\(this\.dataset\.shellKind, this\.dataset\.shellId\)"><i data-lucide="x"><\/i>Close<\/button><div class="glass-panel">FULL CARD<\/div><\/div>/.test(opened), opened);
+  const closed = context.shellListRow({ kind: 'receipts', id: 'r2', title: 'Customer', sub: '#2', avatar: 'a', card: '<div class="glass-panel">FULL CARD</div>' });
+  assert(!closed.includes('shell-panel-close') && closed.includes(' hidden><div class="glass-panel">FULL CARD</div></div>'));
+  context.state.language = 'ar';
+  assert(context.shellListRow({ kind: 'receipts', id: 'r3', title: 'عميل', sub: '', avatar: '', card: '<p>x</p>', open: true }).includes('<i data-lucide="x"></i>إغلاق</button>'));
+  context.state.language = 'en';
+  // The panel is the opened card's own body, laid over the second column from 1280 px; nothing changes below that.
+  const rule = layoutCss.slice(layoutCss.indexOf('Details beside the list (redesign round 2'));
+  assert(/\.shell-panel-close \{ display: none; \}\n\/\*[^*]*\*\/\n@supports selector\(:has\(\*\)\) \{\n  @media \(min-width: 1280px\) \{/.test(rule), 'the Close button and the panel exist from 1280 px only, and only where the browser knows :has()');
+  assert(rule.includes('.workspace-directory-grid:has(> .workspace-record.is-open) > * { grid-column: 1; }'), 'the list keeps the first column');
+  assert(/\.workspace-directory-grid > \.workspace-record\.is-open > \.shell-row-body \{\s*position: absolute; inset-block: 0; inset-inline-end: 0; width: calc\(\(100% - 18px\) \/ 2\); border: 0;\s*\}/.test(rule), 'the details take the second column, mirrored in Arabic by a logical offset');
+  assert(/> \.shell-row-body > \.glass-panel \{\s*position: sticky; top: 129px; max-height: calc\(100vh - 145px\); overflow-y: auto;/.test(rule), 'the card stays in view while the list scrolls');
+  assert(rule.includes('.workspace-directory-grid > .workspace-record.is-open:has(~ .workspace-record.is-open) > .shell-row-body { display: none; }'), 'two opened records never draw two panels on top of each other');
+  assert(!/(?<![-\w])(left|right):/.test(rule.replace(/\/\*[\s\S]*?\*\//g, '')), 'no physical left/right in the panel rules');
+  // Below 1280 px the old rule still gives an opened card the whole row.
+  assert(layoutCss.includes('.workspace-record.is-open { grid-column: 1 / -1; }'));
+});
+check('phones: the Filters button sits beside the search, Customers totals share one row, and the delivery log comes before the money summary', () => {
+  const start = layoutCss.indexOf('Phones: the first record sooner (redesign round 2');
+  const rule = layoutCss.slice(start, layoutCss.indexOf('/* Home (finding B-17)', start));
+  assert(start > 0 && /\*\/\n@media \(max-width: 600px\) \{/.test(rule), 'the rules apply up to 600 px only');
+  // Search and Filters share the first row; the quick filters follow on the next.
+  assert(rule.includes('.ui-workspace .smart-filter-primary > .smart-search-field { order: 1; flex: 1 1 0; width: auto; min-width: 0; }'));
+  assert(rule.includes('.ui-workspace .smart-filter-primary > .workspace-filter-toggle { order: 2; flex: 0 0 auto; width: auto; padding-inline: 12px; }'));
+  assert(rule.includes('.ui-workspace .smart-filter-primary > .smart-filter-chips { order: 3; }'));
+  // "& sort" stays in the button's name for screen readers: clipped, never display:none.
+  assert(rule.includes('.ui-workspace .workspace-filter-toggle > span > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }'));
+  // Customers: three totals in one row.
+  assert(rule.includes('.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }'));
+  // Deliveries: heading, the four stage counters, the log, then the money summary. Nothing is hidden but the step numbers.
+  const order = name => Number((rule.match(new RegExp(`\\.ops-workspace\\.ops-deliveries > ${name} \\{ order: (\\d)`)) || [])[1]);
+  assert.deepEqual([order('\\.ops-hero'), order('\\.ops-pipeline'), order('\\.ops-board'), order(':is\\(\\.ops-kpi-rail, \\.ops-fee-strip\\)')], [1, 2, 3, 4]);
+  const hidden = (rule.match(/[^{}]+\{[^{}]*display: none;[^{}]*\}/g) || []).map(text => text.trim().split(' {')[0]);
+  assert.deepEqual(hidden, [
+    '.ui-workspace .workspace-filter-toggle > :is(i, svg):last-child',
+    '.ui-workspace .smart-filter-chip > :is(i, svg)',
+    '.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-layout > :last-child',
+    '.ops-workspace.ops-deliveries > .ops-pipeline > div > .ops-step'
+  ], 'only decoration is left out on phones (icons and step numbers): no figure, filter or action');
+});
 console.log(`${passed} shell presentation checks passed.`);

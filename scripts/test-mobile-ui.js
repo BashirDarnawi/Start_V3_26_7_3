@@ -1535,7 +1535,8 @@ check('global re-skin is flat: no aurora, solid cards, brand-blue primaries and 
 check('directory cards expose labelled facts and outside actions while preserving full details',
   managerShell.includes('function shellListRow({') &&
   managerShell.includes('class="shell-row-body" aria-labelledby=') &&
-  managerShell.includes("${open ? '' : ' hidden'}>${card}</div>") &&
+  // the details keep their place in the card; an open one starts with the Close button of the wide-screen panel
+  managerShell.includes("${open ? '' : ' hidden'}>${open ? `<button type=\"button\" class=\"shell-panel-close\" ") && managerShell.includes("</button>` : ''}${card}</div>` : ''}") &&
   managerShell.includes('function shellReceiptRow(receipt, customer, card, meta = {})') &&
   managerShell.includes('function shellCustomerRow(customer, stats, card, meta = {})') &&
   managerShell.includes('function shellPageRow(page, card, meta = {})') &&

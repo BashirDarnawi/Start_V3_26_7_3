@@ -399,3 +399,89 @@ pre.font-sans { font-family: inherit; }
 #app-ask .management-button-row > button { min-height: 44px; }
 .management-button.is-danger { border-color: #be123c; background: #be123c; color: #fff; }
 .management-button.is-danger:hover:not(:disabled) { border-color: #9f1239; background: #9f1239; }
+
+/* ==========================================================================
+   Details beside the list (redesign round 2, finding B-22). From 1280 px a record's details open in
+   a panel that takes the second column while the list keeps the first. Before, the opened card took
+   a whole row for itself and left the place beside the card above it empty. Narrower screens open
+   the details in place, as before.
+   No markup is moved: the panel is the opened card's own body, laid over the second column for the
+   height of the list, and the card inside it stays in view while the list scrolls. One record is
+   open at a time there (shellToggleRow); should two be open after a window was widened, the later
+   one is shown.
+   ========================================================================== */
+.shell-panel-close { display: none; }
+/* Only where the browser knows :has(): without it the rules below would lift the details out of the
+   card with no room made for them. Such a browser keeps the in-place details at every width. */
+@supports selector(:has(*)) {
+  @media (min-width: 1280px) {
+    .workspace-directory-grid:has(> .workspace-record.is-open) { position: relative; min-height: calc(100vh - 101px); }
+    .workspace-directory-grid:has(> .workspace-record.is-open) > * { grid-column: 1; }
+    .ui-workspace .workspace-directory-grid > .workspace-record.is-open { border-color: var(--ui-accent); box-shadow: 0 0 0 1px var(--ui-accent); }
+    .workspace-directory-grid > .workspace-record.is-open > .shell-row-body {
+      position: absolute; inset-block: 0; inset-inline-end: 0; width: calc((100% - 18px) / 2); border: 0;
+    }
+    .workspace-directory-grid > .workspace-record.is-open:has(~ .workspace-record.is-open) > .shell-row-body { display: none; }
+    .workspace-directory-grid > .workspace-record.is-open > .shell-row-body > .shell-panel-close {
+      position: sticky; top: 85px; z-index: 1; display: flex; align-items: center; gap: 6px;
+      min-height: 36px; margin-inline-start: auto; margin-bottom: 8px; padding: 6px 12px;
+      border: 1px solid var(--ui-line); border-radius: 999px; background: var(--ui-surface);
+      font-size: 13px; font-weight: 650; color: var(--ui-ink);
+    }
+    .workspace-directory-grid > .workspace-record.is-open > .shell-row-body > .shell-panel-close:hover { background: var(--ui-surface-soft); }
+    .workspace-directory-grid > .workspace-record.is-open > .shell-row-body > .shell-panel-close:focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 2px; }
+    .workspace-directory-grid > .workspace-record.is-open > .shell-row-body > .shell-panel-close > :is(i, svg) { width: 16px; height: 16px; }
+    .ui-workspace .workspace-directory-grid > .workspace-record.is-open > .shell-row-body > .glass-panel {
+      position: sticky; top: 129px; max-height: calc(100vh - 145px); overflow-y: auto;
+      border: 1px solid var(--ui-line) !important; border-radius: var(--ui-radius) !important;
+      background: var(--ui-surface) !important; box-shadow: var(--ui-shadow) !important;
+    }
+  }
+}
+
+/* ==========================================================================
+   Phones: the first record sooner (redesign round 2, finding B-16). Up to 600 px.
+   - Lists: the "Filters" button sits beside the search instead of taking a row of its own under the
+     quick filters. Its full name ("Filters & sort") stays for screen readers; the quick-filter chips
+     lose their small icons so that they usually fit one row.
+   - Customers: the three totals share one row of small tiles (they took two rows).
+   - Deliveries: the four stage counters and the delivery log come straight after the heading; the
+     money summary follows the log. Only the place on the screen changes: every figure is still there.
+   ========================================================================== */
+@media (max-width: 600px) {
+  .ui-workspace .smart-filter-primary > .smart-search-field { order: 1; flex: 1 1 0; width: auto; min-width: 0; }
+  .ui-workspace .smart-filter-primary > .workspace-filter-toggle { order: 2; flex: 0 0 auto; width: auto; padding-inline: 12px; }
+  .ui-workspace .smart-filter-primary > .smart-filter-chips { order: 3; }
+  .ui-workspace .workspace-filter-toggle > span > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .ui-workspace .workspace-filter-toggle > :is(i, svg):last-child { display: none; }
+  .ui-workspace .smart-filter-chip > :is(i, svg) { display: none; }
+
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > .col-span-2 { grid-column: auto; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { height: 100%; padding: 10px; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-layout > :last-child { display: none; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-label { font-size: 10px; line-height: 1.35; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-value { margin-top: 4px; font-size: 15px; line-height: 1.35; }
+
+  /* (.ops-workspace.ops-deliveries: one class more than the rules in operations-workspace.css, which load later.) */
+  .ops-workspace.ops-deliveries > .ops-hero { order: 1; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 16px; }
+  .ops-workspace.ops-deliveries > .ops-hero p:not(.ops-eyebrow) { margin-top: 4px; }
+  .ops-workspace.ops-deliveries > .ops-hero > .ops-hero-side { display: contents; }
+  .ops-workspace.ops-deliveries > .ops-hero .ops-hero-count { flex-direction: column; align-items: flex-end; gap: 2px; text-align: end; }
+  .ops-workspace.ops-deliveries > .ops-hero .ops-hero-count > span { max-width: 96px; font-size: 11px; line-height: 1.35; }
+  .ops-workspace.ops-deliveries > .ops-hero .ops-hero-actions { grid-column: 1 / -1; }
+  .ops-workspace.ops-deliveries > .ops-pipeline { order: 2; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .ops-workspace.ops-deliveries > .ops-pipeline > div { flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px; font-size: 10px; line-height: 1.3; }
+  .ops-workspace.ops-deliveries > .ops-pipeline > div > .ops-step { display: none; }
+  .ops-workspace.ops-deliveries > .ops-pipeline > div > strong { order: -1; margin-inline-start: 0; font-size: 17px; }
+  .ops-workspace.ops-deliveries > .ops-board { order: 3; }
+  .ops-workspace.ops-deliveries > :is(.ops-kpi-rail, .ops-fee-strip) { order: 4; }
+  .ops-workspace.ops-deliveries .ops-controls { padding: 12px; gap: 8px; }
+  .ops-workspace.ops-deliveries .ops-controls > label:not(.ops-search) { grid-column: auto; }
+  .ops-workspace.ops-deliveries .ops-controls > label > .ops-field-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .ops-workspace.ops-deliveries .ops-record-section > .ops-section-heading { margin-bottom: 10px; }
+}
+
+/* Home (finding B-17): the page starts once. Its name is in the frame's top bar and in a heading for
+   screen readers; that heading takes no room, so the block after it keeps the page's top position. */
+.ui-workspace [data-view="analytics"] h1.sr-only + * { margin-top: 0; }

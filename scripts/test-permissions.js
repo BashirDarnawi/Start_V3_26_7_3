@@ -1716,6 +1716,28 @@ check('viewSensitive gates the detailed breakdowns (Top Customers spend)', () =>
   assert(visible(sandbox.renderAnalyticsView()).includes('Top Customers (Spend)'), 'sensitive panel missing for permitted user');
 });
 
+check('Home starts once: its name is one heading for screen readers, and the figures below are a section, not a second title (B-17)', () => {
+  for (const user of [ADMIN, employee({ analytics: ['view'] }), employee({ analytics: ['view', 'viewFinancials', 'viewSensitive'] })]) {
+    loginAs(user);
+    const raw = String(sandbox.renderAnalyticsView());
+    const titles = raw.match(/<h1\b[^>]*>[^<]*<\/h1>/g) || [];
+    assert(titles.length === 1 && titles[0] === '<h1 class="sr-only">Analytics</h1>', `one page title, kept for screen readers: ${JSON.stringify(titles)}`);
+    const opening = raw.indexOf('data-manager-home-hero');
+    assert(opening > 0 && raw.indexOf('<h1 class="sr-only">') < opening, 'the title comes before the opening block');
+    assert(/<h2 class="text-xl font-bold[^"]*">Breakdowns<\/h2>/.test(raw), 'the figures are a section called Breakdowns');
+    assert(!/text-3xl font-bold[^"]*">Analytics</.test(raw), 'the big second title is gone');
+    // every figure that was under the second title is still there
+    assert(raw.includes('Advanced tracking across revenue, receipts, delivery, and activity') && raw.includes('Last 7 days:') && raw.includes('Collection Status'), 'a figure or note was lost');
+  }
+  loginAs(ADMIN);
+  S.language = 'ar';
+  try {
+    const raw = String(sandbox.renderAnalyticsView());
+    assert(/<h2 class="text-xl font-bold[^"]*">التفاصيل<\/h2>/.test(raw), 'Arabic section name');
+    assert((raw.match(/<h1\b/g) || []).length === 1, 'one page title in Arabic');
+  } finally { S.language = 'en'; }
+});
+
 console.log('\n=== DELIVERIES: viewStats + action gating ===');
 
 check('without viewStats, driver performance + money tiles are hidden', () => {

@@ -152,7 +152,7 @@ test('the Clothes System sits in the frame on a wide screen: its sections are li
   await page.locator('#app-sidebar .frame-head summary').click();
   await page.locator('#app-sidebar .frame-head .frame-menu-list button', { hasText: 'Clothes System' }).click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/clothes-system');
-  await expect(page.getByRole('heading', { name: 'Clothes System', exact: true })).toBeVisible();
+  await expect(page.locator('#workspace-view-content').getByRole('heading', { name: 'Clothes System', exact: true })).toBeVisible();
   // The system hands its four sections to the frame once its bundle is there.
   await expect.poll(() => sections(page)).toEqual(['Owner dashboard', 'Dashboard', 'Products', 'Shipments', 'Orders']);
   await expect(page.locator('#app-sidebar .frame-head summary')).toContainText('Clothes System');
@@ -233,4 +233,107 @@ test('the Ads Studio sits beside a narrow rail of the frame at every wide size, 
   await expect(page.locator('#app-sidebar')).toHaveCount(0);
   expect(await page.evaluate(() => Math.round(document.querySelector('.app-main').getBoundingClientRect().left))).toBe(0);
   expect(errors).toEqual([]);
+});
+
+// Two made-up customers for the list tests (added through the app's own save, as the other specs do).
+async function seedCustomers(page, tag) {
+  return page.evaluate(async tag => {
+    const made = [];
+    for (const [index, name] of [`Panel One ${tag}`, `Panel Two ${tag}`].entries()) {
+      const customer = { id: generateId('cust'), name, phones: [`091${String(Date.now() + index).slice(-7)}`], platform: 'Facebook', joinDate: new Date().toISOString(), profileLinks: [] };
+      if (!await addRecord(state.customers, customer)) throw new Error(`Customer seed failed: ${name}`);
+      made.push(customer.id);
+    }
+    return made;
+  }, tag);
+}
+
+test('from 1280 px a record opens its details in a panel beside the list, one at a time; below that they open in place', async ({ page }, testInfo) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  const [first, second] = await seedCustomers(page, `${testInfo.project.name}-${Date.now()}`);
+  await page.evaluate(() => navigateTo('customers'));
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/customers');
+  const row = id => page.locator(`[data-shell-row="customers"][data-shell-row-id="${id}"]`);
+  const toggle = id => row(id).locator('> button');
+  const body = id => row(id).locator('.shell-row-body');
+  const box = async locator => { const r = await locator.boundingBox(); return { left: Math.round(r.x), right: Math.round(r.x + r.width), top: Math.round(r.y), width: Math.round(r.width) }; };
+  await expect(toggle(first)).toBeVisible();
+  const grid = await box(page.locator('#customers-grid'));
+  const closedCard = await box(row(first));
+
+  // Details: the card keeps its place in the list (first column) and its details take the second column.
+  await toggle(first).click();
+  await expect(toggle(first)).toHaveAttribute('aria-expanded', 'true');
+  const card = body(first).locator('> .glass-panel');
+  await expect(card).toBeVisible();
+  const opened = await box(row(first));
+  const panel = await box(card);
+  expect(opened.left).toBe(closedCard.left);
+  expect(opened.width, 'the opened card stays one column wide (before: it took the whole row)').toBe(closedCard.width);
+  expect(panel.left, 'the details start right of the list column').toBeGreaterThanOrEqual(opened.right + 10);
+  expect(Math.abs(panel.right - grid.right)).toBeLessThanOrEqual(1);
+  expect(Math.abs(panel.width - closedCard.width)).toBeLessThanOrEqual(1);
+  // Every other record is in the first column too: nothing is left beside or under the panel.
+  expect(await page.evaluate(() => Array.from(document.querySelectorAll('#customers-grid > .workspace-record'), card => Math.round(card.getBoundingClientRect().left)).filter((left, index, all) => left !== all[0]).length)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+  // The actions of the full card are in the panel.
+  await expect(card.locator(`button[onclick="editCustomer('${first}')"]`)).toBeVisible();
+
+  // One at a time: another record takes the panel.
+  await toggle(second).click();
+  await expect(toggle(second)).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle(first)).toHaveAttribute('aria-expanded', 'false');
+  await expect(body(first)).toBeHidden();
+  await expect(body(second).locator('> .glass-panel')).toBeVisible();
+  // The panel stays in view while the list scrolls.
+  await page.evaluate(() => window.scrollTo(0, 400));
+  await expect.poll(async () => (await box(body(second).locator('> .glass-panel'))).top).toBe(129);
+  await expect(body(second).locator('.shell-panel-close')).toBeInViewport({ ratio: 1 });
+  // Close (in the panel) closes it and hands the focus back to the record's own button.
+  await body(second).locator('.shell-panel-close').click();
+  await expect(toggle(second)).toHaveAttribute('aria-expanded', 'false');
+  await expect(toggle(second)).toBeFocused();
+  await expect(page.locator('#customers-grid .shell-row-body:visible')).toHaveCount(0);
+
+  // In Arabic the panel is on the left of the list.
+  await page.evaluate(() => { window.scrollTo(0, 0); toggleLanguage(); });
+  await toggle(first).click();
+  await expect(body(first).locator('> .glass-panel')).toBeVisible();
+  const mirrored = { card: await box(row(first)), panel: await box(body(first).locator('> .glass-panel')) };
+  expect(mirrored.panel.right).toBeLessThanOrEqual(mirrored.card.left - 10);
+  await expect(body(first).locator('.shell-panel-close')).toHaveText('إغلاق');
+  await page.evaluate(() => toggleLanguage());
+
+  // Under 1280 px the details open in place, as before: the opened card takes the row, and there is no Close button.
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await expect(toggle(first)).toHaveAttribute('aria-expanded', 'true');
+  const inPlace = { card: await box(row(first)), grid: await box(page.locator('#customers-grid')), details: await box(body(first).locator('> .glass-panel')) };
+  expect(Math.abs(inPlace.card.width - inPlace.grid.width)).toBeLessThanOrEqual(1);
+  expect(inPlace.details.left).toBeGreaterThanOrEqual(inPlace.card.left);
+  expect(inPlace.details.right).toBeLessThanOrEqual(inPlace.card.right);
+  await expect(body(first).locator('.shell-panel-close')).toBeHidden();
+  await toggle(second).click();
+  await expect(toggle(first)).toHaveAttribute('aria-expanded', 'true');   // in place, several records may stay open
+  await expect(toggle(second)).toHaveAttribute('aria-expanded', 'true');
+  expect(errors).toEqual([]);
+});
+
+test('Home starts once: no second page title, and the figures follow as a section', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  await page.evaluate(() => navigateTo('analytics'));
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/analytics');
+  const content = page.locator('#workspace-view-content');
+  await expect(content.locator('h1')).toHaveCount(1);
+  await expect(content.getByRole('heading', { level: 1 })).toHaveText('Analytics');
+  // The page name is in the frame's top bar; the heading itself takes no room, so the opening block is first on the page.
+  const first = await content.locator('[data-manager-home-hero]').boundingBox();
+  const title = await content.locator('h1').boundingBox();
+  expect(title.width).toBeLessThanOrEqual(1);
+  expect(Math.round(first.y)).toBeLessThanOrEqual(110);
+  await expect(content.getByRole('heading', { level: 2, name: 'Breakdowns', exact: true })).toBeVisible();
+  await expect(page.locator('.workspace-topbar')).toContainText('Analytics');
 });

@@ -1270,7 +1270,7 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
   return `
     <button type="button" onclick="toggleWorkspaceFilterPanel('${safeView}')" class="workspace-filter-toggle touch-target ${expanded ? 'is-open' : ''}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${safeView}-advanced-filters">
       <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
-      <span>${expanded ? (isAr ? 'إخفاء الفلاتر' : 'Hide filters') : (isAr ? 'الفلاتر والترتيب' : 'Filters & sort')}</span>
+      <span>${(expanded ? (isAr ? 'إخفاء| الفلاتر' : 'Hide| filters') : (isAr ? 'الفلاتر| والترتيب' : 'Filters|&nbsp;&amp; sort')).replace('|', '<span>')}</span></span>
       ${count > 0 ? `<span class="workspace-filter-count">${count}</span>` : ''}
       <i data-lucide="chevron-${expanded ? 'up' : 'down'}" class="w-4 h-4"></i>
     </button>
@@ -1826,10 +1826,12 @@ function renderAnalyticsView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
+      <h1 class="sr-only">${t('analytics')}</h1>
       ${typeof renderManagerHomeHero === 'function' ? renderManagerHomeHero(receipts, ads, canViewFinancials) : ''}
+      <!-- One start: the block above opens the page; what follows is a section of it, not a second title. -->
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
+          <h2 class="text-xl font-bold text-slate-900 dark:text-white">${isAr ? 'التفاصيل' : 'Breakdowns'}</h2>
           <p class="text-sm text-slate-500">${isAr ? 'تتبّع متقدّم للإيرادات والوصولات والتوصيل والنشاط' : 'Advanced tracking across revenue, receipts, delivery, and activity'}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 sm:gap-3">
