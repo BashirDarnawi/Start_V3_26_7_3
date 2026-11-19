@@ -1127,6 +1127,106 @@ async function main() {
     sandbox.controlCenterSetPeriod('2026-07');
     assert.ok(!String(sandbox.renderControlCenterView()).includes('data-month-check'));
   });
+
+  // ---- redesign M4: the shared frame (area switcher, sections, one account menu) ----
+  const frameFixture = (user, view = 'receipts') => {
+    const f = loadBrowserSource();
+    f.run('Security').escapeHtml = plainEscape;
+    f.state.currentUser = user; f.state.users = [user]; f.state.currentView = view; f.state.language = 'en'; f.state.theme = 'light';
+    f.sandbox.isServerModeEnabled = () => true;
+    const sidebar = (at = view) => { f.state.currentView = at; return String(f.run('renderSidebar()')); };
+    // The lines of the section list, in order, as the screens they open.
+    const lines = html => Array.from((html.split('workspace-sidebar-nav')[1] || '').split('</nav>')[0].matchAll(/navigateTo\('([^']+)'\)/g), m => m[1]);
+    // The areas offered by the switcher (none when the account has a single area).
+    const areas = html => Array.from((html.split('class="frame-menu"')[1] || '').split('</details>')[0].matchAll(/navigateTo\('([^']+)'\)/g), m => m[1]);
+    return { ...f, sidebar, lines, areas };
+  };
+  const frameAdmin = { id: 'admin', name: 'Owner', role: 'Admin', permissions: {} };
+  await test('redesign M4 frame: the Admin switches between five areas, sees the owner dashboard first in each, and every Manager section without the Services Hub in between', async () => {
+    const f = frameFixture(frameAdmin);
+    const manager = f.sidebar('receipts');
+    assert.deepEqual(f.areas(manager), ['control-center', 'analytics', 'ads-studio', 'clothes-system', 'services-hub']);
+    assert.ok(/aria-current="true"><i data-lucide="briefcase-business"><\/i><span>Albayan Manager<\/span><i data-lucide="check">/.test(manager), 'the area on screen carries the tick');
+    assert.deepEqual(f.lines(manager), ['control-center', 'analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'reconciliation', 'collect', 'reminders', 'users', 'audit', 'settings'],
+      'before: Collect a debt and Reminders were only on Home and More, and the way to another area was the Services Hub');
+    assert.ok(manager.includes(`onclick="navigateTo('receipts')" aria-current="page" class="frame-link alb-nav-active"`));
+    assert.ok(!manager.includes("navigateTo('delivery-dashboard')"), 'the driver\'s own dashboard is not an Admin section');
+    for (const title of ['Workspace', 'Operations', 'Administration']) assert.ok(manager.includes(`<h2>${title}</h2>`));
+    // On the dashboard the sections are the dashboard itself and the other areas.
+    const home = f.sidebar('control-center');
+    assert.deepEqual(f.lines(home), ['control-center', 'analytics', 'ads-studio', 'clothes-system', 'services-hub']);
+    assert.ok(home.includes('<b>Owner dashboard</b><small>Switch area</small>') && home.includes('<h2>Areas</h2>'));
+    // The platform's own screens are one area with their own five sections.
+    for (const view of ['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet']) {
+      const html = f.sidebar(view);
+      assert.deepEqual(f.lines(html), ['control-center', 'services-hub', 'smart-systems', 'wallet', 'charge-wallet', 'plans'], view);
+      assert.ok(html.includes('<b>Services</b><small>Switch area</small>'), view);
+    }
+    // The iPhone app sells nothing: no way to Charge wallet or Plans from the frame either.
+    f.sandbox.inAppPurchasingHidden = () => true;
+    assert.deepEqual(f.lines(f.sidebar('wallet')), ['control-center', 'services-hub', 'smart-systems', 'wallet']);
+    // Arabic: the same structure, named in Arabic.
+    f.sandbox.inAppPurchasingHidden = () => false;
+    f.state.language = 'ar';
+    const arabic = f.sidebar('receipts');
+    for (const word of ['لوحة المالك', 'تبديل القسم', 'مساحة العمل', 'العمليات', 'الإدارة', 'تحصيل دين', 'التذكيرات', 'المظهر', 'اللغة']) assert.ok(arabic.includes(word), word);
+  });
+  await test('redesign M4 frame: an employee sees only what they may open: no owner dashboard, no Services, and Collect a debt or Reminders only with the permissions those screens ask for', async () => {
+    const employee = permissions => ({ id: 'emp1', name: 'Sara', role: 'Employee', permissions });
+    const office = frameFixture(employee({ analytics: ['view'], customers: ['view'], receipts: ['view', 'add'] }), 'customers');
+    const html = office.sidebar();
+    assert.deepEqual(office.lines(html), ['analytics', 'customers', 'receipts', 'reconciliation']);
+    assert.deepEqual(office.areas(html), [], 'one area: no switcher');
+    assert.ok(html.includes('<div class="frame-one">') && html.includes('<b>Albayan Manager</b>'));
+    for (const closed of ['control-center', 'services-hub', 'smart-systems', 'wallet', 'plans', 'charge-wallet', 'users', 'audit', 'settings', 'collect', 'reminders']) {
+      assert.ok(!html.includes(`navigateTo('${closed}')`), `${closed} is listed for an account that cannot open it`);
+    }
+    // Collect a debt needs receipts and customers.viewBalance; Reminders also needs customers.viewContacts.
+    const collector = frameFixture(employee({ customers: ['view', 'viewBalance'], receipts: ['view'] }), 'receipts');
+    assert.deepEqual(collector.lines(collector.sidebar()), ['customers', 'receipts', 'collect']);
+    const reminder = frameFixture(employee({ customers: ['view', 'viewBalance', 'viewContacts'], receipts: ['view'] }), 'receipts');
+    assert.deepEqual(reminder.lines(reminder.sidebar()), ['customers', 'receipts', 'collect', 'reminders']);
+    // A second area appears with the permission for it, and the switcher with it.
+    const withClothes = frameFixture(employee({ customers: ['view'], clothesProducts: ['viewOwn'] }), 'customers');
+    assert.deepEqual(withClothes.areas(withClothes.sidebar()), ['customers', 'clothes-system']);
+    const reviewer = frameFixture(employee({ receipts: ['viewOwn'], adCampaignRequests: ['view', 'review'] }), 'receipts');
+    assert.deepEqual(reviewer.areas(reviewer.sidebar()), ['receipts', 'ads-studio']);
+    // A driver: the delivery dashboard and Deliveries, as before.
+    const driver = frameFixture({ id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} }, 'delivery-dashboard');
+    assert.deepEqual(driver.lines(driver.sidebar()), ['delivery-dashboard', 'deliveries']);
+  });
+  await test('redesign M4 frame: one account menu holds profile, theme, language, privacy, account deletion and sign-out, also for an account with no access', async () => {
+    const controls = [`onclick="editUser('`, 'onclick="toggleTheme()"', 'onclick="toggleLanguage()"', 'href="https://albayanhub.com/privacy"', 'href="https://albayanhub.com/delete-account"', 'onclick="handleLogout()"'];
+    for (const user of [frameAdmin, { id: 'emp1', name: 'Sara', role: 'Employee', permissions: { customers: ['view'] } }, { id: 'none', name: 'New', role: 'Employee', permissions: {} }]) {
+      const f = frameFixture(user, user.id === 'none' ? 'no-access' : 'customers');
+      const html = f.sidebar();
+      const menu = html.split('class="frame-menu frame-account"')[1] || '';
+      for (const control of controls) assert.equal(menu.split(control).length - 1, 1, `${user.id}: ${control} once in the account menu`);
+      assert.ok(menu.includes(`<b>${user.name}</b><small>${user.role === 'Admin' ? 'Admin' : 'Employee'}</small>`));
+      assert.equal(html.includes('No access granted'), user.id === 'none');
+      if (user.id === 'none') assert.ok(!html.includes('workspace-sidebar-nav') && html.includes('Contact admin for permissions'));
+    }
+  });
+  await test('redesign M4 frame: the platform\'s own screens join the frame (sidebar, top bar with search, and on a phone the header and tab bar); the two systems keep their own navigation', async () => {
+    const f = frameFixture(frameAdmin);
+    f.sandbox.hasSubscription = () => true;
+    const draw = view => { f.state.currentView = view; f.sandbox.renderView = () => '<p>view</p>'; return String(f.run('renderMainApp()')); };
+    for (const view of ['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet', 'control-center', 'receipts', 'collect', 'more']) {
+      const html = draw(view);
+      assert.ok(html.includes('id="app-sidebar"') && html.includes('workspace-topbar') && html.includes('onclick="toggleCommandPalette()"'), `${view}: the sidebar and the search (before, the platform's screens had neither)`);
+      // On a phone: the same header and tab bar everywhere, so the Admin is never left on a screen with no way to the dashboard.
+      assert.ok(html.includes('mobile-app-header') && html.includes('mobile-bottom-nav') && html.includes(`onclick="navigateTo('control-center')" class="mobile-bottom-nav-item`), view);
+    }
+    for (const view of ['clothes-system', 'ads-studio']) {
+      const html = draw(view);
+      assert.ok(!html.includes('id="app-sidebar"') && !html.includes('workspace-topbar') && !html.includes('mobile-bottom-nav'), `${view} draws its own navigation`);
+    }
+    // The top bar names the screen it is on (it said "Albayan Manager" for every platform screen).
+    const titles = { 'services-hub': 'Services Hub', 'service-placeholder': 'Services Hub', 'smart-systems': 'Smart Systems', wallet: 'Wallet', 'charge-wallet': 'Charge wallet', plans: 'Plans & bundles', 'control-center': 'Control Center', receipts: 'Receipts' };
+    for (const [view, title] of Object.entries(titles)) assert.equal(f.sandbox.getWorkspaceViewTitle(view), title);
+    f.state.language = 'ar';
+    assert.equal(f.sandbox.getWorkspaceViewTitle('plans'), 'الباقات والاشتراكات');
+  });
   await test('audit export pages by the last row cursor and a failed page downloads nothing (n=7)', async () => {
     const { sandbox } = loadBrowserSource();
     const notes = [];

@@ -172,3 +172,132 @@ pre.font-sans { font-family: inherit; }
   .text-\[9px\], .text-\[10px\] { font-size: 11px; }
   .mobile-bottom-nav-item, .studio-v2-nav-item { font-size: 12px; }
 }
+
+/* ==========================================================================
+   The shared frame (redesign M4). One sidebar for the owner dashboard, Albayan
+   Manager and the platform's own screens: the area switcher on top, the
+   sections of the area on screen, one account menu at the bottom.
+   1280 px and wider: 264 px, always open. 901-1279 px: a 72 px rail of icons
+   that opens to full width while the pointer or the keyboard is in it.
+   900 px and narrower: the phone drawer, as before.
+   ========================================================================== */
+.frame-head { display: flex; align-items: center; gap: 8px; padding: 14px 12px 8px; }
+.frame-head > :first-child { flex: 1; min-width: 0; }
+.frame-mark { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border-radius: 11px; color: #fff; font-size: 15px; font-weight: 800; }
+.frame-avatar { border-radius: 999px; background: var(--ui-accent-soft); color: var(--ui-accent); }
+.frame-one { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 6px 8px; font-size: 14px; color: var(--ui-ink); }
+.app-sidebar .mobile-sidebar-close { display: none; flex: none; width: 44px; height: 44px; align-items: center; justify-content: center; border-radius: 12px; color: var(--ui-muted); }
+.app-sidebar .mobile-sidebar-close > :is(i, svg) { width: 20px; height: 20px; }
+
+.frame-menu { position: relative; }
+.frame-menu > summary {
+  display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 6px 8px;
+  border: 1px solid var(--ui-line); border-radius: 14px; background: var(--ui-surface);
+  cursor: pointer; list-style: none; user-select: none;
+}
+.frame-menu > summary::-webkit-details-marker { display: none; }
+.frame-menu > summary:hover { background: var(--ui-surface-soft); }
+.frame-menu[open] > summary { border-color: var(--ui-accent); }
+.frame-menu > summary > span:not(.frame-mark) { display: grid; flex: 1; min-width: 0; }
+.frame-menu > summary :is(b, small), .frame-one > b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frame-menu > summary b, .frame-one > b { font-size: 14px; font-weight: 700; line-height: 1.3; color: var(--ui-ink); }
+.frame-menu > summary small { font-size: 11.5px; line-height: 1.3; color: var(--ui-muted); }
+.frame-menu > summary > :is(i, svg) { flex: none; width: 16px; height: 16px; color: var(--ui-muted); }
+
+.frame-menu-list {
+  position: absolute; z-index: 5; inset-inline-start: 0; top: calc(100% + 6px);
+  display: grid; gap: 2px; width: 100%; min-width: 238px; padding: 6px;
+  border: 1px solid var(--ui-line); border-radius: 14px; background: var(--ui-surface);
+  box-shadow: 0 18px 40px -16px rgb(15 23 42 / 38%);
+}
+.frame-account { margin: 8px 12px 12px; }
+.frame-account > .frame-menu-list { top: auto; bottom: calc(100% + 6px); }
+.frame-menu-list :is(button, a) {
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+  width: 100%; min-height: 40px; padding: 8px 10px; border-radius: 10px;
+  font-size: 13.5px; font-weight: 550; text-align: start; color: var(--ui-ink);
+}
+.frame-menu-list :is(button, a):hover { background: var(--ui-surface-soft); }
+.frame-menu-list button > :is(b, span) { min-width: 0; font-weight: inherit; }
+.frame-menu-list button > :is(b, i + span, svg + span) { flex: 1; }
+.frame-menu-list button > b + span { flex: none; font-size: 12px; font-weight: 600; color: var(--ui-muted); }
+.frame-menu-list :is(i, svg) { flex: none; width: 18px; height: 18px; color: var(--ui-muted); }
+.frame-menu-list [aria-current] { background: var(--ui-accent-soft); color: var(--ui-accent); }
+.frame-menu-list [aria-current] :is(i, svg) { color: var(--ui-accent); }
+.frame-menu-list [data-account-policy-links] { display: contents; }
+.frame-menu-list [data-account-policy-links] a { padding-inline-start: 38px; color: var(--ui-ink) !important; }
+.frame-menu-list .frame-danger, .frame-menu-list .frame-danger :is(i, svg) { color: var(--ui-danger-text); }
+.frame-menu-list .frame-danger { margin-top: 4px; border-top: 1px solid var(--ui-line); border-radius: 0 0 10px 10px; padding-top: 10px; }
+
+.app-sidebar .workspace-sidebar-nav { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 12px 8px; }
+.app-sidebar .workspace-nav-group { margin-block: 10px 0; }
+.app-sidebar .workspace-nav-group > h2 { margin: 0 12px 4px; }
+[dir="rtl"] .app-sidebar .workspace-nav-group > h2 { font-size: 12px; letter-spacing: 0; }
+.app-sidebar .frame-link {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 38px; margin-block: 2px;
+  padding: 7px 12px; border-radius: 12px; overflow: hidden;
+  font-size: 14px; font-weight: 550; white-space: nowrap; text-align: start; color: var(--ui-ink);
+}
+.app-sidebar .frame-link > :is(i, svg) { flex: none; width: 19px; height: 19px; color: var(--ui-muted); }
+.app-sidebar .frame-link > span { overflow: hidden; text-overflow: ellipsis; }
+.app-sidebar .frame-link:hover { background: var(--ui-surface-soft); }
+.app-sidebar .frame-link.alb-nav-active, .app-sidebar .frame-link.alb-nav-active > :is(i, svg) { color: #fff; }
+.app-sidebar .frame-link.alb-nav-active:hover { background: #0649ed; }
+.app-sidebar :is(.frame-link, .frame-menu > summary, .frame-menu-list :is(button, a), .mobile-sidebar-close):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
+
+.frame-locked { display: grid; flex: 1; place-content: center; justify-items: center; gap: 4px; padding: 24px; text-align: center; }
+.frame-locked > :is(i, svg) { width: 44px; height: 44px; margin-bottom: 8px; color: var(--ui-line); }
+.frame-locked > p { font-size: 14px; font-weight: 600; color: var(--ui-ink); }
+.frame-locked > small { font-size: 12px; color: var(--ui-muted); }
+
+@media (max-width: 900px) {
+  .app-sidebar .frame-link { min-height: 44px; }
+  .frame-menu-list :is(button, a) { min-height: 44px; }
+}
+@media (min-width: 901px) {
+  .app-shell > .app-sidebar { width: 264px; }
+  .app-shell > .app-sidebar ~ .app-main { margin-left: 0; margin-right: 0; margin-inline-start: 264px; }
+  /* Short laptop screens: every section stays in view without scrolling the sidebar. */
+  @media (max-height: 760px) {
+    .app-sidebar .frame-link { min-height: 34px; padding-block: 5px; }
+    .app-sidebar .workspace-nav-group { margin-block: 6px 0; }
+    .frame-head { padding-top: 10px; }
+  }
+}
+@media (min-width: 901px) and (max-width: 1279.98px) {
+  .app-shell > .app-sidebar { width: 72px; transition: width .12s ease; }
+  .app-shell > .app-sidebar ~ .app-main { margin-inline-start: 72px; }
+  .app-shell > .app-sidebar { --frame-shadow: 24px 0 48px -28px rgb(15 23 42 / 45%); }
+  [dir="rtl"] .app-shell > .app-sidebar { --frame-shadow: -24px 0 48px -28px rgb(15 23 42 / 45%); }
+  .app-shell > .app-sidebar:focus-within { width: 264px; box-shadow: var(--frame-shadow) !important; }
+  @media (hover: hover) {
+    .app-shell > .app-sidebar:hover { width: 264px; box-shadow: var(--frame-shadow) !important; }
+    /* Closed rail under a resting pointer elsewhere: names are kept for screen readers, not drawn. */
+    .app-sidebar:not(:hover):not(:focus-within) :is(.frame-link > span, .frame-menu > summary > span:not(.frame-mark), .frame-one > b, .workspace-nav-group > h2) {
+      position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
+    .app-sidebar:not(:hover):not(:focus-within) .frame-menu > summary > :is(i, svg) { display: none; }
+    .app-sidebar:not(:hover):not(:focus-within) :is(.frame-menu > summary, .frame-one) { justify-content: center; padding-inline: 5px; border-color: transparent; }
+    .app-sidebar:not(:hover):not(:focus-within) .frame-link { justify-content: center; padding-inline: 0; }
+    .app-sidebar:not(:hover):not(:focus-within) .workspace-nav-group { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--ui-line); }
+  }
+  @media (hover: none) {
+    .app-sidebar:not(:focus-within) :is(.frame-link > span, .frame-menu > summary > span:not(.frame-mark), .frame-one > b, .workspace-nav-group > h2) {
+      position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
+    .app-sidebar:not(:focus-within) .frame-menu > summary > :is(i, svg) { display: none; }
+    .app-sidebar:not(:focus-within) :is(.frame-menu > summary, .frame-one) { justify-content: center; padding-inline: 5px; border-color: transparent; }
+    .app-sidebar:not(:focus-within) .frame-link { justify-content: center; padding-inline: 0; }
+    .app-sidebar:not(:focus-within) .workspace-nav-group { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--ui-line); }
+  }
+}
+
+/* Wide screens: theme, language and sign-out live in the frame's account menu, so the copies inside a
+   page (Services Hub header, More) are not drawn twice. Phones keep them: those pages have no frame there. */
+@media (min-width: 901px) {
+  .app-sidebar ~ .app-main .hub-shell button:is([onclick="toggleTheme()"], [onclick="toggleLanguage()"], [onclick="handleLogout()"]) { display: none; }
+}
+/* Phones: the frame's header already shows the account's initial, so the Services Hub greeting does not repeat it. */
+@media (max-width: 900px) {
+  .app-main .hub-shell > .flex:first-child > .alb-mark:first-child { display: none; }
+}

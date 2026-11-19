@@ -15109,15 +15109,21 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     toggleCommandPalette();
   }
-  // Escape to close modals/palettes
+  // Escape to close modals/palettes, then an open menu of the frame (focus returns to its button)
   if (e.key === 'Escape') {
+    const menu = document.querySelector('.frame-menu[open]');
     if (state.commandPaletteOpen) {
       toggleCommandPalette();
     } else if (state.activeModal) {
       closeModal();
+    } else if (menu) {
+      menu.open = false;
+      menu.firstElementChild.focus();
     }
   }
 });
+// A frame menu (areas, account) closes on any click outside its own button: one open at a time.
+document.addEventListener('click', e => document.querySelectorAll('.frame-menu[open]').forEach(menu => menu.firstElementChild.contains(e.target) || (menu.open = false)));
 
 // ==========================================
 // CLOUD SYNC (Simplified)
@@ -16553,10 +16559,17 @@ function getWorkspaceViewTitle(view = state.currentView) {
     more: state.language === 'ar' ? 'المزيد' : 'More',
     collect: state.language === 'ar' ? 'تحصيل دين' : 'Collect a debt',
     reminders: state.language === 'ar' ? 'التذكيرات' : 'Reminders'
-  }[view];
+  }[view] || platformViewName(view);
   if (custom) return custom;
   const key = keyByView[view];
   return key ? t(key) : t('adManager');
+}
+
+// The platform's own screens by the names they give themselves: the sidebar lists them, the top bar titles them.
+function platformViewName(view) {
+  const ar = state.language === 'ar';
+  const hub = ar ? 'مركز الخدمات' : 'Services Hub';
+  return { 'services-hub': hub, 'service-placeholder': hub, 'smart-systems': ar ? 'الأنظمة الذكية' : 'Smart Systems', wallet: t('wallet'), 'charge-wallet': ar ? 'اشحن المحفظة' : 'Charge wallet', plans: ar ? 'الباقات والاشتراكات' : 'Plans & bundles' }[view];
 }
 
 const FILTER_PANELS_STORAGE_KEY = 'albayan_filter_panels_v1';
@@ -16683,7 +16696,8 @@ function renderMobileBottomNavigation() {
 
 function renderMainApp(viewHTML = null) {
   const dir = getDir();
-  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
+  // The two systems draw their own navigation. Every other screen sits in the shared frame.
+  const showSidebar = !['clothes-system', 'ads-studio'].includes(state.currentView);
   
   return `
     <div class="app-shell ui-workspace flex min-h-screen" dir="${dir}" data-ui-design="studio-2026">
@@ -16726,169 +16740,66 @@ function renderAlwaysAvailableAccountLinks() {
   `;
 }
 
+// The sidebar of the shared frame: the area switcher, the sections of the area on screen and one
+// account menu. A line shows only to an account that may open it, by the rules each screen enforces.
 function renderSidebar() {
-  // Map nav items to their permission modules
-  const navItemPermissions = {
-    'control-center': 'analytics',
-    'analytics': 'analytics',
-    'customers': 'customers',
-    'receipts': 'receipts',
-    'pages': 'pages',
-    'ads': 'ads',
-    'deliveries': 'deliveries',
-    'reconciliation': 'analytics', // Part of analytics
-    'users': 'users',
-    'audit': 'auditLogs',
-    'settings': 'settings',
-    'clothes-system': 'clothesProducts'
-  };
-
-  const allNavItems = [
-    { id: 'control-center', icon: 'gauge', label: 'controlCenter' },
-    { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
-    { id: 'customers', icon: 'smile', label: 'customers' },
-    { id: 'receipts', icon: 'receipt', label: 'receipts' },
-    { id: 'pages', icon: 'file-text', label: 'pages' },
-    { id: 'ads', icon: 'megaphone', label: 'ads' },
-    { id: 'deliveries', icon: 'truck', label: 'deliveries' },
-    { id: 'reconciliation', icon: 'clipboard-check', label: 'jobReconciliation' },
-    { id: 'users', icon: 'users', label: 'users' },
-    { id: 'audit', icon: 'file-clock', label: 'auditLogs' },
-    { id: 'settings', icon: 'settings', label: 'settings' },
-  ];
-
-  // Clothes System entry for non-admins with clothes permissions (admins use the Services Hub);
-  // otherwise only their landing view could open it.
-  if (!isAdminRole(state.currentUser?.role)) {
-    allNavItems.push({ id: 'clothes-system', icon: 'shirt', label: 'clothesSystem' });
-  }
-
-  // Delivery users have a special dashboard view (not permission-gated).
-  if (isDeliveryRole(state.currentUser?.role)) {
-    allNavItems.unshift({ id: 'delivery-dashboard', icon: 'layout-dashboard', label: 'dashboard' });
-  }
-
-  // Filter nav items based on permissions (Admin sees all, others based on their permissions)
-  const navItems = allNavItems.filter(item => {
-    // Admin sees everything
-    if (isAdminRole(state.currentUser?.role)) return true;
-
-    // Delivery role: dashboard + deliveries always (permission records may be minimal); any other
-    // explicit grant still shows through the check below (union, not replacement).
-    if (isDeliveryRole(state.currentUser?.role)) {
-      if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
-    }
-
-    // The router refuses platform-owner views for staff: never list them.
-    if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;
-
-    // Check if user has view permission for this module
-    const permModule = navItemPermissions[item.id];
-    return currentUserHasPermission(permModule, 'view') ||
-           currentUserHasPermission(permModule, 'viewOwn');
-  });
-  
-  // If no nav items visible, show minimal sidebar
-  if (navItems.length === 0) {
-    return `
-      ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
-      <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
-        <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
-          <div class="flex items-center space-x-3">
-            <div class="w-10 h-10 alb-mark rounded-xl flex items-center justify-center text-white font-bold">A</div>
-            <span class="font-bold text-slate-800 dark:text-white">${t('adManager')}</span>
-          </div>
-          <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
-        </div>
-        <div class="flex-1 flex items-center justify-center p-6">
-          <div class="text-center">
-            <i data-lucide="lock" class="w-12 h-12 mx-auto text-slate-300 mb-3"></i>
-            <p class="text-sm text-slate-500">${state.language === 'ar' ? 'لا توجد صلاحية' : 'No access granted'}</p>
-            <p class="text-xs text-slate-400 mt-1">${state.language === 'ar' ? 'تواصل مع المدير للحصول على الصلاحيات' : 'Contact admin for permissions'}</p>
-          </div>
-        </div>
-        <div class="p-4 space-y-2 border-t border-white/10">
-          ${renderAlwaysAvailableAccountLinks()}
-          <button onclick="handleLogout()" class="w-full flex items-center justify-center space-x-2 px-4 py-3 rounded-xl font-medium text-rose-600 bg-rose-50 dark:bg-rose-900/20 hover:bg-rose-100">
-            <i data-lucide="log-out" class="w-5 h-5"></i>
-            <span>${t('logout')}</span>
-          </button>
-        </div>
-      </aside>
-    `;
-  }
-  
-  const showServicesHubLink = isCurrentUserAdmin();
-  const navGroups = [
-    { label: state.language === 'ar' ? 'مساحة العمل' : 'Workspace', ids: ['control-center', 'analytics', 'customers', 'receipts', 'pages', 'ads'] },
-    { label: state.language === 'ar' ? 'العمليات' : 'Operations', ids: ['deliveries', 'delivery-dashboard', 'reconciliation', 'clothesProducts', 'clothes-system'] },
-    { label: state.language === 'ar' ? 'الإدارة' : 'Administration', ids: ['users', 'audit', 'settings'] }
-  ];
-  // Keep unknown/future permitted routes visible rather than silently losing
-  // them when a new section is added to the existing permission-filtered list.
-  const groupedIds = new Set(navGroups.flatMap(group => group.ids));
-  navGroups.push({ label: state.language === 'ar' ? 'المزيد' : 'More', ids: navItems.filter(item => !groupedIds.has(item.id)).map(item => item.id) });
+  const isAr = state.language === 'ar';
+  const user = state.currentUser || {};
+  const admin = isAdminRole(user.role);
+  const view = state.currentView;
+  const may = id => admin || (!PLATFORM_ADMIN_ONLY_VIEWS.has(id) && shellCanOpen(id));
+  const collect = shellCanCollect();
+  const line = (id, icon, label, allowed = may(id)) => allowed ? `<button type="button" onclick="navigateTo('${id}')"${view === id ? ' aria-current="page"' : ''} class="frame-link${view === id ? ' alb-nav-active' : ''}"><i data-lucide="${icon}"></i><span>${label}</span></button>` : '';
+  const group = (label, lines) => lines ? `<section class="workspace-nav-group"><h2>${label}</h2>${lines}</section>` : '';
+  const manager =
+    group(isAr ? 'مساحة العمل' : 'Workspace', line('analytics', 'layout-dashboard', t('analytics')) + line('customers', 'smile', t('customers')) + line('receipts', 'receipt', t('receipts')) + line('pages', 'file-text', t('pages')) + line('ads', 'megaphone', t('ads'))) +
+    group(isAr ? 'العمليات' : 'Operations', line('delivery-dashboard', 'layout-dashboard', t('dashboard'), isDeliveryRole(user.role)) + line('deliveries', 'truck', t('deliveries')) + line('reconciliation', 'clipboard-check', t('jobReconciliation')) + line('collect', 'hand-coins', isAr ? 'تحصيل دين' : 'Collect a debt', collect) + line('reminders', 'bell-ring', isAr ? 'التذكيرات' : 'Reminders', collect && can('customers', 'viewContacts'))) +
+    group(isAr ? 'الإدارة' : 'Administration', line('users', 'users', t('users')) + line('audit', 'file-clock', t('auditLogs')) + line('settings', 'settings', t('settings')));
+  // [first screen, icon, name]; an area is listed only for an account that may open it.
+  const areas = [
+    admin && ['control-center', 'gauge', isAr ? 'لوحة المالك' : 'Owner dashboard'],
+    manager && [admin ? 'analytics' : getAlbayanManagerLandingViewForUser(user), 'briefcase-business', t('adManager')],
+    userCanAccessView(user, 'ads-studio') && ['ads-studio', 'rocket', isAr ? 'استوديو الإعلانات' : 'Ads Studio'],
+    may('clothes-system') && ['clothes-system', 'shirt', t('clothesSystem')],
+    admin && ['services-hub', 'grid-3x3', isAr ? 'الخدمات' : 'Services']
+  ].filter(Boolean);
+  const here = view === 'control-center' ? areas[0] : areas.find(a => a[0] === (PLATFORM_ADMIN_ONLY_VIEWS.has(view) ? 'services-hub' : manager && areas[admin ? 1 : 0][0]));
+  const name = here ? here[2] : t('adManager');
+  const dashboard = admin ? line('control-center', 'gauge', areas[0][2]) : '';
+  const noBuy = inAppPurchasingHidden();
+  const sections = here === areas[0] && admin
+    ? dashboard + group(isAr ? 'الأقسام' : 'Areas', areas.slice(1).map(a => line(a[0], a[1], a[2], true)).join(''))
+    : here && here[0] === 'services-hub'
+      ? dashboard + group(here[2], [['services-hub', 'grid-3x3'], ['smart-systems', 'cpu'], ['wallet', 'wallet'], ['charge-wallet', 'circle-plus', !noBuy], ['plans', 'layers', !noBuy]].map(([id, icon, shown]) => line(id, icon, platformViewName(id), shown)).join(''))
+      : dashboard + manager;
+  const mark = '<span class="alb-mark frame-mark">A</span>';
+  const fold = '<i data-lucide="chevrons-up-down"></i>';
   return `
     ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
-    <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
-      <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
-        <button type="button" onclick="navigateTo(getPostLoginLandingViewForUser(state.currentUser))" class="flex items-center space-x-3 text-left">
-          <div class="w-10 h-10 alb-mark rounded-xl flex items-center justify-center text-white font-bold">A</div>
-          <span class="font-bold text-slate-800 dark:text-white">${t('adManager')}</span>
-        </button>
-        <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
+    <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 border-r transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${isAr ? 'التنقل الرئيسي' : 'Main navigation'}">
+      <div class="frame-head">
+        ${areas.length > 1 ? `<details class="frame-menu">
+          <summary>${mark}<span><b>${name}</b><small>${isAr ? 'تبديل القسم' : 'Switch area'}</small></span>${fold}</summary>
+          <div class="frame-menu-list">${areas.map(a => `<button type="button" onclick="navigateTo('${a[0]}')"${a === here ? ' aria-current="true"' : ''}><i data-lucide="${a[1]}"></i><span>${a[2]}</span>${a === here ? '<i data-lucide="check"></i>' : ''}</button>`).join('')}</div>
+        </details>` : `<div class="frame-one">${mark}<b>${name}</b></div>`}
+        <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden" aria-label="${isAr ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x"></i></button>
       </div>
-      <nav class="workspace-sidebar-nav flex-1 p-4 overflow-y-auto">
-        ${showServicesHubLink ? `
-          <!-- Back to Services Hub (Admin only) -->
-          <button onclick="navigateTo('services-hub')" class="flex items-center space-x-3 w-full px-4 py-3 rounded-xl font-medium text-slate-600 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 mb-3 border-b border-slate-200 dark:border-slate-700 pb-3">
-            <i data-lucide="grid-3x3" class="w-5 h-5"></i>
-            <span>${state.language === 'ar' ? 'الخدمات' : 'Services Hub'}</span>
-          </button>
-        ` : ''}
-        
-        ${navGroups.map(group => {
-          const items = navItems.filter(item => group.ids.includes(item.id));
-          return items.length ? `<section class="workspace-nav-group"><h2>${group.label}</h2>${items.map(item => `
-          <button type="button" onclick="navigateTo('${item.id}')" ${state.currentView === item.id ? 'aria-current="page"' : ''} class="flex items-center space-x-3 w-full px-4 py-3 rounded-xl font-medium ${state.currentView === item.id ? 'alb-nav-active' : 'text-slate-600 dark:text-slate-400 hover:bg-white/20'}">
-            <i data-lucide="${item.icon}" class="w-5 h-5"></i>
-            <span>${t(item.label)}</span>
-          </button>
-        `).join('')}</section>` : '';
-        }).join('')}
-      </nav>
-      <div class="p-4 space-y-3 border-t border-white/10">
-        <!-- Current User Profile -->
-        <div class="flex items-center space-x-3 p-3 bg-white/30 dark:bg-slate-800/30 rounded-xl">
-          <div class="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold shadow-md">
-            ${state.currentUser?.name?.charAt(0) || 'U'}
-          </div>
-          <div class="flex-1 min-w-0">
-            <div class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(state.currentUser?.name || 'User')}</div>
-            <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(shellRoleLabel(state.currentUser?.role || 'Employee', state.language === 'ar'))}</div>
-          </div>
-          <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="${state.language === 'ar' ? 'تعديل ملفك الشخصي' : 'Edit Your Profile'}">
-            <i data-lucide="settings" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
-          </button>
+      ${sections ? `<nav class="workspace-sidebar-nav">${sections}</nav>` : `
+      <div class="frame-locked">
+        <i data-lucide="lock"></i>
+        <p>${isAr ? 'لا توجد صلاحية' : 'No access granted'}</p>
+        <small>${isAr ? 'تواصل مع المدير للحصول على الصلاحيات' : 'Contact admin for permissions'}</small>
+      </div>`}
+      <details class="frame-menu frame-account">
+        <summary><span class="frame-mark frame-avatar">${shellEsc(shellInitial(user.name))}</span><span><b>${shellEsc(user.name || 'User')}</b><small>${shellEsc(shellRoleLabel(state.currentUser?.role || 'Employee', state.language === 'ar'))}</small></span>${fold}</summary>
+        <div class="frame-menu-list">
+          <button type="button" onclick="editUser('${shellEsc(user.id)}')"><i data-lucide="user-round-cog"></i><span>${isAr ? 'تعديل ملفك الشخصي' : 'Edit your profile'}</span></button>
+          <button onclick="toggleTheme()" type="button"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}"></i><b>${isAr ? 'المظهر' : 'Theme'}</b><span>${shellEsc(shellThemeLabel(state.theme, state.language === 'ar'))}</span></button>
+          <button onclick="toggleLanguage()" type="button"><i data-lucide="globe"></i><b>${isAr ? 'اللغة' : 'Language'}</b><span>${state.language.toUpperCase()}</span></button>
+          ${renderAlwaysAvailableAccountLinks()}
+          <button type="button" onclick="handleLogout()" class="frame-danger"><i data-lucide="log-out"></i><span>${t('logout')}</span></button>
         </div>
-
-        ${renderAlwaysAvailableAccountLinks()}
-        
-        <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
-          <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
-            <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
-            <span>${shellEsc(shellThemeLabel(state.theme, state.language === 'ar'))}</span>
-          </button>
-          <button onclick="toggleLanguage()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
-            <i data-lucide="globe" class="w-4 h-4"></i>
-            <span>${state.language.toUpperCase()}</span>
-          </button>
-        </div>
-        <button onclick="handleLogout()" class="w-full flex items-center justify-center space-x-2 px-4 py-3 rounded-xl font-medium text-rose-600 bg-rose-50 dark:bg-rose-900/20 hover:bg-rose-100">
-          <i data-lucide="log-out" class="w-5 h-5"></i>
-          <span>${t('logout')}</span>
-        </button>
-      </div>
+      </details>
     </aside>
   `;
 }
@@ -16953,7 +16864,7 @@ function renderNoAccessView() {
             ? 'لم يتم منحك أي صلاحية بعد. يرجى التواصل مع المدير لتفعيل حسابك.'
             : 'You have not been granted any permissions yet. Please contact your administrator to activate your account.'}
         </p>
-        <button onclick="handleLogout()" class="btn-shine alb-btn-secondary text-white px-6 py-3 rounded-xl font-bold">
+        <button onclick="handleLogout()" class="btn-shine alb-btn-primary text-white px-6 py-3 rounded-xl font-bold">
           <i data-lucide="log-out" class="w-5 h-5 inline mr-2"></i>
           ${t('logout')}
         </button>

@@ -1253,7 +1253,8 @@ check('hub, plans and charge-wallet screens exist and stay admin-only platform v
   servicesWallet.includes('function renderChargeWalletView()') &&
   views.includes("case 'plans': return renderPlansView();") &&
   views.includes("case 'charge-wallet': return renderChargeWalletView();") &&
-  views.includes("'wallet', 'plans', 'charge-wallet', 'clothes-system', 'ads-studio'].includes(state.currentView)") &&
+  // Redesign M4: the platform's own screens sit in the shared frame; only the two systems draw their own navigation.
+  views.includes("const showSidebar = !['clothes-system', 'ads-studio'].includes(state.currentView);") &&
   dataAudit.includes("'service-placeholder', 'wallet', 'plans', 'charge-wallet']") &&
   routing.includes("'plans': '/plans'") && routing.includes("'charge-wallet': '/charge-wallet'"));
 
@@ -1633,7 +1634,7 @@ check('a failed lazy bundle is not re-requested on every render and the shell re
   read('src/15c0-ads-studio-loader.js').includes("if (_studioBundleState === 'failed' && Date.now() - _studioLastFailureAt < _STUDIO_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
   adminToolsLoader.includes("if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
   views.includes("if (app && !String(app.innerHTML || '').trim()) {") &&
-  views.includes('if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;') &&
+  views.includes('const may = id => admin || (!PLATFORM_ADMIN_ONLY_VIEWS.has(id) && shellCanOpen(id));') &&
   servicesWallet.includes("typeof subscriptionPlansLoadFailed !== 'undefined' && subscriptionPlansLoadFailed") &&
   stateServices.includes('let subscriptionPlansLoadFailed = false;'));
 

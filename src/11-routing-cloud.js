@@ -832,15 +832,21 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     toggleCommandPalette();
   }
-  // Escape to close modals/palettes
+  // Escape to close modals/palettes, then an open menu of the frame (focus returns to its button)
   if (e.key === 'Escape') {
+    const menu = document.querySelector('.frame-menu[open]');
     if (state.commandPaletteOpen) {
       toggleCommandPalette();
     } else if (state.activeModal) {
       closeModal();
+    } else if (menu) {
+      menu.open = false;
+      menu.firstElementChild.focus();
     }
   }
 });
+// A frame menu (areas, account) closes on any click outside its own button: one open at a time.
+document.addEventListener('click', e => document.querySelectorAll('.frame-menu[open]').forEach(menu => menu.firstElementChild.contains(e.target) || (menu.open = false)));
 
 // ==========================================
 // CLOUD SYNC (Simplified)

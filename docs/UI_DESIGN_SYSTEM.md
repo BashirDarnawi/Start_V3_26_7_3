@@ -71,6 +71,33 @@ migration. Existing records use the new views automatically.
   `clothesOwnerSummary`, the Studio desk counter), so the two can never
   disagree; `scripts/test-review-regressions.js` checks each one. Design and
   sources: `docs/redesign/ADMIN_DASHBOARD.md`.
+- **The shared frame (since November 2026).** The owner dashboard, Albayan
+  Manager and the platform's own screens (Services Hub, Smart Systems, Wallet,
+  Charge wallet, Plans) sit in one frame drawn by `renderSidebar()` and
+  `renderMainApp()` in `src/12-views.js`:
+  - an **area switcher** at the top of the sidebar (Owner dashboard, Albayan
+    Manager, Ads Studio, Clothes System, Services). An area is listed only for
+    an account that may open it; an account with one area sees its name and no
+    switcher;
+  - the **sections** of the area on screen. In the Manager: Workspace,
+    Operations (with Collect a debt and Reminders) and Administration. A line
+    is drawn only when the screen behind it would open for this account
+    (`shellCanOpen`, `shellCanCollect`, never a platform-owner screen for
+    staff). For the Admin the owner dashboard is the first line everywhere;
+  - one **account menu** at the bottom: profile, theme, language, privacy
+    policy, account deletion, sign-out. On wide screens the copies of theme,
+    language and sign-out inside a page are not drawn a second time;
+  - the search in the top bar, which names the screen it is on
+    (`getWorkspaceViewTitle`, `platformViewName`).
+  1280 px and wider the sidebar is 264 px and always open. From 901 to 1279 px
+  it is a 72 px rail of icons that opens to full width while the pointer or
+  the keyboard is in it. At 900 px and narrower it is the phone drawer with
+  the header and tab bar, on the platform's screens too. The two menus are
+  `<details class="frame-menu">`: Escape and a click elsewhere close them, one
+  open at a time. Styles: the "shared frame" block at the end of
+  `assets/workspace-layout.css` (classes `frame-*`), written with logical
+  properties so Arabic mirrors without extra rules. The Clothes System and the
+  Ads Studio still draw their own navigation; the switcher leads into them.
 - Settings has a section navigation rail; Audit uses a filterable activity
   timeline. No setting or financial tool is removed to simplify the page.
 - Ad previews use the existing media viewer and Meta budget helpers. An
