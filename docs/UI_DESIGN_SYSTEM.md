@@ -98,6 +98,20 @@ migration. Existing records use the new views automatically.
   `assets/workspace-layout.css` (classes `frame-*`), written with logical
   properties so Arabic mirrors without extra rules. The Clothes System and the
   Ads Studio still draw their own navigation; the switcher leads into them.
+- **Screen sizes (since November 2026).** Wide screens: the page and the top
+  bar use up to 1440 px. From 700 px the card lists (Customers, Receipts,
+  Pages, Users) use two columns. From 600 to 900 px a dialog is a centred
+  window with its own `max-w-*` width; under 600 px it stays the bottom
+  sheet, and while a field is in use it keeps the top position on both
+  (`app-dialog-input-engaged`). On screens wider than 900 px messages
+  (`#notification-container`) sit at the bottom beside the sidebar; while a
+  dialog is open, and on phones, they keep the top position.
+- **Names and states.** Every filter and sort list carries an `aria-label`
+  (or a `<label for>`); `scripts/test-review-regressions.js` fails when one is
+  added without a name. A control that is switched off on purpose says so in
+  place with `.workspace-paused` (Pages: "Add Page is paused" while
+  `PAGE_MANUAL_CREATE_PAUSED` is on) instead of looking like a button and
+  then refusing.
 - Settings has a section navigation rail; Audit uses a filterable activity
   timeline. No setting or financial tool is removed to simplify the page.
 - Ad previews use the existing media viewer and Meta budget helpers. An
