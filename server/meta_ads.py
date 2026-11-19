@@ -7382,6 +7382,17 @@ def create_meta_ads_router(
         except MetaAdsError as error:
             raise HTTPException(status_code=503, detail=error.public_message)
 
+    # Connect with Facebook (/api/meta-ads/connection): mounted here so server/main.py stays unchanged.
+    from .meta_connection_routes import create_connection_router
+
+    router.include_router(
+        create_connection_router(
+            require_meta_admin=require_meta_admin,
+            current_user_dependency=current_user_dependency,
+            require_same_origin=require_same_origin,
+        )
+    )
+
     @router.on_event("startup")
     def _start_worker() -> None:
         start_meta_ads_worker()
