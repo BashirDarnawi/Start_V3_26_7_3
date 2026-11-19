@@ -805,16 +805,18 @@ def read_studio_funds() -> dict[str, Any]:
     """The last stored funds reading of the allowlisted ad accounts (D26: the studio's accounts), as
     counts and flags with the account's last 4 digits: never an id or a token."""
     try:
-        allowed = set(_meta.load_meta_ads_config().allowed_account_ids)
+        config = _meta.load_meta_ads_config()
+        allowed, required = set(config.allowed_account_ids), bool(getattr(config, "allowlist_required", False))
     except Exception:
-        allowed = set()
+        allowed, required = set(), False
     stored = _meta._load_funds_state()
     accounts: list[dict[str, Any]] = []
     total: int | None = None
     unreadable = 0
     for row in stored.get("accounts") or []:
         digits = re.sub(r"\D", "", str(row.get("id") or "")) if isinstance(row, dict) else ""
-        if not digits or (allowed and digits not in allowed):
+        # While connected an empty selection means NO account (same rule as meta_ads.studio_funds_flags).
+        if not digits or ((allowed or required) and digits not in allowed):
             continue
         currency = str(row.get("currency") or "").strip().upper()
         funds = _whole_or_none(row.get("fundsMinor"))

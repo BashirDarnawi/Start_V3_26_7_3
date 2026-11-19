@@ -44,7 +44,7 @@ def _wipe_rows():
     init_db()
     with db_conn() as conn:
         conn.execute(
-            text("DELETE FROM entities WHERE type='metaHealthState' AND id LIKE 'connection%'")
+            text("DELETE FROM entities WHERE type='metaHealthState' AND id LIKE 'metaConnect%'")
         )
     mc.invalidate()
 
@@ -88,7 +88,7 @@ def _store(token=STORED_TOKEN, selected=("333",), available=(("333", "Shop A"), 
 def _raw_rows() -> str:
     with db_conn() as conn:
         rows = conn.execute(
-            text("SELECT id,data_json FROM entities WHERE type='metaHealthState' AND id LIKE 'connection%'")
+            text("SELECT id,data_json FROM entities WHERE type='metaHealthState' AND id LIKE 'metaConnect%'")
         ).mappings().all()
     return json.dumps([dict(row) for row in rows])
 
@@ -201,7 +201,7 @@ def test_other_app_id_or_damaged_record_is_unreadable(env):
     cipher[0] ^= 1
     with db_conn() as conn:  # a damaged row, written behind the module's back
         conn.execute(
-            text("UPDATE entities SET data_json=:d WHERE type='metaHealthState' AND id='connection'"),
+            text("UPDATE entities SET data_json=:d WHERE type='metaHealthState' AND id='metaConnect'"),
             {"d": json.dumps({**record, "ct": base64.urlsafe_b64encode(bytes(cipher)).decode("ascii"),
                               "updatedAt": "2000-01-01T00:00:00Z"})},
         )
@@ -239,7 +239,7 @@ def test_cache_holds_for_its_ttl_and_invalidate_rereads(env):
         conn.execute(
             text(
                 "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
-                "VALUES ('metaHealthState','connection',:d,false,1,NULL,1)"
+                "VALUES ('metaHealthState','metaConnect',:d,false,1,NULL,1)"
             ),
             {"d": json.dumps({**sealed, "selectedAccountIds": []})},
         )
@@ -376,11 +376,11 @@ def test_full_backup_leaves_the_connection_rows_out(env, people):
     payload = raw.decode("utf-8")
     lines = [json.loads(line) for line in payload.splitlines() if line.strip()]
     header = lines[0]
-    assert "metaHealthState/connection*" in header["excluded"]
+    assert "metaHealthState/metaConnect*" in header["excluded"]
     with db_conn() as conn:
         conn.execute(text("DELETE FROM entities WHERE type='metaHealthState' AND id=:i"), {"i": neighbour})
     ids = {(row.get("collection"), row.get("id")) for row in lines[1:] if row.get("_type") == "entity"}
-    assert not any(kind == "metaHealthState" and str(rid).startswith("connection") for kind, rid in ids)
+    assert not any(kind == "metaHealthState" and str(rid).startswith("metaConnect") for kind, rid in ids)
     assert ("metaHealthState", neighbour) in ids
     for secret in SECRETS:
         assert secret not in payload
@@ -393,20 +393,20 @@ def test_generic_api_import_and_restore_cannot_touch_the_rows(env, people):
     before = mc.load_record(mc.CONNECTION_ID)
     admin = people["admin"]
     assert client.get("/api/collections/metaHealthState", cookies=admin).status_code >= 400
-    assert client.get("/api/collections/metaHealthState/connection", cookies=admin).status_code >= 400
-    created = client.post("/api/collections/metaHealthState", json={"id": "connection", "data": {"ct": "x"}}, cookies=admin)
+    assert client.get("/api/collections/metaHealthState/metaConnect", cookies=admin).status_code >= 400
+    created = client.post("/api/collections/metaHealthState", json={"id": "metaConnect", "data": {"ct": "x"}}, cookies=admin)
     assert created.status_code >= 400
-    patched = client.patch("/api/collections/metaHealthState/connection", json={"data": {"ct": "x"}}, cookies=admin)
+    patched = client.patch("/api/collections/metaHealthState/metaConnect", json={"data": {"ct": "x"}}, cookies=admin)
     assert patched.status_code >= 400
-    deleted = client.delete("/api/collections/metaHealthState/connection", cookies=admin)
+    deleted = client.delete("/api/collections/metaHealthState/metaConnect", cookies=admin)
     assert deleted.status_code >= 400
     restored = client.put(
-        "/api/admin/collections/metaHealthState/connection/restore", json={"data": {"ct": "x"}}, cookies=admin
+        "/api/admin/collections/metaHealthState/metaConnect/restore", json={"data": {"ct": "x"}}, cookies=admin
     )
     assert restored.status_code == 405
     imported = client.post(
         "/api/admin/import",
-        json={"collections": {"metaHealthState": [{"id": "connection", "ct": "x"}]}},
+        json={"collections": {"metaHealthState": [{"id": "metaConnect", "ct": "x"}]}},
         cookies=admin,
     )
     assert imported.status_code == 405
@@ -420,7 +420,7 @@ def test_generic_api_import_and_restore_cannot_touch_the_rows(env, people):
 
 
 def test_storage_helpers_single_use_and_unknown_ids(env):
-    assert mc.save_record("token", {"x": 1}) is None  # only connection* rows
+    assert mc.save_record("token", {"x": 1}) is None  # only metaConnect* rows
     assert mc.load_record("token") == {}
     assert mc.delete_record("token") is False
     pending = mc.save_record(mc.PENDING_ID, {"stateHash": mc.sha256_hex("state-1"), "adminId": "a1"})
@@ -905,3 +905,157 @@ def test_disconnect_survives_a_failed_revoke(graph, admins):
     gone = client.post("/api/meta-ads/connection/disconnect", cookies=admins["one"])
     assert gone.status_code == 200 and gone.json()["revoked"] is False
     assert not mc.load_record(mc.CONNECTION_ID) and meta_ads.meta_token_source() == "environment"
+
+
+# =========================================================================== fixer: review findings
+# The Studio's Meta-outage row is metaHealthState/"connection"; Connect's rows must never touch it.
+
+
+def _studio_down() -> None:
+    since = mc.iso_now()
+    assert studio_alerts_meta._write_connection(
+        lambda stored: None if stored.get("state") == "down" else {"state": "down", "since": since, "errorCode": "190"}
+    )
+    assert studio_alerts_meta.connection_down() is True
+
+
+def _wipe_studio_row() -> None:
+    with db_conn() as conn:
+        conn.execute(text("DELETE FROM entities WHERE type='metaHealthState' AND id='connection'"))
+
+
+@pytest.fixture()
+def studio_row():
+    _wipe_studio_row()
+    yield
+    _wipe_studio_row()
+
+
+def test_studio_outage_row_is_not_a_connect_record(env, studio_row):
+    _studio_down()
+    mc.invalidate()
+    assert mc.reconnect_needed() is False and mc.token_source() == "environment"
+    assert meta_ads.load_meta_ads_config().access_token == ENV_TOKEN
+    _store()  # Connect saves its key: the outage state stays
+    assert studio_alerts_meta.connection_down() is True and mc.token_source() == "connection"
+    assert mc.delete_record(mc.CONNECTION_ID) is True  # Disconnect removes only Connect's row
+    assert studio_alerts_meta.connection_down() is True
+    mc.invalidate()
+    assert mc.reconnect_needed() is False and mc.token_source() == "environment"
+
+
+def test_full_backup_keeps_the_studio_outage_row(env, people, studio_row):
+    _store()
+    _studio_down()
+    reset_rate_limit(f"full-backup:{people['admin_id']}")
+    response = client.get("/api/admin/backup/full", cookies=people["admin"])
+    assert response.status_code == 200, response.text
+    raw = response.content
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    lines = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+    ids = {(row.get("collection"), row.get("id")) for row in lines[1:] if row.get("_type") == "entity"}
+    assert ("metaHealthState", "connection") in ids
+    assert ("metaHealthState", mc.CONNECTION_ID) not in ids
+
+
+def test_connect_and_disconnect_routes_leave_the_studio_outage_alone(graph, admins, studio_row):
+    _studio_down()
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    assert _result_code() == "connected" and studio_alerts_meta.connection_down() is True
+    gone = client.post("/api/meta-ads/connection/disconnect", cookies=admins["one"])
+    assert gone.status_code == 200 and studio_alerts_meta.connection_down() is True
+    assert gone.json()["status"]["reconnectNeeded"] is False
+
+
+def _revoked_tokens(graph) -> list[str]:
+    return [dict(r.url.params).get("revoke_token") for r in graph["requests"] if r.url.path.endswith("oauth/revoke")]
+
+
+def test_reconnect_revokes_the_replaced_key(graph, admins):
+    _store()  # an earlier connection's key
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    assert _result_code() == "connected" and meta_ads.load_meta_ads_config().access_token == NEW_TOKEN
+    assert _revoked_tokens(graph) == [STORED_TOKEN]
+    assert 'previousKeyRevoked\\":true' in _audit_text(admins["one_id"])
+    for secret in FLOW_SECRETS + (STORED_TOKEN,):
+        assert secret not in _audit_text(admins["one_id"])
+
+
+@pytest.mark.parametrize("case", ["new_type", "new_app", "new_invalid", "assets", "save"])
+def test_a_failed_finish_revokes_the_new_key(graph, admins, case):
+    if case == "new_type":
+        graph["new_debug"] = _debug("USER", ALL_SCOPES)
+    elif case == "new_app":
+        graph["new_debug"] = _debug("SYSTEM_USER", ALL_SCOPES, app="999")
+    elif case == "new_invalid":
+        graph["new_debug"] = _debug("SYSTEM_USER", ALL_SCOPES, valid=False)
+    elif case == "assets":
+        def broken_assets(_token):
+            raise routes.ConnectError("meta_error", "Meta refused the list request.")
+        graph_env = pytest.MonkeyPatch()
+        graph_env.setattr(routes, "read_assets", broken_assets)
+    else:
+        real_save = mc.save_record
+        graph_env = pytest.MonkeyPatch()
+        graph_env.setattr(mc, "save_record", lambda rid, data: None if rid == mc.CONNECTION_ID else real_save(rid, data))
+    try:
+        _url, state = _start(admins["one"])
+        _callback(admins["one"], state=state, code=AUTH_CODE)
+    finally:
+        if case in ("assets", "save"):
+            graph_env.undo()
+    assert _result_code() != "connected" and not mc.load_record(mc.CONNECTION_ID)
+    assert _revoked_tokens(graph) == [NEW_TOKEN]
+
+
+def test_disconnect_of_an_unreadable_key_says_it_was_not_revoked(graph, admins):
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    graph["requests"].clear()
+    graph_env = pytest.MonkeyPatch()
+    try:
+        graph_env.setenv("ALBAYAN_META_CONNECTION_KEY", _new_key())  # the encryption key was rotated
+        mc.invalidate()
+        assert mc.reconnect_needed() is True
+        gone = client.post("/api/meta-ads/connection/disconnect", cookies=admins["one"])
+    finally:
+        graph_env.undo()
+    assert gone.status_code == 200 and gone.json()["revoked"] is False
+    assert gone.json()["manualStep"] == routes.UNREADABLE_DISCONNECT_TEXT
+    assert not _revoked_tokens(graph) and not mc.load_record(mc.CONNECTION_ID)
+    assert 'unreadable\\":true' in _audit_text(admins["one_id"])
+
+
+def test_missing_business_management_is_refused_before_any_business_call(graph, admins):
+    graph["user_debug"] = _debug("USER", [s for s in ALL_SCOPES if s != "business_management"])
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    result = mc.load_record(mc.RESULT_ID)
+    assert result["code"] == "missing_permissions" and result["missingScopes"] == ["business_management"]
+    assert not any(r.url.path.endswith(("me/businesses", "/system_users", "/access_tokens")) for r in graph["requests"])
+
+
+def test_stale_choice_rows_are_removed(graph, admins):
+    graph["businesses"] = [{"id": "5001", "name": "Biz One"}, {"id": "5002", "name": "Biz Two"}]
+    graph["system_users"]["5002"] = [{"id": "7002", "name": "Robot B", "role": "EMPLOYEE"}]
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    assert mc.load_record(mc.CHOICE_ID)
+    _start(admins["one"])  # a new Connect drops the unfinished choice and its user key
+    assert not mc.load_record(mc.CHOICE_ID)
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    assert mc.update_record(mc.CHOICE_ID, lambda d: {**d, "expiresAt": 1}) is not None
+    status = client.get("/api/meta-ads/connection", cookies=admins["two"])  # any admin's status read
+    assert status.status_code == 200 and status.json()["choice"] is None
+    assert not mc.load_record(mc.CHOICE_ID)
+    _url, state = _start(admins["one"])
+    _callback(admins["one"], state=state, code=AUTH_CODE)
+    graph["system_users"] = {}  # a later sign-in that ends in an error also leaves no choice behind
+    _url, state = _start(admins["two"])
+    mc.save_record(mc.CHOICE_ID, {"expiresAt": 9e15})
+    _callback(admins["two"], state=state, code=AUTH_CODE)
+    assert _result_code() == "no_system_user" and not mc.load_record(mc.CHOICE_ID)

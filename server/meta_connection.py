@@ -2,7 +2,7 @@
 
 Until an admin completes Connect, nothing here changes Albayan's behaviour: the key comes from
 ALBAYAN_META_ACCESS_TOKEN and the ad-account allowlist from ALBAYAN_META_AD_ACCOUNT_IDS. Once a
-connection is stored (entities row metaHealthState/"connection", refused by the generic API, the
+connection is stored (entities row metaHealthState/"metaConnect", refused by the generic API, the
 admin import and the single-record restore, and left out of the full backup download), its key
 wins over the environment key and its account selection replaces the environment list (an empty
 selection while connected means NO account, never "all").
@@ -17,9 +17,10 @@ Rules this module keeps:
   * On import it installs the logging redaction: httpx request lines and uvicorn's access log
     never show code, state, tokens or the client secret.
 
-Records (all type metaHealthState): "connection" (key + facts), "connectionPending" (hashed OAuth
-state), "connectionChoice" (encrypted short-lived user token + system-user candidates),
-"connectionSettings" (login config id, not secret), "connectionResult" (the last outcome).
+Records (all type metaHealthState): "metaConnect" (key + facts), "metaConnectPending" (hashed OAuth
+state), "metaConnectChoice" (encrypted short-lived user token + system-user candidates),
+"metaConnectSettings" (login config id, not secret), "metaConnectResult" (the last outcome).
+Never "connection": that id is the Studio's Meta-outage row.
 """
 
 from __future__ import annotations
@@ -42,12 +43,14 @@ from sqlalchemy import text
 from .db import db_conn, json_dumps, json_loads, now_ms
 
 RECORD_TYPE = "metaHealthState"
-RECORD_PREFIX = "connection"
-CONNECTION_ID = "connection"
-PENDING_ID = "connectionPending"
-CHOICE_ID = "connectionChoice"
-SETTINGS_ID = "connectionSettings"
-RESULT_ID = "connectionResult"
+# "metaConnect*" on purpose: metaHealthState/"connection" is the Studio's Meta-outage row
+# (studio_alerts_meta.CONNECTION_STATE_ID), which these records must never read, replace or delete.
+RECORD_PREFIX = "metaConnect"
+CONNECTION_ID = "metaConnect"
+PENDING_ID = "metaConnectPending"
+CHOICE_ID = "metaConnectChoice"
+SETTINGS_ID = "metaConnectSettings"
+RESULT_ID = "metaConnectResult"
 RECORD_IDS = (CONNECTION_ID, PENDING_ID, CHOICE_ID, SETTINGS_ID, RESULT_ID)
 
 KEY_ENV = "ALBAYAN_META_CONNECTION_KEY"

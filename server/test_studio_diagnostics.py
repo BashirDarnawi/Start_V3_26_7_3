@@ -618,3 +618,11 @@ def test_studio_funds_line_reads_the_stored_reading_with_tails_only(monkeypatch)
     assert "1234567890" not in json.dumps(funds)
     monkeypatch.setattr(diag._meta, "load_meta_ads_config", lambda: type("Config", (), {"allowed_account_ids": ("9999999999",)})())
     assert diag.read_studio_funds()["accounts"] == [] and diag.read_studio_funds()["fundsMinorUSD"] is None
+    # Connect with Facebook: an empty selection while connected means NO account, never "all".
+    monkeypatch.setattr(diag._meta, "load_meta_ads_config",
+                        lambda: type("Config", (), {"allowed_account_ids": (), "allowlist_required": True})())
+    assert diag.read_studio_funds()["accounts"] == []
+    # The hosting key with no allowlist still lists every stored account, as before.
+    monkeypatch.setattr(diag._meta, "load_meta_ads_config",
+                        lambda: type("Config", (), {"allowed_account_ids": (), "allowlist_required": False})())
+    assert len(diag.read_studio_funds()["accounts"]) == 4

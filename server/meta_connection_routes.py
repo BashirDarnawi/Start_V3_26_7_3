@@ -7,7 +7,7 @@ Mounted INSIDE meta_ads.create_meta_ads_router (so server/main.py gets no new li
   2. Facebook sends the admin's browser back to GET /callback. The state is checked and consumed,
      the code is exchanged for a short-lived USER token, debug_token checks it, the server lists the
      admin's businesses and their system users. One candidate -> finish now; several -> an encrypted
-     "connectionChoice" for POST /finish; none -> "no_system_user". Always 303 to GET /done, whose
+     "metaConnectChoice" for POST /finish; none -> "no_system_user". Always 303 to GET /done, whose
      Location never carries the code, the state or a token.
   3. Finishing makes sure the app is installed for the system user, generates a NEW system-user
      token (never expires) with scope = WANTED and the user token's scopes, checks it with
@@ -262,6 +262,15 @@ def _scope_plan(user_scopes: list[str]) -> tuple[list[str], list[str]]:
     return [s for s in wanted if s in granted], [s for s in wanted if s not in granted]
 
 
+# Without business_management Meta refuses the business, system-user and key calls; say so up front.
+REQUIRED_SCOPES = ("ads_read", "business_management")
+
+
+def _require_scopes(scope: list[str], missing: list[str]) -> None:
+    if any(name not in scope for name in REQUIRED_SCOPES):
+        raise ConnectError("missing_permissions", "Facebook did not grant the permissions Albayan needs.", missing=tuple(missing))
+
+
 def system_user_candidates(user_token: str) -> list[dict[str, str]]:
     businesses = _paged("me/businesses", user_token, "id,name", BUSINESS_CAP)
     candidates: list[dict[str, str]] = []
@@ -375,8 +384,7 @@ def _initial_selection(available: list[dict[str, str]]) -> list[str]:
 def finish_connection(user_token: str, candidate: dict[str, str], user_scopes: list[str], admin: dict[str, Any]) -> dict[str, Any]:
     """Install the app for the system user, generate its NEW token, check it, store it encrypted."""
     scope, missing = _scope_plan(user_scopes)
-    if "ads_read" not in scope:
-        raise ConnectError("missing_permissions", "Facebook did not grant the permissions Albayan needs.", missing=tuple(missing))
+    _require_scopes(scope, missing)
     system_user = candidate["systemUserId"]
     app = mc.app_id()
     try:
@@ -393,39 +401,49 @@ def finish_connection(user_token: str, candidate: dict[str, str], user_scopes: l
     new_token = str(payload.get("access_token") or "").strip()
     if not new_token:
         raise ConnectError("meta_error", "Meta returned no system-user key.", status=502)
-    reading = inspect_token(new_token)
-    if not reading.get("isValid"):
-        raise ConnectError("token_invalid", "Meta says the new key is not valid.")
-    if not reading.get("appMatches"):
-        raise ConnectError("app_mismatch", "The new key belongs to a different Meta app.")
-    if reading.get("type") != "SYSTEM_USER":
-        raise ConnectError("not_system_user", "Meta returned a key that is not a system-user key.")
-    available, pages = read_assets(new_token)
-    sealed = mc.encrypt_secret(new_token, mc.CONNECTION_ID)
-    if sealed is None:
-        raise ConnectError("app_not_ready", "The key could not be stored safely.", status=409)
-    token_scopes = list(reading.get("scopes") or [])
-    record = {
-        **sealed,
-        "appId": app,
-        "businessId": candidate["businessId"],
-        "businessName": candidate.get("businessName", ""),
-        "systemUserId": system_user,
-        "systemUserName": candidate.get("systemUserName", ""),
-        "connectedAt": mc.iso_now(),
-        "connectedBy": str(admin.get("id") or ""),
-        "connectedByName": meta_ads._clean_text(admin.get("name"), 120),
-        "scopes": token_scopes,
-        "missingScopes": [s for s in wanted_scopes() if s not in token_scopes],
-        "expiresNever": bool(reading.get("expiresNever")),
-        "expiresAt": str(reading.get("expiresAt") or ""),
-        "pagesCoveredByScope": reading.get("pagesCoveredByScope") or {},
-        "availableAccounts": available,
-        "selectedAccountIds": _initial_selection(available),
-        "pagesCount": pages,
-    }
-    if mc.save_record(mc.CONNECTION_ID, record) is None:
-        raise ConnectError("meta_error", "The key could not be saved. Try again.", status=503)
+    previous_token = ""
+    try:
+        reading = inspect_token(new_token)
+        if not reading.get("isValid"):
+            raise ConnectError("token_invalid", "Meta says the new key is not valid.")
+        if not reading.get("appMatches"):
+            raise ConnectError("app_mismatch", "The new key belongs to a different Meta app.")
+        if reading.get("type") != "SYSTEM_USER":
+            raise ConnectError("not_system_user", "Meta returned a key that is not a system-user key.")
+        available, pages = read_assets(new_token)
+        sealed = mc.encrypt_secret(new_token, mc.CONNECTION_ID)
+        if sealed is None:
+            raise ConnectError("app_not_ready", "The key could not be stored safely.", status=409)
+        token_scopes = list(reading.get("scopes") or [])
+        record = {
+            **sealed,
+            "appId": app,
+            "businessId": candidate["businessId"],
+            "businessName": candidate.get("businessName", ""),
+            "systemUserId": system_user,
+            "systemUserName": candidate.get("systemUserName", ""),
+            "connectedAt": mc.iso_now(),
+            "connectedBy": str(admin.get("id") or ""),
+            "connectedByName": meta_ads._clean_text(admin.get("name"), 120),
+            "scopes": token_scopes,
+            "missingScopes": [s for s in wanted_scopes() if s not in token_scopes],
+            "expiresNever": bool(reading.get("expiresNever")),
+            "expiresAt": str(reading.get("expiresAt") or ""),
+            "pagesCoveredByScope": reading.get("pagesCoveredByScope") or {},
+            "availableAccounts": available,
+            "selectedAccountIds": _initial_selection(available),
+            "pagesCount": pages,
+        }
+        # The key this one replaces (Reconnect), read uncached right before the save; revoked once saved.
+        previous_token = mc.decrypt_secret(mc.load_record(mc.CONNECTION_ID), mc.CONNECTION_ID) or ""
+        if mc.save_record(mc.CONNECTION_ID, record) is None:
+            raise ConnectError("meta_error", "The key could not be saved. Try again.", status=503)
+    except BaseException:
+        revoke(new_token)  # a never-expiring key Albayan will not keep must not stay valid at Meta
+        raise
+    previous_revoked = None
+    if previous_token and previous_token != new_token:
+        previous_revoked = revoke(previous_token)
     mc.delete_record(mc.CHOICE_ID)
     meta_ads.meta_connection_changed()
     try:
@@ -440,6 +458,7 @@ def finish_connection(user_token: str, candidate: dict[str, str], user_scopes: l
         "scopes": token_scopes,
         "availableAccounts": len(available),
         "selectedAccounts": len(record["selectedAccountIds"]),
+        "previousKeyRevoked": previous_revoked,
     })
     return record
 
@@ -475,6 +494,7 @@ def run_callback(admin: dict[str, Any], params: dict[str, str]) -> str:
     """The callback's work for a signed-in admin. Returns the result code (already saved)."""
     try:
         _check_pending(params.get("state", ""), admin)
+        mc.delete_record(mc.CHOICE_ID)  # a new sign-in replaces any earlier, unfinished choice (and its user key)
         if params.get("error") or params.get("error_reason"):
             raise ConnectError("cancelled", "The Facebook sign-in was cancelled.")
         if not mc.app_ready():
@@ -490,8 +510,7 @@ def run_callback(admin: dict[str, Any], params: dict[str, str]) -> str:
             raise ConnectError("app_mismatch", "The sign-in key belongs to a different Meta app.")
         user_scopes = list(reading.get("scopes") or [])
         scope, missing = _scope_plan(user_scopes)
-        if "ads_read" not in scope:
-            raise ConnectError("missing_permissions", "Facebook did not grant the permissions Albayan needs.", missing=tuple(missing))
+        _require_scopes(scope, missing)
         candidates = system_user_candidates(user_token)
         if not candidates:
             raise ConnectError("no_system_user", "No system user was found in the Meta business.")
@@ -621,6 +640,9 @@ def connection_status(admin: dict[str, Any]) -> dict[str, Any]:
         }
     choice = None
     choice_row = mc.load_record(mc.CHOICE_ID)
+    if choice_row and int(choice_row.get("expiresAt") or 0) <= _now_ms():
+        mc.delete_record(mc.CHOICE_ID)  # an expired choice never keeps its encrypted user key around
+        choice_row = {}
     if (
         choice_row
         and int(choice_row.get("expiresAt") or 0) > _now_ms()
@@ -657,6 +679,11 @@ def connection_status(admin: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- router
+
+UNREADABLE_DISCONNECT_TEXT = (
+    "The stored key could not be read, so Meta was not asked to cancel it. In Meta Business Settings, "
+    "open System users, choose the system user and remove its keys."
+)
 
 
 class ConnectionSettingsRequest(BaseModel):
@@ -746,6 +773,7 @@ def create_connection_router(
             })
             if saved is None:
                 raise ConnectError("meta_error", "Connect could not start. Try again.", status=503)
+            mc.delete_record(mc.CHOICE_ID)  # an earlier, unfinished choice (and its user key) is dropped
         except ConnectError as error:
             return _refusal(error)
         version = _graph_settings()[0]
@@ -796,13 +824,13 @@ def create_connection_router(
             choice = mc.load_record(mc.CHOICE_ID)
             if not choice:
                 raise ConnectError("state_expired", "The choice has expired. Press Connect with Facebook again.", status=409)
+            if int(choice.get("expiresAt") or 0) <= _now_ms():
+                mc.delete_record(mc.CHOICE_ID)
+                raise ConnectError("state_expired", "The choice has expired. Press Connect with Facebook again.", status=409)
             if str(choice.get("adminId") or "") != str(admin.get("id") or "") or not hmac.compare_digest(
                 str(choice.get("sessionHash") or ""), _session_hash(admin)
             ):
                 raise ConnectError("state_invalid", "This choice belongs to another sign-in.", status=409)
-            if int(choice.get("expiresAt") or 0) <= _now_ms():
-                mc.delete_record(mc.CHOICE_ID)
-                raise ConnectError("state_expired", "The choice has expired. Press Connect with Facebook again.", status=409)
             wanted = payload.systemUserId.strip()
             candidate = next(
                 (c for c in choice.get("candidates") or [] if isinstance(c, dict) and str(c.get("systemUserId") or "") == wanted),
@@ -888,14 +916,20 @@ def create_connection_router(
     def connection_disconnect(request: Request, admin: dict[str, Any] = Depends(require_meta_admin)):
         require_same_origin(request)
         limit("disconnect", admin, 10, 10 * 60_000)
-        view = mc.active_connection()
-        revoked = revoke(view.token) if view is not None else False
+        record = mc.load_record(mc.CONNECTION_ID)  # uncached: the key stored right now
+        token = mc.decrypt_secret(record, mc.CONNECTION_ID) if record else None
+        revoked = revoke(token) if token else False
         removed = mc.delete_record(mc.CONNECTION_ID)
         mc.delete_record(mc.CHOICE_ID)
         mc.delete_record(mc.PENDING_ID)
         meta_ads.meta_connection_changed()
         _save_result("disconnected", admin)
-        _audit(admin, "meta_connection.disconnect", "Disconnected Facebook (stored key removed)", {"removed": removed, "revoked": revoked})
-        return {"ok": True, "code": "disconnected", "revoked": revoked, "status": connection_status(admin)}
+        unreadable = bool(record) and not token
+        _audit(admin, "meta_connection.disconnect", "Disconnected Facebook (stored copy removed)",
+               {"removed": removed, "revoked": revoked, "unreadable": unreadable})
+        answer: dict[str, Any] = {"ok": True, "code": "disconnected", "revoked": revoked, "status": connection_status(admin)}
+        if unreadable:  # the stored key could not be opened, so Meta was not asked to revoke it
+            answer["manualStep"] = UNREADABLE_DISCONNECT_TEXT
+        return answer
 
     return router

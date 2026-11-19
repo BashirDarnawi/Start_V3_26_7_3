@@ -392,14 +392,14 @@ def create_full_backup_router(
                 "excluded": [
                     "password_hash", "password_salt", "password_algo",
                     "password_iterations", "sessions", "password_resets", "app_logins",
-                    "metaHealthState/connection*",
+                    "metaHealthState/metaConnect*",
                 ],
             })
             # One index-ordered cursor, one row fetched at a time. Never
             # materialize a list of photo-bearing records with .all().
             for row in stream_rows(
                 "SELECT type, id, data_json, deleted, created_at, created_by, last_modified "
-                "FROM entities WHERE NOT (type = 'metaHealthState' AND id LIKE 'connection%') "
+                "FROM entities WHERE NOT (type = 'metaHealthState' AND id LIKE 'metaConnect%') "
                 "ORDER BY type, id"
             ):
                 if timed_out():
