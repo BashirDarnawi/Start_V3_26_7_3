@@ -51,6 +51,64 @@ Secrets stay in the server environment. Never enter them into the Albayan web
 page, Android/iOS app, GitHub source, a screenshot, or a chat. If a token is
 ever exposed, revoke it in Meta immediately and create a replacement.
 
+### Connect with Facebook (instead of pasting a key)
+
+An admin can also give Albayan its Meta key with a button: **Ads -> Meta Sync ->
+Connect with Facebook**. Facebook asks the admin to sign in and approve; Albayan
+then creates a NEW key for a system user ("robot account") that already exists
+in your Meta business, checks it, and stores only that key, encrypted, in the
+database. The short-lived sign-in key is thrown away. Albayan never creates a
+system user and never assigns ad accounts or Pages; you do that in Meta Business
+Settings. A stored key wins over `ALBAYAN_META_ACCESS_TOKEN`; **Disconnect**
+removes it and Albayan goes back to the hosting key (if one is set). Generating
+the new key does not revoke the hosting key.
+
+One-time setup in Meta (owner):
+
+1. Use a **Business** type Meta app (the same app whose secret is in
+   `ALBAYAN_META_APP_SECRET`).
+2. Add the product **Facebook Login for Business**.
+3. Under Facebook Login for Business -> **Configurations**, create a
+   configuration with token type **User access token** and these permissions:
+   `business_management`, `ads_read`, `ads_management`, `pages_show_list`,
+   `pages_read_engagement`, `pages_manage_metadata`, `pages_manage_engagement`,
+   `pages_messaging`, `pages_manage_posts`, `instagram_basic`,
+   `instagram_manage_comments`, `instagram_manage_messages`,
+   `instagram_content_publish`. Copy the configuration id.
+4. Under Facebook Login for Business -> **Settings**, add the exact callback URL
+   to **Valid OAuth Redirect URIs**:
+   `<ALBAYAN_PUBLIC_BASE_URL>/api/meta-ads/connection/callback`
+   (for example `https://your-domain/api/meta-ads/connection/callback`; Meta
+   Sync shows the exact value with a Copy button). Keep **Strict Mode** and
+   **Enforce HTTPS** on.
+5. The person who presses Connect needs a role on the Meta app (admin,
+   developer or tester) while the app is not live, and must be an admin of the
+   Meta business.
+6. In Meta Business Settings, a **system user** must already exist with the ad
+   accounts and Pages assigned to it. If several exist, Albayan asks which one
+   to use.
+
+Then in the Jelastic environment add (and redeploy):
+
+```text
+ALBAYAN_META_APP_ID=your-numeric-app-id
+ALBAYAN_META_APP_SECRET=your-app-secret
+ALBAYAN_PUBLIC_BASE_URL=https://your-domain
+# optional: the configuration id can also be saved in Meta Sync
+ALBAYAN_META_LOGIN_CONFIG_ID=your-configuration-id
+# optional: a dedicated encryption key (URL-safe base64 of 32 random bytes)
+ALBAYAN_META_CONNECTION_KEY=...
+```
+
+Without `ALBAYAN_META_CONNECTION_KEY` the encryption key is derived from the app
+secret, so resetting the app secret in Meta makes the stored key unreadable:
+Albayan then falls back to the hosting key and Meta Sync asks for **Reconnect**.
+While connected, the ad accounts ticked in Meta Sync replace
+`ALBAYAN_META_AD_ACCOUNT_IDS` (no ticks means no account, never "all"). The
+stored key rows are left out of the full backup download and cannot be read or
+written through the generic API. Connect needs a normal web browser; the phone
+apps show a note instead.
+
 The worker checks linked ads in small batches. Failed requests use increasing
 retry delays; a manual **Sync now** remains available. In a deployment with
 multiple app containers, run the background worker in only one container by
