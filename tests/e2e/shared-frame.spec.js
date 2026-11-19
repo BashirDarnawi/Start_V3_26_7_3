@@ -180,6 +180,15 @@ test('the Clothes System sits in the frame on a wide screen: its sections are li
   await page.locator('#app-sidebar .frame-link', { hasText: 'Owner dashboard' }).click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/control-center');
 
+  // A fresh load straight at the system's address: the sections appear as soon as the system's bundle is there.
+  await page.goto('/clothes-system?tab=shipments');
+  await expect.poll(() => sections(page), { timeout: 20000 }).toEqual(['Owner dashboard', 'Dashboard', 'Products', 'Shipments', 'Orders']);
+  await expect(page.locator('#app-sidebar .frame-link[aria-current="page"]')).toHaveText('Shipments');
+  // A section picked inside the page (as the quick actions of its dashboard do) moves the sidebar's mark too.
+  await page.evaluate(() => setClothesTab('orders'));
+  await expect(page.locator('#app-sidebar .frame-link[aria-current="page"]')).toHaveText('Orders');
+  await expect(page.getByRole('button', { name: /new order/i })).toBeVisible();
+
   // On a tablet the system draws its own navigation, as on a phone: the tab bar and the back link are back.
   await page.setViewportSize({ width: 820, height: 1180 });
   await page.goto('/clothes-system?tab=shipments');
@@ -271,8 +280,8 @@ test('from 1280 px a record opens its details in a panel beside the list, one at
   await expect(card).toBeVisible();
   const opened = await box(row(first));
   const panel = await box(card);
-  expect(opened.left).toBe(closedCard.left);
-  expect(opened.width, 'the opened card stays one column wide (before: it took the whole row)').toBe(closedCard.width);
+  expect(opened.left, 'the opened card is in the list column').toBe(grid.left);
+  expect(opened.width, 'and stays one column wide (before: it took the whole row)').toBe(closedCard.width);
   expect(panel.left, 'the details start right of the list column').toBeGreaterThanOrEqual(opened.right + 10);
   expect(Math.abs(panel.right - grid.right)).toBeLessThanOrEqual(1);
   expect(Math.abs(panel.width - closedCard.width)).toBeLessThanOrEqual(1);

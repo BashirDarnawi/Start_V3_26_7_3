@@ -1347,7 +1347,7 @@ async function main() {
     run('Security').escapeHtml = plainEscape;
     state.expandedFilterPanels = { receipts: false };
     const name = html => (String(html).match(/<span>(.*?<\/span>)<\/span>/) || [])[1];
-    assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 0)), 'Filters<span>&nbsp;&amp; sort</span>');
+    assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 0)), 'Filters<span> &amp; sort</span>');
     state.expandedFilterPanels = { receipts: true };
     assert.equal(name(sandbox.renderWorkspaceFilterToggle('receipts', 2)), 'Hide<span> filters</span>');
     assert.ok(String(sandbox.renderWorkspaceFilterToggle('receipts', 2)).includes('<span class="workspace-filter-count">2</span>'), 'the count of filters in force stays');

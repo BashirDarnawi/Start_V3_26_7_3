@@ -5,6 +5,7 @@
 // Track last rendered view to avoid unnecessary full re-renders
 let _lastRenderedView = null;
 let _lastRenderedUserId = null;
+let _lastFrameTab = '';  // the system section the sidebar marked at the last draw
 let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
 let _resetScrollOnNextRender = false;
@@ -100,9 +101,13 @@ function render() {
     const currentView = state.currentView;
     const currentUserId = state.currentUser?.id;
 
+    // A system's sections are lines of the sidebar: when its list or its current section changes (a tab
+    // picked inside the page, Back, the bundle arriving, its gate), the frame is drawn again with it.
+    const frameTab = currentView === 'clothes-system' && typeof clothesFrameSections === 'function' ? String(clothesFrameSections()) : '';
     // Check if we can do a partial update (same view, same user)
     const canPartialUpdate = _lastRenderedView === currentView &&
                              _lastRenderedUserId === currentUserId &&
+                             _lastFrameTab === frameTab &&
                              isLoggedIn;
 
     // Preflight a same-view update before any layout lock or DOM work: identical HTML (the usual
@@ -236,6 +241,7 @@ function render() {
       _restoreFocusState(_focusBefore);
 
       _lastRenderedView = currentView;
+      _lastFrameTab = frameTab;
       _lastRenderedUserId = currentUserId;
     }
 
@@ -1270,7 +1276,7 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
   return `
     <button type="button" onclick="toggleWorkspaceFilterPanel('${safeView}')" class="workspace-filter-toggle touch-target ${expanded ? 'is-open' : ''}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${safeView}-advanced-filters">
       <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
-      <span>${(expanded ? (isAr ? 'إخفاء| الفلاتر' : 'Hide| filters') : (isAr ? 'الفلاتر| والترتيب' : 'Filters|&nbsp;&amp; sort')).replace('|', '<span>')}</span></span>
+      <span>${(expanded ? (isAr ? 'إخفاء| الفلاتر' : 'Hide| filters') : (isAr ? 'الفلاتر| والترتيب' : 'Filters| &amp; sort')).replace('|', '<span>')}</span></span>
       ${count > 0 ? `<span class="workspace-filter-count">${count}</span>` : ''}
       <i data-lucide="chevron-${expanded ? 'up' : 'down'}" class="w-4 h-4"></i>
     </button>
