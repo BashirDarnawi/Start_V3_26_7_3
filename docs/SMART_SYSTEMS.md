@@ -53,6 +53,8 @@ A system sits inside it and keeps its own screens:
 - **The Ads Studio keeps its own list of sections in the page.** Beside it the frame stays a narrow
   rail (`.frame-rail`: the area switcher, the owner dashboard, the account menu) at every wide size.
   The Studio's own door (`/studio`) has no frame at all: there is only one area there.
+  The same holds for an account whose only area is the Ads Studio, at any address: no rail is
+  drawn, because it would hold nothing but a switcher with one entry.
 
 ## Adding a new system (template)
 

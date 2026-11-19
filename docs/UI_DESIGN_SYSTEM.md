@@ -119,7 +119,8 @@ migration. Existing records use the new views automatically.
   by the system and opened by address, and its own back link and tab bar step
   aside; the Ads Studio keeps its own list of sections in the page, beside a
   frame that stays a narrow rail. On phones and tablets both keep their own
-  navigation, and the Studio's own door (`/studio`) has no frame.
+  navigation, and the Studio's own door (`/studio`) has no frame; nor does an
+  account whose only area is the Ads Studio get the rail.
 - **Screen sizes (since November 2026).** Wide screens: the page and the top
   bar use up to 1440 px. From 700 px the card lists (Customers, Receipts,
   Pages, Users) use two columns. From 600 to 900 px a dialog is a centred

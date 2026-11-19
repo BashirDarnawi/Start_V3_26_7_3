@@ -16675,12 +16675,13 @@ function renderMainApp(viewHTML = null) {
   // keeps its own header, and on phones its own navigation: no phone header or tab bar there.
   const showSidebar = !IS_STUDIO_SHELL;
   const phoneNav = showSidebar && !['clothes-system', 'ads-studio'].includes(state.currentView);
+  const side = showSidebar ? renderSidebar() : '';
   
   return `
     <div class="app-shell ui-workspace flex min-h-screen" dir="${dir}" data-ui-design="studio-2026">
-      ${showSidebar ? renderSidebar() : ''}
+      ${side}
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
-      <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
+      <main class="app-main min-w-0 flex-1 ${side ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
         ${phoneNav ? `
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
           <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
@@ -16744,7 +16745,9 @@ function renderSidebar() {
   // A system hands the frame its sections through its own door ([tab, icon, name, on screen]); the frame
   // draws them and opens each by its address. No list yet (bundle loading, or its gate is up): no lines.
   // The Ads Studio keeps its own list of sections beside the frame, which stays a narrow rail there.
+  // An account with no other area gets no rail: the Studio looks as it does at its own door.
   const rail = view === 'ads-studio';
+  if (rail && areas.length < 2) return '';
   const system = rail || view === 'clothes-system';
   const door = !rail && system && typeof clothesFrameSections === 'function' ? clothesFrameSections() : [];
   const name = here ? here[2] : t('adManager');

@@ -1261,6 +1261,21 @@ async function main() {
     f.state.language = 'ar';
     assert.equal(f.sandbox.getWorkspaceViewTitle('plans'), 'الباقات والاشتراكات');
   });
+  await test('redesign frame: an account whose only area is the Ads Studio keeps the Studio as it is at its own door (no rail, no room left for one); with a second area the rail is there', async () => {
+    const customer = { id: 'studio-only', name: 'Studio Customer', role: 'Employee', permissions: {} };
+    const f = frameFixture(customer, 'ads-studio');
+    f.sandbox.userCanAccessView = (_user, view) => view === 'ads-studio';
+    f.sandbox.renderView = () => '<p>studio</p>';
+    const alone = String(f.run('renderMainApp()'));
+    // A rail would hold nothing for this account but a switcher with one entry and a second account menu.
+    assert.ok(!alone.includes('id="app-sidebar"') && !alone.includes('md:ml-72') && !alone.includes('md:mr-72'), 'no rail and no margin kept for one');
+    assert.ok(!alone.includes('mobile-app-header') && !alone.includes('mobile-bottom-nav') && alone.includes('<p>studio</p>'));
+    // The same account with a second area (here the Clothes System): the rail and its switcher are there.
+    f.sandbox.shellCanOpen = view => view === 'clothes-system';
+    const two = String(f.run('renderMainApp()'));
+    assert.ok(/<aside id="app-sidebar" class="app-sidebar frame-rail /.test(two) && two.includes('md:ml-72'), 'two areas: the rail');
+    assert.ok(two.includes(`onclick="navigateTo('clothes-system')"`), 'the switcher offers the other area');
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {
