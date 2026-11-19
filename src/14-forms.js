@@ -5694,10 +5694,11 @@ function showCustomerModal() {
   renderModal();
 }
 
+// TEMPORARY (owner request, Aug 2026): manual page creation is paused; the team uses Meta-imported
+// pages, which arrive linked to their ads. false allows manual pages again; editPage is not affected.
+// The Pages screen reads it too, to say "paused" in place of a button that would only refuse.
+const PAGE_MANUAL_CREATE_PAUSED = true;
 function showPageModal() {
-  // TEMPORARY (owner request, Aug 2026): manual page creation is paused; the team uses Meta-imported
-  // pages, which arrive linked to their ads. false allows manual pages again; editPage is not affected.
-  const PAGE_MANUAL_CREATE_PAUSED = true;
   if (PAGE_MANUAL_CREATE_PAUSED) {
     showNotification(
       state.language === 'ar' ? 'موقوف مؤقتاً' : 'Temporarily off',

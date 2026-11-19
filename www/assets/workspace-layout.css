@@ -320,3 +320,11 @@ pre.font-sans { font-family: inherit; }
 @media (min-width: 901px) {
   .app-main > .app-content, .workspace-topbar > div { max-width: 1440px; }
 }
+
+/* A control that is switched off on purpose says so in place (it used to look like a button and then refuse). */
+.workspace-paused {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 14px;
+  border: 1px dashed var(--ui-line); border-radius: 12px; background: var(--ui-surface-soft);
+  font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ui-muted);
+}
+.workspace-paused > :is(i, svg) { flex: none; width: 16px; height: 16px; }

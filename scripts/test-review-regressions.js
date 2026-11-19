@@ -1251,6 +1251,28 @@ async function main() {
     f.state.liquidityTracking = null;
     assert.ok(/id="liquidity-start-date"[^>]*aria-label="Start date"/.test(String(f.sandbox.renderAnalyticsView())), 'the Liquidity start-date field is named');
   });
+  await test('redesign M4: a control that is switched off says so in place: Add Page reads "paused" instead of a button that refuses, and the Admin\'s empty ad form says where pages come from', async () => {
+    const f = frameFixture(frameAdmin, 'pages');
+    f.state.pages = [{ id: 'p1', name: 'Page', customerId: '', _lastModified: 1 }];
+    assert.equal(f.run('PAGE_MANUAL_CREATE_PAUSED'), true, 'the owner\'s August 2026 switch is untouched');
+    const english = String(f.sandbox.renderPagesView());
+    assert.ok(english.includes('class="workspace-paused"') && english.includes('Add Page is paused: pages now come from the Meta import'));
+    assert.ok(!english.includes('onclick="showPageModal()"'), 'before: a blue Add Page button that answered "Temporarily off"');
+    f.state.language = 'ar';
+    assert.ok(String(f.sandbox.renderPagesView()).includes('إضافة الصفحات موقوفة: الصفحات تأتي الآن من استيراد ميتا'));
+    // The switch itself still refuses, with its own message, however the dialog is asked for (a saved link, for example).
+    const notes = [];
+    f.state.language = 'en';
+    f.sandbox.showNotification = (title, message, type) => { notes.push([title, type]); };
+    f.sandbox.showPageModal();
+    assert.deepEqual(notes, [['Temporarily off', 'warning']]);
+    assert.notEqual(f.state.activeModal, 'page');
+    // The ad form: an Admin is told that ads use pages imported through Meta Sync; anyone else keeps the old sentence.
+    const modals = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+    const empty = modals.slice(modals.indexOf('if (visiblePages.length === 0) {'), modals.indexOf('// NEW DESIGN: Full-height scrollable modal'));
+    assert.ok(empty.includes('AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin()') && empty.includes('An Admin creates ads on the pages that arrive through Meta Sync on the Ads screen.'));
+    assert.ok(empty.includes('Please add a Facebook Page first before creating an ad.') && empty.includes("'Open Pages'") && !empty.includes("'Add Page'"));
+  });
   await test('audit export pages by the last row cursor and a failed page downloads nothing (n=7)', async () => {
     const { sandbox } = loadBrowserSource();
     const notes = [];

@@ -18709,10 +18709,10 @@ function renderPagesView() {
             <i data-lucide="copy" class="w-4 h-4"></i>
             <span>${isAr ? 'الصفحات المكررة' : 'Duplicate pages'}${duplicatePageGroups.length > 0 ? ` (${duplicatePageGroups.length})` : ''}</span>
           </button>
-          <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
+          ${PAGE_MANUAL_CREATE_PAUSED ? `<p class="workspace-paused"><i data-lucide="pause"></i><span>${isAr ? 'إضافة الصفحات موقوفة: الصفحات تأتي الآن من استيراد ميتا' : 'Add Page is paused: pages now come from the Meta import'}</span></p>` : `<button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="file-plus" class="w-4 h-4"></i>
             <span>${t('addPage')}</span>
-          </button>
+          </button>`}
         </div>
       </div>
 
@@ -37331,10 +37331,11 @@ function showCustomerModal() {
   renderModal();
 }
 
+// TEMPORARY (owner request, Aug 2026): manual page creation is paused; the team uses Meta-imported
+// pages, which arrive linked to their ads. false allows manual pages again; editPage is not affected.
+// The Pages screen reads it too, to say "paused" in place of a button that would only refuse.
+const PAGE_MANUAL_CREATE_PAUSED = true;
 function showPageModal() {
-  // TEMPORARY (owner request, Aug 2026): manual page creation is paused; the team uses Meta-imported
-  // pages, which arrive linked to their ads. false allows manual pages again; editPage is not affected.
-  const PAGE_MANUAL_CREATE_PAUSED = true;
   if (PAGE_MANUAL_CREATE_PAUSED) {
     showNotification(
       state.language === 'ar' ? 'موقوف مؤقتاً' : 'Temporarily off',
@@ -37940,9 +37941,11 @@ function renderModal() {
               <i data-lucide="file-text" class="w-10 h-10 text-white"></i>
             </div>
             <h2 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArAd ? 'لا توجد صفحات' : 'No Pages Found'}</h2>
-            <p class="text-slate-500 mb-4">${isArAd ? 'الرجاء إضافة صفحة فيسبوك أولاً قبل إنشاء إعلان.' : 'Please add a Facebook Page first before creating an ad.'}</p>
+            <p class="text-slate-500 mb-4">${AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin()
+              ? (isArAd ? 'لم تُستورد أي صفحة من ميتا بعد. إعلانات المدير تُنشأ على الصفحات التي تصل عبر «ربط Meta» في شاشة الإعلانات.' : 'No page has been imported from Meta yet. An Admin creates ads on the pages that arrive through Meta Sync on the Ads screen.')
+              : (isArAd ? 'الرجاء إضافة صفحة فيسبوك أولاً قبل إنشاء إعلان.' : 'Please add a Facebook Page first before creating an ad.')}</p>
             <button onclick="closeModal(); navigateTo('pages')" class="btn-shine bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl font-bold">
-              <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${isArAd ? 'إضافة صفحة' : 'Add Page'}
+              <i data-lucide="file-text" class="w-4 h-4 inline mr-2"></i>${isArAd ? 'فتح الصفحات' : 'Open Pages'}
             </button>
           </div>
         `;

@@ -3358,10 +3358,10 @@ function renderPagesView() {
             <i data-lucide="copy" class="w-4 h-4"></i>
             <span>${isAr ? 'الصفحات المكررة' : 'Duplicate pages'}${duplicatePageGroups.length > 0 ? ` (${duplicatePageGroups.length})` : ''}</span>
           </button>
-          <button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
+          ${PAGE_MANUAL_CREATE_PAUSED ? `<p class="workspace-paused"><i data-lucide="pause"></i><span>${isAr ? 'إضافة الصفحات موقوفة: الصفحات تأتي الآن من استيراد ميتا' : 'Add Page is paused: pages now come from the Meta import'}</span></p>` : `<button onclick="showPageModal()" class="btn-shine w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center justify-center space-x-2">
             <i data-lucide="file-plus" class="w-4 h-4"></i>
             <span>${t('addPage')}</span>
-          </button>
+          </button>`}
         </div>
       </div>
 
