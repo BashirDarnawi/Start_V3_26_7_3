@@ -1009,6 +1009,254 @@ async function main() {
     await settle();
     assert.ok(!nodes.has('meta-insights-modal'), 'Meta Insights stays closed after Back');
   });
+  // Connect with Facebook (lazy card in Meta Sync): every state, the request payloads, the facebook.com check,
+  // the phone app, ticks kept across a rebuild, escaped values and never a key on screen.
+  const metaFbBase = () => ({ appReady: true, loginConfigId: '1234567890', loginConfigSource: 'saved', redirectUri: 'https://albayan.example.test/api/meta-ads/connection/callback',
+    tokenSource: 'environment', reconnectNeeded: false, connected: null, choice: null, accounts: { available: [], selected: [] }, lastResult: null });
+  const metaFbConnected = (extra = {}) => ({ ...metaFbBase(), tokenSource: 'connection',
+    connected: { connectedAt: '2026-11-19T10:00:00Z', connectedByName: 'Admin One', businessName: 'Shop Biz', systemUserName: 'Albayan Robot', expiresNever: true, expiresAt: '',
+      scopes: ['ads_read'], missingScopes: [], pagesCount: 3 },
+    accounts: { available: [{ id: '111', name: 'First' }, { id: '222', name: 'Second' }, { id: '333', name: 'Third' }], selected: ['111'] }, ...extra });
+  async function metaFbDialog({ language = 'en', phone = false, meta = { configured: false, graphApiVersion: 'v25.0', tokenSource: 'environment' }, fb = metaFbBase(), routes = {}, answer = true } = {}) {
+    const fixture = metaToolsFixture();
+    const { sandbox, state, run } = fixture;
+    const nodes = metaDialogDom(fixture);
+    run('Security').escapeHtml = plainEscape;
+    state.language = language;
+    sandbox.isCurrentUserAdmin = () => true;
+    sandbox.isPackagedMobileApp = () => phone;
+    sandbox.apiMetaAdsStatus = async () => meta;
+    sandbox.apiMetaAdsAccounts = async () => [];
+    const calls = [];
+    const assigned = [];
+    const notes = [];
+    const asked = [];
+    sandbox.window.location.assign = url => assigned.push(url);
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.confirm = text => { asked.push(text); return answer; };
+    sandbox.apiJson = async (url, options = {}) => {
+      // Plain host-realm copies, so deepEqual compares values and not the sandbox's object prototypes.
+      const body = options.body === undefined ? undefined : JSON.parse(JSON.stringify(options.body));
+      calls.push({ url, method: options.method, body });
+      if (url === '/api/meta-ads/connection' && options.method === 'GET') return fb;
+      const reply = routes[url];
+      if (!reply) throw new Error(`unexpected ${options.method} ${url}`);
+      return typeof reply === 'function' ? reply(body) : reply;
+    };
+    sandbox.openMetaAdsConnectionModalNow();
+    await settle();
+    await settle();
+    const html = () => String(nodes.get('meta-ads-modal')?.innerHTML || '');
+    return { ...fixture, nodes, calls, assigned, notes, asked, html };
+  }
+  const metaFbState = html => (html.match(/data-meta-fb-state="([a-z-]+)"/) || [])[1] || '';
+
+  await test('Connect with Facebook: the card shows each state from GET /api/meta-ads/connection, in English and Arabic', async () => {
+    const notReady = await metaFbDialog({ fb: { ...metaFbBase(), appReady: false } });
+    let html = notReady.html();
+    assert.equal(notReady.calls[0].url, '/api/meta-ads/connection', 'the card reads its own status when Meta Sync opens');
+    assert.equal(metaFbState(html), 'app-not-ready');
+    assert.ok(html.includes('ALBAYAN_META_APP_ID') && html.includes('ALBAYAN_META_APP_SECRET') && !html.includes('metaFbConnect()'), html);
+    assert.ok(html.includes('Never type the access token into Albayan or chat. Put it only in Jelastic settings.') && !html.includes('Or use Connect with Facebook above'), 'the notice is unchanged when Connect is not usable');
+
+    const config = await metaFbDialog({ fb: { ...metaFbBase(), loginConfigId: '', loginConfigSource: '' } });
+    html = config.html();
+    assert.equal(metaFbState(html), 'config');
+    assert.ok(html.includes('https://albayan.example.test/api/meta-ads/connection/callback') && html.includes('onclick="metaFbCopyRedirect()"') && html.includes('id="meta-fb-config-id"'), html);
+    assert.ok(html.includes('class="inline-flex min-h-11'), 'touch-size buttons');
+
+    const idle = await metaFbDialog();
+    html = idle.html();
+    assert.equal(metaFbState(html), 'not-connected');
+    assert.ok(html.includes('onclick="metaFbConnect()"') && html.includes('Connect with Facebook') && html.includes('Key in use: hosting settings'), html);
+    assert.ok(html.includes('Never type the access token into Albayan or chat. Put it only in Jelastic settings. Or use Connect with Facebook above.'), 'the notice keeps its sentence and points at the button');
+    assert.ok(html.includes('onclick="metaFbEditConfig()"'), 'a saved configuration id can be changed');
+    const noKey = await metaFbDialog({ fb: { ...metaFbBase(), tokenSource: 'none' }, meta: { configured: false, tokenSource: 'none' } });
+    assert.ok(noKey.html().includes('No key yet'));
+
+    const choice = await metaFbDialog({ fb: { ...metaFbBase(), choice: { expiresAt: '2026-11-19T10:15:00Z', candidates: [
+      { businessId: '9001', businessName: '<img src=x onerror=alert(1)>', systemUserId: '61001', systemUserName: 'Robot A', role: 'ADMIN' },
+      { businessId: '9002', businessName: 'Second Biz', systemUserId: '61002', systemUserName: 'Robot B', role: 'EMPLOYEE' }] } } });
+    html = choice.html();
+    assert.equal(metaFbState(html), 'choice');
+    assert.equal((html.match(/type="radio" name="meta-fb-candidate"/g) || []).length, 2);
+    assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;') && !html.includes('<img src=x'), 'names are escaped');
+    assert.ok(html.includes('Use this account') && html.includes('Robot B') && html.includes('EMPLOYEE'), html);
+
+    const connected = await metaFbDialog({ meta: { configured: true, graphApiVersion: 'v25.0', tokenSource: 'connection' },
+      fb: metaFbConnected({ connected: { ...metaFbConnected().connected, missingScopes: ['pages_manage_posts'] } }) });
+    html = connected.html();
+    assert.equal(metaFbState(html), 'connected');
+    assert.ok(html.includes('Shop Biz · Albayan Robot') && html.includes('by Admin One') && html.includes('never expires') && html.includes('Pages: 3'), html);
+    assert.ok(/role="alert"[^>]*>Missing permissions: <span dir="ltr">pages_manage_posts<\/span>/.test(html), 'missing permissions are a warning');
+    assert.equal((html.match(/type="checkbox" data-meta-fb-id=/g) || []).length, 3);
+    assert.ok(html.includes('data-meta-fb-id="111" checked') && !html.includes('data-meta-fb-id="222" checked'), 'the saved selection is ticked');
+    for (const action of ['metaFbSaveAccounts()', 'metaFbRefresh()', 'metaFbConnect()', 'metaFbDisconnect()']) assert.ok(html.includes(`onclick="${action}"`), action);
+    assert.ok(html.includes('Key in use: Connect with Facebook'), 'the card and the Connection tile name the key in use');
+    assert.ok(/Connection<\/div>[\s\S]*?Ready<\/div><div class="mt-1 text-xs text-slate-500">Key in use: Connect with Facebook<\/div>/.test(html), 'the Connection tile has the key line');
+
+    const reconnect = await metaFbDialog({ fb: { ...metaFbBase(), reconnectNeeded: true } });
+    html = reconnect.html();
+    assert.equal(metaFbState(html), 'reconnect');
+    assert.ok(html.includes('Reconnect') && html.includes('onclick="metaFbDisconnect()"') && html.includes('onclick="metaFbConnect()"'), html);
+
+    const arabic = await metaFbDialog({ language: 'ar' });
+    html = arabic.html();
+    assert.ok(html.includes('dir="rtl"') && html.includes('الربط مع فيسبوك') && html.includes('المفتاح المستخدم: إعدادات الاستضافة') && html.includes('أو استخدم «الربط مع فيسبوك» في الأعلى.'), html);
+
+    const oldServer = await metaFbDialog();
+    oldServer.sandbox.apiJson = async () => { throw Object.assign(new Error('Not Found'), { status: 404 }); };
+    oldServer.sandbox.openMetaAdsConnectionModalNow();
+    await settle(); await settle();
+    assert.ok(!oldServer.html().includes('data-meta-fb-card') && !oldServer.html().includes('role="alert"'), 'an older server without the routes shows no card and no error');
+  });
+
+  await test('Connect with Facebook: every last-result code has its own sentence in English and Arabic; failures are alerts', async () => {
+    const codes = ['connected', 'choose_system_user', 'cancelled', 'no_system_user', 'state_invalid', 'state_expired', 'not_admin', 'exchange_failed', 'meta_error',
+      'missing_permissions', 'not_system_user', 'app_mismatch', 'token_invalid', 'disconnected', 'app_not_ready', 'config_missing', 'base_url_invalid'];
+    const { sandbox } = metaToolsFixture();
+    const english = new Set();
+    for (const code of codes) {
+      const en = sandbox.metaFbText(code, false);
+      const ar = sandbox.metaFbText(code, true);
+      assert.ok(en && /^[A-Z]/.test(en) && !english.has(en), `${code}: English`);
+      assert.ok(/[؀-ۿ]/.test(ar) && ar !== en, `${code}: Arabic`);
+      english.add(en);
+    }
+    assert.equal(sandbox.metaFbText('unknown_code', false), '');
+    const failed = await metaFbDialog({ fb: { ...metaFbBase(), lastResult: { ok: false, code: 'missing_permissions', at: '2026-11-19T10:00:00Z', missingScopes: ['ads_read'], metaCode: '200' } } });
+    let html = failed.html();
+    assert.ok(/role="alert" data-meta-fb-result="missing_permissions"[^>]*>Some required permissions were not granted\. Press Connect again and allow every permission\. \(ads_read\) · Meta code 200/.test(html), html);
+    const ok = await metaFbDialog({ language: 'ar', fb: { ...metaFbBase(), lastResult: { ok: true, code: 'disconnected', at: '2026-11-19T10:00:00Z' } } });
+    html = ok.html();
+    assert.ok(html.includes('role="status" data-meta-fb-result="disconnected"') && html.includes('تم فصل فيسبوك'), html);
+  });
+
+  await test('Connect with Facebook: Connect posts /start and only follows an https://www.facebook.com/ address', async () => {
+    const good = 'https://www.facebook.com/v25.0/dialog/oauth?client_id=1&config_id=2&response_type=code';
+    const ok = await metaFbDialog({ routes: { '/api/meta-ads/connection/start': { authorizeUrl: good } } });
+    await ok.sandbox.metaFbConnect();
+    assert.deepEqual(ok.calls.slice(1).map(c => [c.method, c.url, c.body]), [['POST', '/api/meta-ads/connection/start', {}]]);
+    assert.deepEqual(ok.assigned, [good]);
+    for (const bad of ['https://evil.example.test/dialog', 'https://www.facebook.com.evil.example.test/x', 'http://www.facebook.com/x', 'javascript:alert(1)', '']) {
+      const refused = await metaFbDialog({ routes: { '/api/meta-ads/connection/start': { authorizeUrl: bad } } });
+      await refused.sandbox.metaFbConnect();
+      assert.deepEqual(refused.assigned, [], `${bad}: never opened`);
+      assert.ok(refused.html().includes('unexpected sign-in address'), bad);
+      assert.equal(refused.run('metaFbUi.busy'), '', 'the button is released');
+    }
+    const arabicRefusal = await metaFbDialog({ language: 'ar', routes: { '/api/meta-ads/connection/start': () => { throw Object.assign(new Error('Add the Facebook Login configuration id first.'), { status: 409, payload: { code: 'config_missing' } }); } } });
+    await arabicRefusal.sandbox.metaFbConnect();
+    assert.ok(arabicRefusal.html().includes('معرّف إعداد تسجيل الدخول إلى فيسبوك غير موجود') && !arabicRefusal.html().includes('Add the Facebook Login'), 'refusals use the code for the Arabic text');
+  });
+
+  await test('Connect with Facebook: the packaged phone app hides Connect and Reconnect and says to use a web browser', async () => {
+    const idle = await metaFbDialog({ phone: true, routes: { '/api/meta-ads/connection/start': { authorizeUrl: 'https://www.facebook.com/x' } } });
+    let html = idle.html();
+    assert.ok(html.includes('Open Albayan in a web browser to connect Facebook') && !html.includes('metaFbConnect()'), html);
+    assert.ok(!html.includes('Or use Connect with Facebook above'), 'the notice does not point at a hidden button');
+    await idle.sandbox.metaFbConnect();
+    assert.equal(idle.calls.length, 1, 'no /start from the phone app');
+    assert.deepEqual(idle.assigned, []);
+    const connected = await metaFbDialog({ phone: true, fb: metaFbConnected() });
+    html = connected.html();
+    assert.ok(!html.includes('metaFbConnect()') && html.includes('onclick="metaFbDisconnect()"') && html.includes('Open Albayan in a web browser to connect Facebook'), html);
+    const reconnect = await metaFbDialog({ phone: true, fb: { ...metaFbBase(), reconnectNeeded: true } });
+    assert.ok(!reconnect.html().includes('metaFbConnect()') && reconnect.html().includes('onclick="metaFbDisconnect()"'));
+  });
+
+  await test('Connect with Facebook: unsaved ticks survive a rebuild; Save, Refresh, Finish, Settings and Disconnect send the right payloads', async () => {
+    const saved = [];
+    const dialog = await metaFbDialog({ meta: { configured: true, tokenSource: 'connection' }, fb: metaFbConnected(), routes: {
+      '/api/meta-ads/connection/accounts': body => { saved.push(body); return metaFbConnected({ accounts: { ...metaFbConnected().accounts, selected: body.accountIds } }); },
+      '/api/meta-ads/connection/refresh': () => metaFbConnected({ accounts: { available: [{ id: '222', name: 'Second' }], selected: [] } })
+    } });
+    const { sandbox, run, html } = dialog;
+    sandbox.metaFbToggleAccount('222', true);
+    sandbox.metaFbToggleAccount('111', false);
+    sandbox.metaAdsRenderModal();
+    await sandbox.metaAdsLoadConnection();
+    assert.ok(html().includes('data-meta-fb-id="222" checked') && !html().includes('data-meta-fb-id="111" checked'), 'a rebuild keeps the unsaved ticks');
+    await sandbox.metaFbSaveAccounts();
+    assert.deepEqual(saved, [{ accountIds: ['222'] }]);
+    assert.equal(run('metaFbUi.ticks'), null, 'after Save the server selection is shown');
+    assert.ok(html().includes('data-meta-fb-id="222" checked'));
+    sandbox.metaFbToggleAccount('333', true);
+    await sandbox.metaFbRefresh();
+    assert.deepEqual(JSON.parse(JSON.stringify(run('metaFbUi.ticks'))), ['222'], 'Refresh drops ticks for accounts the key no longer sees');
+    const posts = dialog.calls.filter(c => c.method === 'POST').map(c => [c.url, c.body]);
+    assert.deepEqual(posts, [['/api/meta-ads/connection/accounts', { accountIds: ['222'] }], ['/api/meta-ads/connection/refresh', {}]]);
+
+    const choice = await metaFbDialog({ fb: { ...metaFbBase(), choice: { expiresAt: '', candidates: [{ businessId: '9', businessName: 'B', systemUserId: '61002', systemUserName: 'R', role: 'ADMIN' }] } },
+      routes: { '/api/meta-ads/connection/finish': body => ({ ok: true, code: 'connected', status: metaFbConnected() }) } });
+    await choice.sandbox.metaFbFinish();
+    assert.equal(choice.calls.filter(c => c.method === 'POST').length, 0, 'nothing is sent before a system user is picked');
+    assert.ok(choice.html().includes('choose which robot account'));
+    choice.sandbox.metaFbPick('61002');
+    await choice.sandbox.metaFbFinish();
+    assert.deepEqual(choice.calls.filter(c => c.method === 'POST').map(c => [c.url, c.body]), [['/api/meta-ads/connection/finish', { systemUserId: '61002' }]]);
+    assert.equal(metaFbState(choice.html()), 'connected');
+    assert.equal(choice.notes.at(-1).type, 'success');
+
+    const config = await metaFbDialog({ fb: { ...metaFbBase(), loginConfigId: '', loginConfigSource: '' }, routes: { '/api/meta-ads/connection/settings': body => ({ ...metaFbBase(), loginConfigId: body.loginConfigId }) } });
+    config.sandbox.metaFbDraft('12');
+    await config.sandbox.metaFbSaveConfig();
+    assert.equal(config.calls.filter(c => c.method === 'POST').length, 0, 'a short id is refused before sending');
+    config.sandbox.metaFbDraft(' 98765 ');
+    config.sandbox.metaAdsRenderModal();
+    assert.ok(config.html().includes('value=" 98765 "'), 'the typed id survives a rebuild');
+    await config.sandbox.metaFbSaveConfig();
+    assert.deepEqual(config.calls.filter(c => c.method === 'POST').map(c => [c.url, c.body]), [['/api/meta-ads/connection/settings', { loginConfigId: '98765' }]]);
+    assert.equal(metaFbState(config.html()), 'not-connected');
+
+    const keep = await metaFbDialog({ fb: metaFbConnected(), answer: false, routes: { '/api/meta-ads/connection/disconnect': () => ({ ok: true, code: 'disconnected', status: { ...metaFbBase(), lastResult: { ok: true, code: 'disconnected', at: '' } } }) } });
+    await keep.sandbox.metaFbDisconnect();
+    assert.equal(keep.asked.length, 1);
+    assert.ok(/Disconnect Facebook\?/.test(keep.asked[0]));
+    assert.equal(keep.calls.filter(c => c.method === 'POST').length, 0, 'No sends nothing');
+    keep.sandbox.confirm = () => true;
+    await keep.sandbox.metaFbDisconnect();
+    assert.deepEqual(keep.calls.filter(c => c.method === 'POST').map(c => [c.url, c.body]), [['/api/meta-ads/connection/disconnect', {}]]);
+    assert.equal(metaFbState(keep.html()), 'not-connected');
+
+    // A new opening starts clean: no ticks, pick or draft from the previous admin.
+    keep.run("metaFbUi.ticks = ['111']; metaFbUi.pick = '61002'; metaFbUi.configDraft = '55555'; metaFbUi.error = 'old';");
+    keep.sandbox.closeMetaAdsConnectionModal();
+    keep.sandbox.openMetaAdsConnectionModalNow();
+    assert.deepEqual(JSON.parse(JSON.stringify(keep.run('[metaFbUi.ticks, metaFbUi.pick, metaFbUi.configDraft, metaFbUi.error, metaFbUi.status]'))), [null, '', '', '', null]);
+  });
+
+  await test('Connect with Facebook: no key-like text ever reaches the card, even if a reply carried one', async () => {
+    const secret = 'EAAGsecretTOKENvalue123';
+    const fb = { ...metaFbConnected(), token: secret, accessToken: secret, ct: secret, nonce: secret, kid: secret,
+      connected: { ...metaFbConnected().connected, token: secret }, lastResult: { ok: false, code: 'meta_error', at: '', detail: secret } };
+    const dialog = await metaFbDialog({ fb, meta: { configured: true, tokenSource: 'connection', accessToken: secret } });
+    assert.ok(!dialog.html().includes(secret) && !/EAA[A-Za-z0-9]{8,}/.test(dialog.html()), 'no token text');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', '15d-meta-ads.js'), 'utf8');
+    assert.ok(!src.includes('graph.facebook.com') && !src.includes('api.facebook.com') && !src.includes('localStorage.setItem'));
+  });
+
+  await test('Studio health: the Meta token card names the key in use and points to Reconnect in Meta Sync', async () => {
+    for (const [source, en, ar] of [['connection', 'Connect with Facebook', 'الربط مع فيسبوك'], ['environment', 'hosting settings', 'إعدادات الاستضافة'], ['none', 'no key yet', 'لا يوجد مفتاح بعد']]) {
+      for (const language of ['en', 'ar']) {
+        const { state, run } = studioFixture();
+        const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+        for (const file of manifest.lazy['studio-staff.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+        state.language = language;
+        run(`_studioHealth.token = ${JSON.stringify({ configured: true, checked: true, isValid: true, expiresNever: true, missingScopes: [], tokenSource: source })};`);
+        const card = String(run('renderStudioHealthToken()'));
+        const label = language === 'en' ? 'Key in use' : 'المفتاح المستخدم';
+        assert.ok(card.includes(`<span>${label}</span>`) && card.includes(language === 'en' ? en : ar), `${source}/${language}: ${card}`);
+        assert.ok(card.includes(language === 'en' ? 'presses Reconnect in Meta Sync' : '«إعادة الربط» في مزامنة ميتا'), 'the fix names Reconnect');
+      }
+    }
+    const { run } = studioFixture();
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['studio-staff.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    run(`_studioHealth.token = ${JSON.stringify({ configured: true, checked: false })};`);
+    assert.ok(!String(run('renderStudioHealthToken()')).includes('Key in use'), 'an older server without tokenSource shows no key line');
+  });
+
   // Bug hunt R6 (R6-android-runtime-4): phone Back removed the company-funds dialogs without their closers,
   // so <body> stayed overflow:hidden (the phone header stopped sticking) and the dialog state stayed behind.
   await test('R6 android-runtime-4: Android Back closes the company-funds dialogs through their closers; a busy request keeps its dialog', async () => {

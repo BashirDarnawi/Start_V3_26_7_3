@@ -771,7 +771,7 @@ function metaFbDisconnect() {
   const question = isAr
     ? 'فصل فيسبوك؟ سيُحذف المفتاح المحفوظ، ويعود Albayan إلى مفتاح إعدادات الاستضافة إن وُجد.'
     : 'Disconnect Facebook? The stored key is removed and Albayan goes back to the hosting-settings key, if one is set.';
-  if (!window.confirm(question)) return null;
+  if (!confirm(question)) return null;
   return metaFbPost('disconnect', '/disconnect', {}, () => {
     metaFbUi.ticks = null;
     metaFbUi.pick = '';
