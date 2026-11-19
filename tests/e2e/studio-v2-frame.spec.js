@@ -64,8 +64,8 @@ test('the v2 frame draws when /me says v2; nav drives ?tab= and Back follows the
   await expect(page.getByTestId('studio-screen-inbox')).toBeVisible();
   await page.goBack();  // the browser's Back agrees with the in-app one
   await expect.poll(() => tab(page)).toBe('home');
-  await page.goBack();  // Home leaves the studio
-  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await page.goBack();  // Home leaves the studio: back at the root address, where an Admin gets the owner dashboard
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/control-center');
   expect(errors).toEqual([]);
 });
 

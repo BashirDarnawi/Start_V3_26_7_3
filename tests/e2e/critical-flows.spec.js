@@ -18,10 +18,12 @@ async function signIn(page) {
   // itself; each test can then open the route it needs.
   await page.waitForFunction(() => typeof state !== 'undefined' && !!state.currentUser?.id);
   await expect(page.locator('.control-workspace h1')).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe('/control-center');
   // The live-sync poller starts only after the post-login full data load has
   // settled; waiting for it makes every seed and refresh below deterministic.
   await waitForLiveSync(page);
+  // The address follows the screen once that load has settled (as it always
+  // has for an employee who signs in at the root address).
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/control-center');
 }
 
 // A page that boots from its cache renders first and starts the poller only
