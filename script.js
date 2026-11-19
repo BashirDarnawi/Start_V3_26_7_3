@@ -9916,10 +9916,12 @@ async function apiListUsersForUi() {
     return _usersListCache.data;
   }
   
-  // Admins (and users with the users.view permission) can access the full
-  // list; others get the minimal public list.
+  // Admins (and users with the users.view or users.managePermissions permission) can access the full
+  // list and ask for it; others get the minimal public list without first being refused the full one.
   try {
     try {
+      const me = state.currentUser?.id;
+      if (!hasPermission(me, 'users', 'view') && !hasPermission(me, 'users', 'managePermissions')) throw { status: 403 };
       const result = await withRetry(
         () => apiJson('/api/users', { method: 'GET' }, { timeoutMs: 10000 }), // Faster timeout
         2, 300 // Faster retry
@@ -11532,6 +11534,9 @@ async function serverLoadAllData() {
   // IMPORTANT: one failed collection never fails the whole app: load what we can, show one warning.
   const forbidden = [];
   const failed = [];
+  // A list this account cannot read is not requested: the server's watermark answer leaves it out AND
+  // the app's own rule (the one the poller obeys) agrees. Either one in doubt, or no answer: ask.
+  const mayRead = preLoadWatermarks && getAuthorizedServerSyncCollections();
   // A failed refresh NEVER wipes existing data (no "data disappears then comes back").
   const hadCounts = {
     ads: Array.isArray(state.ads) ? state.ads.length : 0,
@@ -11553,6 +11558,10 @@ async function serverLoadAllData() {
     // #region agent log
     const _start = Date.now();
     // #endregion
+    if (mayRead && !(collection in preLoadWatermarks) && !mayRead.includes(collection)) {
+      forbidden.push(collection);
+      return { ok: true, collection, data: [], status: 403 };  // the same outcome as the server's refusal
+    }
     try {
       const result = await apiLoadCollectionAll(collection, { forceRefresh: true });
       if (loadAborted()) return { ok: false, collection, data: null, aborted: true };

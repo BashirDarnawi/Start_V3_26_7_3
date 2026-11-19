@@ -209,9 +209,10 @@ async function expectNoPageOverflow(page, label) {
 
 // Browser messages every page of the app gets today, outside the studio's control:
 // * index.html's <meta> security headers (the server sends the real ones as HTTP headers);
-// * the sign-in data load asks for every collection and the user list; the server answers 401/403
-//   for the ones this user may not read (a studio customer reads almost none of them), and the
-//   browser logs each refused request as a console error.
+// * the session check before sign-in answers 401, and the browser logs it as a console error. The
+//   sign-in data load itself no longer asks for a collection or user list this account cannot read
+//   (scripts/test-sync-persistence-work.js, B-23); a 403 can still follow a permission withdrawn
+//   while the page is open, until the next permission refresh.
 const PLATFORM_NOISE = [
   { text: /X-Frame-Option.*\bmeta\b/i },
   { text: /frame-ancestors'? is ignored when delivered via an? (HTML )?<?meta>? element/i },

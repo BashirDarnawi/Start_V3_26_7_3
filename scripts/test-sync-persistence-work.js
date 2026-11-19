@@ -785,6 +785,102 @@ async function main() {
     assert.equal(f.state.exchangeRateHistory.length, 2);
     assert.equal(f.state.defaultExchangeRate, 5.5, 'before: 5.00 stayed until the next rate delta or full load');
   });
+  // ---- B-23 (redesign M4): a limited account asks the server only for what it may read ----
+  const ALL_LISTS = ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory', 'adCampaignRequests', 'walletTransactions', 'serviceSubscriptions', 'appSettings', 'dollarPurchases', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'];
+  // One full load for `user`. `watermarks` is the server's answer to "which lists can I see?" (null = no
+  // answer); `refuses` are the lists the stub server answers 403 for, as the real one would.
+  async function fullLoadAs(user, watermarks, refuses = []) {
+    const f = loadBrowserSource();
+    f.sandbox.isServerModeEnabled = () => true;
+    f.state.currentUser = user; f.state.users = [user];
+    for (const name of ALL_LISTS) f.state[name] = [{ id: `${name}_cached`, _lastModified: 1 }];
+    const asked = [];
+    f.sandbox.apiGetSyncWatermarks = async () => watermarks;
+    f.sandbox.apiLoadCollectionAll = async name => {
+      asked.push(name);
+      if (refuses.includes(name)) throw Object.assign(new Error('Forbidden'), { status: 403 });
+      return [{ id: `${name}_row`, _lastModified: 5 }];
+    };
+    f.sandbox.apiListUsersForUi = async () => [user];
+    f.sandbox.queueNativeReminderSync = () => {};
+    f.sandbox.showNotification = () => {};
+    const result = plain(await f.sandbox.serverLoadAllData());
+    const held = Object.fromEntries(ALL_LISTS.map(name => [name, Array.from(f.state[name] || [], row => row.id)]));
+    return { asked, result, held, cursors: plain(f.run('_serverLiveSync.collectionCursors')) };
+  }
+  const marks = names => Object.fromEntries(names.map(name => [name, 7]));
+  await test('B-23: a limited account\'s full load asks only for the lists it may read, and ends exactly as the refusals left it', async () => {
+    const employee = { id: 'emp1', name: 'Employee', role: 'Employee', permissions: { ads: ['view'], receipts: ['viewOwn'] } };
+    const readable = ['ads', 'receipts', 'exchangeRateHistory', 'walletTransactions', 'serviceSubscriptions'];
+    const closed = ALL_LISTS.filter(name => !readable.includes(name));
+    const now = await fullLoadAs(employee, marks(readable));
+    assert.deepEqual(now.asked, readable, 'before: all 14 lists were requested and 9 came back 403');
+    assert.deepEqual(now.result, { failed: [], forbidden: closed });
+    for (const name of closed) {
+      assert.deepEqual(now.held[name], [], `${name}: nothing an earlier session cached stays behind`);
+      assert.equal(now.cursors[name], 0, `${name}: a later grant fetches the whole list`);
+    }
+    for (const name of readable) assert.deepEqual(now.held[name], [`${name}_row`]);
+    // The same account against a server with no watermark answer: everything is asked and nine are
+    // refused, as before. What the account holds afterwards is the same.
+    const before = await fullLoadAs(employee, null, closed);
+    assert.deepEqual(before.asked, ALL_LISTS);
+    assert.deepEqual(before.result.forbidden.slice().sort(), closed.slice().sort());
+    assert.deepEqual(before.held, now.held);
+  });
+  await test('B-23: whenever the server\'s answer and the app\'s own rule disagree, or there is no answer, the list is still asked for', async () => {
+    // A permission granted a moment ago: the server already lists the customers, the app's copy does not yet.
+    const granted = { id: 'emp2', name: 'Employee', role: 'Employee', permissions: { ads: ['view'] } };
+    const a = await fullLoadAs(granted, marks(['ads', 'customers', 'exchangeRateHistory', 'walletTransactions', 'serviceSubscriptions']));
+    assert(a.asked.includes('customers'), 'the server\'s answer wins over a stale copy of the permissions');
+    assert.deepEqual(a.held.customers, ['customers_row']);
+    // A Studio customer whose plan lapsed: the watermark answer leaves the requests out, yet the server
+    // still serves them (they hold the customer's money), and the app's own rule says so.
+    const lapsed = { id: 'cust1', name: 'Customer', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add'] } };
+    const b = await fullLoadAs(lapsed, marks(['exchangeRateHistory', 'walletTransactions', 'serviceSubscriptions']));
+    assert(b.asked.includes('adCampaignRequests'), 'before this guard a lapsed customer would lose sight of their own requests');
+    assert.deepEqual(b.held.adCampaignRequests, ['adCampaignRequests_row']);
+    assert.deepEqual(b.asked, ['exchangeRateHistory', 'adCampaignRequests', 'walletTransactions', 'serviceSubscriptions']);
+    // A driver: assigned ads, receipts and customers are asked for; the office-only lists are not.
+    const driver = { id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} };
+    const c = await fullLoadAs(driver, marks(['ads', 'receipts', 'customers', 'exchangeRateHistory', 'walletTransactions', 'serviceSubscriptions']));
+    assert.deepEqual(c.asked, ['ads', 'receipts', 'customers', 'exchangeRateHistory', 'walletTransactions', 'serviceSubscriptions']);
+    // An Admin is asked nothing less, whatever the answer holds.
+    const admin = { id: 'admin', name: 'Admin', role: 'Admin', permissions: {} };
+    assert.deepEqual((await fullLoadAs(admin, marks(ALL_LISTS))).asked, ALL_LISTS);
+    assert.deepEqual((await fullLoadAs(admin, marks([]))).asked, ALL_LISTS);
+    // No answer at all (an older server, an outage): every list is asked for, as before.
+    assert.deepEqual((await fullLoadAs(granted, null, ALL_LISTS.filter(name => name !== 'ads'))).asked, ALL_LISTS);
+  });
+  await test('B-23: only an account that may read the full users list asks for it; the others go straight to the short one', async () => {
+    const listFor = async (user, refuseFull = false) => {
+      const f = loadBrowserSource();
+      f.sandbox.isServerModeEnabled = () => true;
+      f.state.currentUser = user; f.state.users = [user];
+      const asked = [];
+      f.sandbox.apiJson = async path => {
+        asked.push(path);
+        if (path === '/api/users' && refuseFull) throw Object.assign(new Error('Forbidden'), { status: 403 });
+        return path === '/api/users' ? [{ id: user.id, name: user.name, role: user.role, email: 'x@example.com', permissions: {} }] : [{ id: user.id, name: user.name, role: user.role }];
+      };
+      const rows = plain(await f.sandbox.apiListUsersForUi());
+      return { asked, rows };
+    };
+    const plainEmployee = { id: 'emp1', name: 'Employee', role: 'Employee', permissions: { ads: ['view'] } };
+    const short = await listFor(plainEmployee);
+    assert.deepEqual(short.asked, ['/api/users/public'], 'before: /api/users was asked first and refused, on every sign-in and every 30 seconds');
+    assert.deepEqual(short.rows, [{ id: 'emp1', name: 'Employee', role: 'Employee' }]);
+    for (const action of ['view', 'managePermissions']) {
+      const manager = { id: 'mgr1', name: 'Manager', role: 'Employee', permissions: { users: [action] } };
+      assert.deepEqual((await listFor(manager)).asked, ['/api/users'], `users.${action} reads the full list`);
+    }
+    assert.deepEqual((await listFor({ id: 'admin', name: 'Admin', role: 'Admin', permissions: {} })).asked, ['/api/users']);
+    assert.deepEqual((await listFor({ id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} })).asked, ['/api/users/public']);
+    // A permission the server no longer honours (withdrawn a moment ago): the refusal still falls back.
+    const withdrawn = await listFor({ id: 'mgr2', name: 'Manager', role: 'Employee', permissions: { users: ['view'] } }, true);
+    assert.deepEqual(withdrawn.asked, ['/api/users', '/api/users/public']);
+    assert.deepEqual(withdrawn.rows, [{ id: 'mgr2', name: 'Manager', role: 'Employee' }]);
+  });
   console.log(`\n${passed} sync/persistence work regressions passed; ${failed} failed.`);
   if (failed) process.exitCode = 1;
 }
