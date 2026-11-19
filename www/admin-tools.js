@@ -746,9 +746,33 @@ function getControlCenterFacts() {
   };
 }
 
+// The "Today" figures are counted over every receipt, ad and customer. The usual redraw (a live-sync
+// poll with nothing new) reuses the last count instead of counting again. The key changes with any
+// record of any stored list (its version and its deleted mark), the signed-in account, the exchange
+// rate, the Clothes door arriving and the minute, so a figure is never older than one minute.
+let _controlCenterTodayMemo = { key: '', today: null };
+
+function controlCenterDataKey() {
+  let key = `${state.currentUser?.id}|${state.defaultExchangeRate}|${typeof clothesOwnerSummary}|${Math.floor(Date.now() / 60000)}`;
+  for (const name of PERSISTED_COLLECTIONS) {
+    const rows = state[name];
+    if (!Array.isArray(rows)) continue;
+    let mix = rows.length;
+    for (const row of rows) mix = (mix * 31 + (Number(row?._lastModified) || 0) % 1000003 + (row?._deleted ? 7 : 0)) | 0;
+    key += `|${mix}`;
+  }
+  return key;
+}
+
 // Everything the "Today" tab shows that the browser already holds. Each figure comes from the function
 // its own screen uses (named beside it), so the dashboard and that screen can never disagree.
 function getControlCenterToday() {
+  const key = controlCenterDataKey();
+  if (_controlCenterTodayMemo.key !== key) _controlCenterTodayMemo = { key, today: countControlCenterToday() };
+  return _controlCenterTodayMemo.today;
+}
+
+function countControlCenterToday() {
   const facts = getControlCenterFacts();
   const debtors = shellDebtorRows();  // Collect a debt: its own list
   return {

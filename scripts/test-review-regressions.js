@@ -904,6 +904,34 @@ async function main() {
     sandbox.getCurrentProfitabilitySnapshot = () => ({ unpricedSpendUSD: 12.5, knownGrossProfitLYD: 77.5 });
     return f;
   };
+  await test('redesign round 2: the dashboard counts again only when a record changed: a redraw with the same records reuses the last count, and nothing is ever older than a minute', async () => {
+    const { sandbox, state, run } = dashboardFixture();
+    let counts = 0;
+    const realDebtors = sandbox.shellDebtorRows;
+    sandbox.shellDebtorRows = () => { counts += 1; return realDebtors(); };
+    let now = 29918334 * 60000;  // the first second of a minute
+    run('Date').now = () => now;
+    const unpaid = () => sandbox.getControlCenterToday().facts.unpaidReceipts.length;
+    const before = unpaid();
+    assert.equal(counts, 1);
+    for (let i = 0; i < 5; i++) unpaid();
+    assert.equal(counts, 1, 'five redraws with the same records: one count (before: the lists were walked on every live-sync poll)');
+    assert.equal(sandbox.getControlCenterToday(), sandbox.getControlCenterToday(), 'the same answer is handed out');
+    // A saved change gives the record a new version: the next draw counts again and shows it.
+    const target = state.receipts.find(receipt => !receipt._deleted && sandbox.getReceiptPaymentState(receipt) === 'not_paid' && String(receipt.receiptType || '').toUpperCase() !== 'TRANSFER_IN');
+    Object.assign(target, { status: 'Paid', isPaid: true, _lastModified: Number(target._lastModified || 0) + 1 });
+    assert.equal(unpaid(), before - 1, 'a receipt that was paid leaves the count at once');
+    assert.equal(counts, 2);
+    // A deleted mark, a new record, another account, the rate, the Clothes door and the next minute each count again.
+    target._deleted = true; unpaid(); assert.equal(counts, 3, 'deleted mark');
+    state.customers.push({ id: 'c_new', name: 'New', _lastModified: 5 }); unpaid(); assert.equal(counts, 4, 'a new record in any list');
+    state.currentUser = { ...state.currentUser, id: 'another-admin' }; unpaid(); assert.equal(counts, 5, 'another account');
+    state.defaultExchangeRate = Number(state.defaultExchangeRate || 5) + 1; unpaid(); assert.equal(counts, 6, 'the exchange rate');
+    sandbox.clothesOwnerSummary = () => ({ lowStock: 0, owedLYD: 0 }); unpaid(); assert.equal(counts, 7, 'the Clothes door arriving');
+    unpaid(); assert.equal(counts, 7);
+    now += 59000; unpaid(); assert.equal(counts, 7, 'within the same minute: reused');
+    now += 2000; unpaid(); assert.equal(counts, 8, 'the next minute: counted again, so a date-bound figure (overdue, this month) is never older than that');
+  });
   await test('redesign M4: every "Needs you today" line shows the number its own screen shows, and its button opens that screen', async () => {
     const { sandbox, state, run } = dashboardFixture();
     const today = sandbox.getControlCenterToday();
