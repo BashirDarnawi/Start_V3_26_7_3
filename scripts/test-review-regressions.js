@@ -857,6 +857,19 @@ async function main() {
     assert.equal(sandbox.getPostLoginLandingViewForUser({ role: 'Delivery', permissions: {} }), 'delivery-dashboard');
     // The phone's Back button uses the same landing screen: Back on the dashboard asks before leaving the app.
     assert.equal(sandbox.getMobileLandingView(), 'control-center');
+    // Signing in at the root address ("/" is also the Services Hub's address) asks for no screen in particular:
+    // the Admin stays on the dashboard and the address bar follows. A real link is still honoured.
+    const routed = [];
+    sandbox.updateUrlForView = (view, replace) => routed.push(`address:${view}:${replace}`);
+    sandbox.navigateToInternal = view => { routed.push(`open:${view}`); state.currentView = view; };
+    sandbox.restoreViewStateFromUrl = () => {};
+    state.currentView = 'control-center';
+    assert.equal(sandbox.restoreRequestedViewAfterLogin('services-hub'), false);
+    assert.equal(state.currentView, 'control-center');
+    assert.deepEqual(routed, ['address:control-center:true']);
+    assert.equal(sandbox.restoreRequestedViewAfterLogin('receipts'), true);
+    assert.deepEqual(routed, ['address:control-center:true', 'open:receipts']);
+    state.currentView = 'control-center';
     // The top bar names the screen (it said the app's name before), and the phone's first tab is the dashboard for the Admin only.
     assert.equal(sandbox.getWorkspaceViewTitle('control-center'), 'Control Center');
     assert.ok(String(sandbox.renderManagerTabBar()).includes("navigateTo('control-center')"));

@@ -1067,7 +1067,9 @@ function getAllowedPostLoginView(user, requestedView) {
 
 function restoreRequestedViewAfterLogin(requestedView) {
   if (!state.currentUser) return false;
-  const targetView = getAllowedPostLoginView(state.currentUser, requestedView);
+  // The root address asks for no screen in particular: everyone gets their landing screen (for an
+  // Admin the owner dashboard, no longer the Services Hub that lives at "/").
+  const targetView = requestedView === 'services-hub' ? null : getAllowedPostLoginView(state.currentUser, requestedView);
   if (targetView) {
     restoreViewStateFromUrl(targetView);
     // The address is normally already at the requested path. Passing true is
