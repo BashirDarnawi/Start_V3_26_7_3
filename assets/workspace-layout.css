@@ -1,5 +1,92 @@
 /* Actual workspace layouts, shared by browser and Capacitor bundles.
    Scoped component rules; financial values and action permissions live in JS. */
+
+/* Readable text colours (WCAG AA). This file loads straight after tailwind.css,
+   so these rules replace the plain utility colours by order alone. The dark:,
+   hover: and focus: variants are more specific and keep working, and every
+   component rule below still wins exactly as it did before.
+   Values are the --ui-*-text tokens in style.css. */
+.text-slate-400, .text-slate-500 { color: var(--ui-muted); }
+.text-emerald-500, .text-emerald-600, .text-emerald-700 { color: var(--ui-success-text); }
+.text-rose-500, .text-rose-600, .text-rose-700 { color: var(--ui-danger-text); }
+.text-amber-600, .text-amber-700 { color: var(--ui-warning-text); }
+.text-indigo-500 { color: var(--ui-info-text); }
+.text-blue-600 { color: var(--ui-link-text); }
+.hover\:text-emerald-700:hover { color: var(--ui-success-text-hover); }
+.hover\:text-rose-500:hover, .hover\:text-rose-600:hover { color: var(--ui-danger-text); }
+.hover\:text-rose-700:hover { color: var(--ui-danger-text-hover); }
+.hover\:text-amber-700:hover { color: var(--ui-warning-text-hover); }
+.hover\:text-blue-600:hover { color: var(--ui-link-text); }
+.hover\:text-blue-700:hover { color: var(--ui-link-text-hover); }
+/* White text on a green button or tag. */
+.bg-emerald-600, .bg-green-600 { background-color: var(--ui-success-solid); }
+.hover\:bg-emerald-700:hover, .hover\:bg-green-700:hover { background-color: var(--ui-success-solid-hover); }
+.bg-emerald-600\/90 { background-color: rgb(4 120 87 / 90%); }
+/* White text on the other mid-tone fills: the fill becomes dark enough for the
+   text. Only elements that carry both classes change, so dots, bars and switch
+   tracks keep their colour. Amber and rose use the fills of the active filter chips. */
+.bg-amber-500.text-white, .bg-amber-600.text-white { background-color: #92400e; }
+.hover\:bg-amber-600.text-white:hover, .hover\:bg-amber-700.text-white:hover { background-color: #78350f; }
+.bg-rose-500.text-white { background-color: #be123c; }
+.bg-blue-500.text-white { background-color: #2563eb; }
+.bg-orange-600.text-white { background-color: #c2410c; }
+.hover\:bg-orange-700.text-white:hover { background-color: #9a3412; }
+.bg-cyan-600.text-white { background-color: #0e7490; }
+.hover\:bg-cyan-700.text-white:hover { background-color: #155e75; }
+.bg-purple-500.text-white { background-color: #9333ea; }
+/* The see-through versions of the same text colours are small hints; they use the full colour. */
+.text-emerald-600\/70 { color: var(--ui-success-text); }
+.text-rose-600\/80 { color: var(--ui-danger-text); }
+.text-amber-600\/80 { color: var(--ui-warning-text); }
+.text-blue-600\/80 { color: var(--ui-link-text); }
+.text-indigo-600\/80 { color: var(--ui-info-text); }
+.text-orange-700\/80 { color: #c2410c; }
+/* Dark mode. Grey text that asked for the weakest dark grey gets the readable one. */
+html.dark .dark\:text-slate-500 { color: var(--ui-muted); }
+/* Dark mode. The other dark shades of coloured text, for elements that carry no
+   dark version of their own (totals, tags). :where() keeps these as weak as the
+   plain utility, so an element's own dark: class still wins. */
+:where(html.dark) :is(.text-violet-600, .text-violet-700) { color: var(--ui-dark-violet-text); }
+:where(html.dark) :is(.text-cyan-600, .text-cyan-700) { color: var(--ui-dark-cyan-text); }
+:where(html.dark) .text-sky-700 { color: var(--ui-dark-sky-text); }
+:where(html.dark) .text-orange-600 { color: var(--ui-dark-orange-text); }
+:where(html.dark) :is(.text-pink-600, .text-fuchsia-600) { color: var(--ui-dark-pink-text); }
+:where(html.dark) .text-blue-700 { color: var(--ui-link-text); }
+:where(html.dark) .text-red-600 { color: var(--ui-danger-text); }
+:where(html.dark) .text-slate-600 { color: var(--ui-dark-slate-text); }
+/* The brand remap in style.css is !important (no dark: class can beat it), so
+   its dark counterparts must be too — as style.css already does for indigo-600. */
+html.dark :is(.text-indigo-700, .text-purple-600) { color: var(--ui-dark-brand-text) !important; }
+/* Dark mode. A pale box with no dark version of its own stays pale, so the text
+   inside it keeps the light-mode colours instead of turning pale too. */
+html.dark :is(.bg-white, .bg-slate-50, .bg-slate-100, .bg-slate-200,
+  .bg-amber-50, .bg-amber-100, .bg-emerald-50, .bg-emerald-100, .bg-rose-50, .bg-rose-100,
+  .bg-red-50, .bg-red-100, .bg-orange-50, .bg-orange-100, .bg-blue-50, .bg-blue-100,
+  .bg-sky-50, .bg-sky-100, .bg-cyan-50, .bg-cyan-100, .bg-indigo-50, .bg-indigo-100,
+  .bg-violet-50, .bg-violet-100, .bg-purple-50, .bg-purple-100, .bg-purple-200,
+  .bg-pink-100, .bg-pink-200):not([class*="dark:bg-"]) {
+  --ui-muted: #586780;
+  --ui-success-text: #047857;
+  --ui-success-text-hover: #065f46;
+  --ui-danger-text: #be123c;
+  --ui-danger-text-hover: #9f1239;
+  --ui-warning-text: #92400e;
+  --ui-warning-text-hover: #78350f;
+  --ui-info-text: #4f46e5;
+  --ui-link-text: #2563eb;
+  --ui-link-text-hover: #1d4ed8;
+  --ui-dark-brand-text: #0b4bff;
+  --ui-dark-violet-text: #6d28d9;
+  --ui-dark-cyan-text: #0e7490;
+  --ui-dark-sky-text: #0369a1;
+  --ui-dark-orange-text: #c2410c;
+  --ui-dark-pink-text: #be185d;
+  --ui-dark-slate-text: #475569;
+}
+
+/* Message previews are <pre> text in the app's own fonts (Arabic included), not the system font. */
+pre.font-sans { font-family: inherit; }
+
 .workspace-sidebar-nav { scrollbar-width: thin; }
 .workspace-nav-group { margin-block: 18px; }
 .workspace-nav-group > h2 {

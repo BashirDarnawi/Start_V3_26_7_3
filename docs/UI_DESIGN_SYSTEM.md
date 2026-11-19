@@ -15,6 +15,28 @@ migration. Existing records use the new views automatically.
   owned by the mobile runtime.
 - No fake device frame, status bar, external UI library or web font dependency
   is introduced. Icons, fonts and application files remain bundled locally.
+- Text colours that carry meaning are tokens too: `--ui-muted`,
+  `--ui-success-text`, `--ui-danger-text`, `--ui-warning-text`,
+  `--ui-info-text` and `--ui-link-text`. Each reaches 4.5:1 on every surface
+  the app uses, in light and in dark. The Tailwind colour classes
+  (`text-slate-400/500`, `text-emerald-500/600/700`, `text-rose-500/600/700`,
+  `text-amber-600/700`, `text-indigo-500`, `text-blue-600`) are pointed at
+  them at the top of `assets/workspace-layout.css`, straight after Tailwind
+  and without `!important`, so a `dark:` or `hover:` class on an element still
+  wins. Write the usual classes; do not hard-code a lighter shade for text.
+- White text sits on a fill dark enough for it: `bg-emerald-600` is
+  `--ui-success-solid`, and an element with `text-white` on `bg-amber-500/600`,
+  `bg-rose-500`, `bg-blue-500`, `bg-orange-600`, `bg-cyan-600` or
+  `bg-purple-500` gets the darker fill. Dots, bars and switch tracks do not
+  carry `text-white`, so they keep the bright colour.
+- Dark mode: a pale box that has no `dark:bg-…` class of its own stays pale,
+  and the text inside it keeps the light-mode colours (the tokens are reset on
+  that box). Give a new pale box a `dark:bg-…` class when it should turn dark.
+- Arabic text uses IBM Plex Sans Arabic (SIL Open Font License 1.1), bundled
+  in `assets/fonts/` with its licence. Inter stays first in the font list for
+  Latin text and Western digits. The Arabic files list Arabic script only in
+  `unicode-range`, so a browser fetches one only when Arabic is on the screen.
+  `scripts/download-fonts.js` writes both sets of rules into `assets/fonts.css`.
 
 ## Finding existing features
 

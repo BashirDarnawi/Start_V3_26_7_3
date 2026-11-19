@@ -592,7 +592,7 @@ Same as original React version - use at your own risk.
 - Original React version: AdPulse Analytics
 - UI Framework: Tailwind CSS
 - Icons: Lucide Icons
-- Fonts: bundled locally in assets/fonts.css
+- Fonts: bundled locally in assets/fonts.css — Inter, and IBM Plex Sans Arabic for Arabic text (SIL Open Font License 1.1; licence text in assets/fonts/)
 
 ---
 

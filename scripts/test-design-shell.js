@@ -237,4 +237,73 @@ for (const [label, user, expected] of [
     assert.equal(included, context.userCanAccessView(user, 'ads-studio'));
   });
 }
+
+// Readable text colours and the bundled Arabic font (docs/redesign/DESIGN.md, sections 5 and 6).
+const styleCss = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
+const layoutCss = fs.readFileSync(path.join(root, 'assets/workspace-layout.css'), 'utf8');
+const fontsCss = fs.readFileSync(path.join(root, 'assets/fonts.css'), 'utf8');
+const indexHtml = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+const tokenBlock = selector => {
+  const start = styleCss.indexOf(`\n${selector} {\n  --ui-canvas:`);
+  assert(start >= 0, `${selector} token block`);
+  return styleCss.slice(start, styleCss.indexOf('\n}', start));
+};
+const token = (block, name) => {
+  const match = block.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6});`));
+  assert(match, `--${name} is a six-digit colour`);
+  return match[1];
+};
+const luminance = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+  .map(v => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
+  .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05);
+const TEXT_TOKENS = ['ui-muted', 'ui-success-text', 'ui-danger-text', 'ui-warning-text', 'ui-info-text', 'ui-link-text'];
+check('light text colours reach 4.5:1 on the page, cards, soft panels and pale tags', () => {
+  const light = tokenBlock(':root');
+  const surfaces = [token(light, 'ui-canvas'), token(light, 'ui-surface'), token(light, 'ui-surface-soft'), '#f8fafc', '#f1f5f9'];
+  for (const name of TEXT_TOKENS) for (const surface of surfaces) {
+    assert(contrast(token(light, name), surface) >= 4.5, `--${name} on ${surface}`);
+  }
+  for (const [name, pale] of [['ui-success-text', '#ecfdf5'], ['ui-danger-text', '#fff1f2'], ['ui-warning-text', '#fffbeb'], ['ui-link-text', '#eff6ff']]) {
+    assert(contrast(token(light, name), pale) >= 4.5, `--${name} on its pale tag ${pale}`);
+  }
+  assert(contrast('#ffffff', token(light, 'ui-success-solid')) >= 4.5, 'white text on a green button');
+});
+check('dark text colours reach 4.5:1 on the dark page, cards and soft panels', () => {
+  const dark = tokenBlock('html.dark');
+  const surfaces = [token(dark, 'ui-canvas'), token(dark, 'ui-surface'), token(dark, 'ui-surface-soft')];
+  for (const name of [...TEXT_TOKENS, 'ui-dark-brand-text', 'ui-dark-violet-text', 'ui-dark-cyan-text', 'ui-dark-sky-text', 'ui-dark-orange-text', 'ui-dark-pink-text', 'ui-dark-slate-text']) {
+    for (const surface of surfaces) assert(contrast(token(dark, name), surface) >= 4.5, `--${name} on ${surface}`);
+  }
+});
+check('the colour classes use the tokens, after Tailwind and without !important', () => {
+  assert(indexHtml.indexOf('assets/tailwind.css') < indexHtml.indexOf('assets/workspace-layout.css'));
+  for (const rule of [
+    '.text-slate-400, .text-slate-500 { color: var(--ui-muted); }',
+    '.text-emerald-500, .text-emerald-600, .text-emerald-700 { color: var(--ui-success-text); }',
+    '.text-rose-500, .text-rose-600, .text-rose-700 { color: var(--ui-danger-text); }',
+    '.text-amber-600, .text-amber-700 { color: var(--ui-warning-text); }',
+    '.bg-emerald-600, .bg-green-600 { background-color: var(--ui-success-solid); }',
+  ]) assert(layoutCss.includes(rule), rule);
+  // A pale box that stays pale in dark mode hands the light-mode colours to the text inside it.
+  const pale = layoutCss.slice(layoutCss.indexOf('html.dark :is(.bg-white,'));
+  assert(pale.includes(':not([class*="dark:bg-"])') && pale.includes('--ui-muted: #586780;') && pale.includes('--ui-success-text: #047857;'));
+});
+check('a label styled as a button keeps its white text inside dialogs', () => {
+  assert.equal(styleCss.split('.app-dialog-panel label:not([class*="text-rose"]):not([class*="text-red"]):not([class*="text-white"])').length - 1, 2);
+});
+check('the Arabic font is bundled with its licence and used after Inter', () => {
+  const { arabicFontCss, ARABIC_FONT_FILES } = require('./download-fonts.js');
+  assert(fontsCss.endsWith(arabicFontCss()), 'assets/fonts.css ends with the rules scripts/download-fonts.js writes');
+  assert.deepEqual(Object.keys(ARABIC_FONT_FILES), ['400', '500', '600', '700']);
+  for (const file of fontsCss.match(/url\(fonts\/[^)]+\)/g).map(url => url.slice(10, -1))) {
+    assert(fs.existsSync(path.join(root, 'assets/fonts', file)), `assets/fonts/${file}`);
+  }
+  assert(/SIL OPEN FONT LICENSE Version 1\.1/.test(fs.readFileSync(path.join(root, 'assets/fonts/IBM-Plex-Sans-Arabic-LICENSE.txt'), 'utf8')));
+  assert(styleCss.includes("font-family: 'Inter', 'IBM Plex Sans Arabic', sans-serif;"));
+  // Arabic script only: an English screen must not fetch an Arabic file for spaces, digits or punctuation.
+  const ranges = [...arabicFontCss().matchAll(/unicode-range: ([^;]+);/g)].map(match => match[1]);
+  assert.equal(ranges.length, 4);
+  assert(ranges.every(range => range === 'U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFC'));
+});
 console.log(`${passed} shell presentation checks passed.`);

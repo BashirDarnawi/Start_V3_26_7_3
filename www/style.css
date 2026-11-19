@@ -191,7 +191,10 @@ img, svg, [data-lucide] {
 }
 
 body {
-  font-family: 'Inter', sans-serif;
+  /* Inter has no Arabic letters, so Arabic text takes the next family: the
+     bundled IBM Plex Sans Arabic (assets/fonts.css) on every device, instead
+     of whichever system font each device happens to have. */
+  font-family: 'Inter', 'IBM Plex Sans Arabic', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: clip;
@@ -2953,7 +2956,7 @@ body.perf-lite .glass-panel:hover {
    to a readable tint of the brand blue (~7:1 on the dark glass surface),
    keeping light mode and the brand remap untouched. */
 .dark .text-indigo-600 {
-  color: #8caaff !important;
+  color: var(--ui-dark-brand-text, #8caaff) !important;
 }
 
 /* Native privacy screen. It lives outside #app so a background data render
@@ -3271,11 +3274,25 @@ body::before { background: none !important; }
   --ui-surface-soft: #f5f7fc;
   --ui-line: #e2e7f1;
   --ui-ink: #172236;
-  --ui-muted: #66758d;
+  --ui-muted: #586780;
   --ui-accent: #0649ed;
   --ui-accent-soft: #eaf0ff;
   --ui-radius: 20px;
   --ui-shadow: 0 2px 5px rgb(23 34 54 / 3%);
+  /* Text colours that carry meaning. Each reaches 4.5:1 on every surface the
+     app uses (measured, docs/redesign/DESIGN.md section 6.2). The utility
+     classes are pointed at these tokens in assets/workspace-layout.css. */
+  --ui-success-text: #047857;
+  --ui-success-text-hover: #065f46;
+  --ui-danger-text: #be123c;
+  --ui-danger-text-hover: #9f1239;
+  --ui-warning-text: #92400e;
+  --ui-warning-text-hover: #78350f;
+  --ui-info-text: #4f46e5;
+  --ui-link-text: #2563eb;
+  --ui-link-text-hover: #1d4ed8;
+  --ui-success-solid: #047857;
+  --ui-success-solid-hover: #065f46;
 }
 html.dark {
   --ui-canvas: #0d1423;
@@ -3287,6 +3304,24 @@ html.dark {
   --ui-accent: #8babff;
   --ui-accent-soft: #223a64;
   --ui-shadow: none;
+  --ui-success-text: #34d399;
+  --ui-success-text-hover: #6ee7b7;
+  --ui-danger-text: #fda4af;
+  --ui-danger-text-hover: #fecdd3;
+  --ui-warning-text: #fbbf24;
+  --ui-warning-text-hover: #fcd34d;
+  --ui-info-text: #a5b4fc;
+  --ui-link-text: #8babff;
+  --ui-link-text-hover: #b4c8ff;
+  /* Dark mode only: light tints for the other coloured words (totals, tags)
+     that have no dark version of their own. */
+  --ui-dark-brand-text: #8caaff;
+  --ui-dark-violet-text: #c4b5fd;
+  --ui-dark-cyan-text: #67e8f9;
+  --ui-dark-sky-text: #7dd3fc;
+  --ui-dark-orange-text: #fdba74;
+  --ui-dark-pink-text: #f9a8d4;
+  --ui-dark-slate-text: #cbd5e1;
 }
 html:not(.dark), html.dark,
 html:not(.dark) body, html.dark body { background-color: var(--ui-canvas) !important; }
@@ -3588,7 +3623,8 @@ body.perf-lite .mobile-dialog-overlay > .glass-panel,
   min-width: 0;
 }
 
-.app-dialog-panel label:not([class*="text-rose"]):not([class*="text-red"]) {
+/* A label styled as a button (white text on a fill, e.g. "Upload") keeps its own colour. */
+.app-dialog-panel label:not([class*="text-rose"]):not([class*="text-red"]):not([class*="text-white"]) {
   color: #647189;
   font-weight: 600;
   line-height: 1.45;
@@ -3639,7 +3675,7 @@ body.perf-lite .mobile-dialog-overlay > .glass-panel,
   color: #edf2fc;
 }
 
-.dark .app-dialog-panel label:not([class*="text-rose"]):not([class*="text-red"]) {
+.dark .app-dialog-panel label:not([class*="text-rose"]):not([class*="text-red"]):not([class*="text-white"]) {
   color: #b5c2d8;
 }
 
