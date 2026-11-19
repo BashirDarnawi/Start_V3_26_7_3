@@ -334,4 +334,12 @@ check('tablets get centred dialogs with their own width; the top position while 
   // The phone sheet rule this sits on top of is still there, for widths under 600 px.
   assert(styleCss.includes('@media (max-width: 900px) and (min-height: 501px) {\n  .app-dialog-overlay > .app-dialog-panel {\n    margin-top: auto !important;\n    margin-bottom: 0 !important;'));
 });
+check('wide screens: messages sit at the bottom beside the sidebar, and keep the top position while a dialog is open', () => {
+  const rule = layoutCss.slice(layoutCss.indexOf('/* Wide screens: messages sit at the bottom'));
+  assert(rule.includes('body:not(:has(> .mobile-dialog-overlay)) #notification-container { top: auto; bottom: 24px; right: auto; left: calc(var(--frame-w, 264px) + 24px); }'));
+  assert(rule.includes('[dir="rtl"] body:not(:has(> .mobile-dialog-overlay)) #notification-container { left: auto; right: calc(var(--frame-w, 264px) + 24px); }'));
+  assert(rule.includes('@media (min-width: 901px) and (max-width: 1279.98px) {\n  :root { --frame-w: 72px; }'));
+  // The phone and the dialog-open position is the rule that was always there.
+  assert(styleCss.includes('#notification-container {\n  pointer-events: none;\n  top: calc(4rem + var(--app-safe-top));'));
+});
 console.log(`${passed} shell presentation checks passed.`);

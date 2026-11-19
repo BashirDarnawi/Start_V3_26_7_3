@@ -328,3 +328,17 @@ pre.font-sans { font-family: inherit; }
   font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ui-muted);
 }
 .workspace-paused > :is(i, svg) { flex: none; width: 16px; height: 16px; }
+
+/* Wide screens: messages sit at the bottom, beside the sidebar, away from titles and from the buttons
+   on the far side of a page (they covered the page title and the first sidebar lines for five seconds
+   after every sign-in). With a dialog open they keep the old top position, so a message never lands
+   on the dialog's buttons. Browsers without :has() keep the old position throughout. */
+@media (min-width: 901px) {
+  body:not(:has(> .mobile-dialog-overlay)) #notification-container { top: auto; bottom: 24px; right: auto; left: calc(var(--frame-w, 264px) + 24px); }
+  [dir="rtl"] body:not(:has(> .mobile-dialog-overlay)) #notification-container { left: auto; right: calc(var(--frame-w, 264px) + 24px); }
+  /* In Arabic the sidebar is on the right: the sync badge moves to the other bottom corner instead of covering the account row. */
+  html[dir="rtl"] .sync-status-indicator { right: auto; left: 16px; }
+}
+@media (min-width: 901px) and (max-width: 1279.98px) {
+  :root { --frame-w: 72px; }
+}
