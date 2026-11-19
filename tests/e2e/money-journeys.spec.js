@@ -26,7 +26,6 @@ const ADMIN_EMAIL = 'e2e.admin@albayan.example.com';
 const ADMIN_PASSWORD = 'E2eAdminPassword123!';
 const PIXEL_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const PIXEL = `data:image/png;base64,${PIXEL_BASE64}`;
-const REASON = 'E2E automated reason, at least ten characters long';
 
 let serialCounter = 10;
 
@@ -160,14 +159,24 @@ function paidOfficeReceipt(customer, extra = {}) {
   };
 }
 
-// The office confirms money actions with window.confirm/prompt. Accept every
-// dialog; prompts (forced month close, unlock reason) get a real reason.
-function autoAcceptDialogs(page, promptText = REASON) {
-  const handler = dialog => {
-    dialog.accept(dialog.type() === 'prompt' ? promptText : undefined).catch(() => {});
-  };
+// The office confirms money actions in the app's own question box (#app-ask), never in a browser
+// confirm/prompt/alert. `answerYes` checks what the box asks, then presses its confirming button.
+async function answerYes(page, question) {
+  const box = page.locator('#app-ask');
+  await expect(box).toBeVisible();
+  await expect(box).toHaveAttribute('role', 'alertdialog');
+  await expect(box).toContainText(question);
+  await box.locator('.management-button-row button').last().click();
+  await expect(box).toHaveCount(0);
+}
+
+// Counts browser boxes during a journey (there must be none) and dismisses any, so a regression
+// fails the journey instead of hanging it. Call the returned function to stop and read the count.
+function countBrowserBoxes(page) {
+  let seen = 0;
+  const handler = dialog => { seen += 1; dialog.dismiss().catch(() => {}); };
   page.on('dialog', handler);
-  return () => page.off('dialog', handler);
+  return () => { page.off('dialog', handler); return seen; };
 }
 
 // Business calendar of the server (ALBAYAN_BUSINESS_TIMEZONE defaults to
@@ -404,15 +413,20 @@ test('an in-shop unpaid receipt is settled from the receipts screen and later re
   await page.locator(`button[onclick="editReceipt('${receiptId}')"]`).click();
   await expect(modal).toBeVisible();
   await modal.locator('#receipt-status-tabs button[data-status="Not Paid"]').click();
-  const stopDialogs = autoAcceptDialogs(page);
+  const browserBoxes = countBrowserBoxes(page);
   try {
     const [unsettleResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes(`/api/receipts/${encodeURIComponent(receiptId)}/unsettle`)),
-      modal.locator('#receipt-save-btn').click()
+      (async () => {
+        await modal.locator('#receipt-save-btn').click();
+        // Paid -> Not Paid reverses collected money into debt: the app asks first, in its own box.
+        await answerYes(page, /recorded as collected money/);
+      })()
     ]);
     expect(unsettleResponse.status(), await unsettleResponse.text()).toBe(200);
+    expect(browserBoxes(), 'no browser confirm/prompt/alert').toBe(0);
   } finally {
-    stopDialogs();
+    browserBoxes();
   }
   await expect(modal).toBeHidden();
 
@@ -575,7 +589,7 @@ test('closing a month blocks receipt edits with 423 until an admin unlocks it wi
   const seeded = await pollEntity(page, 'receipts', receiptId, row => row.status, 'Paid');
   expect(String(seeded.date || seeded.createdAt || '')).toContain(period);
 
-  const stopDialogs = autoAcceptDialogs(page, `E2E forced close ${tag}: leftover fixtures from other specs`);
+  const browserBoxes = countBrowserBoxes(page);
   try {
     // --- Close the month from the Control Center. ---
     await page.goto('/control-center');
@@ -650,8 +664,9 @@ test('closing a month blocks receipt edits with 423 until an admin unlocks it wi
     const unlocked = JSON.parse(unlockBody);
     expect(unlocked.status).toBe('open');
     expect(String(unlocked.unlockReason || '')).toContain('E2E');
+    expect(browserBoxes(), 'no browser confirm/prompt/alert').toBe(0);
   } finally {
-    stopDialogs();
+    browserBoxes();
   }
 
   await expect.poll(async () => {
@@ -673,7 +688,7 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
   await signIn(page);
   const tag = uniqueTag(testInfo);
   const productName = `E2E Shirt ${tag}`;
-  const stopDialogs = autoAcceptDialogs(page);
+  const browserBoxes = countBrowserBoxes(page);
   try {
     // --- Product with one variant (stock arrives with the shipment). ---
     await openClothesTab(page, 'products');
@@ -729,7 +744,11 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
     await expect(shipmentStatus).toBeVisible();
     const [receiveResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/clothes/shipments/mutate')),
-      shipmentStatus.selectOption('Received')
+      (async () => {
+        await shipmentStatus.selectOption('Received');
+        // Receiving adds stock: the app asks first, in its own box.
+        await answerYes(page, /Quantities will be ADDED to stock/);
+      })()
     ]);
     expect(receiveResponse.status(), await receiveResponse.text()).toBe(200);
     await pollEntity(page, 'clothesProducts', productId, stockOf, 10);
@@ -797,15 +816,19 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
     await expect(orderStatus).toBeVisible();
     const [cancelResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/clothes/orders/mutate')),
-      orderStatus.selectOption('Canceled')
+      (async () => {
+        await orderStatus.selectOption('Canceled');
+        await answerYes(page, /pieces will be RETURNED to stock/);
+      })()
     ]);
     expect(cancelResponse.status(), await cancelResponse.text()).toBe(200);
     await pollEntity(page, 'clothesProducts', productId, stockOf, 10);
     const canceled = await readEntity(page, 'clothesOrders', orderId);
     expect(canceled.status).toBe('Canceled');
     expect(canceled.stockDeducted).toBe(false);
+    expect(browserBoxes(), 'no browser confirm/prompt/alert').toBe(0);
   } finally {
-    stopDialogs();
+    browserBoxes();
   }
 });
 

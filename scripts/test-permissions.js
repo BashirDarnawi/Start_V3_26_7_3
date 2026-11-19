@@ -116,6 +116,10 @@ for (const lazyBundle of ['studio.js', 'studio-staff.js', 'studio-pages.js', 'cl
     { filename: lazyBundle }
   );
 }
+// The app's own question box (appConfirm, appPrompt) replaced the browser's confirm and prompt. In these
+// tests it answers at once, like the browser stubs above did: yes to a question, nothing typed in a field.
+sandbox.appConfirm = async () => true;
+sandbox.appPrompt = async () => null;
 
 // `const`/`let` top-level declarations (state, PERMISSION_MODULES, …) live in
 // the context's global LEXICAL scope, not on the global object — pull the ones
@@ -2401,9 +2405,10 @@ check('446 LYD at 11.15 remains a $40 unpaid bank-transfer plan, not collected c
     'Not Paid collection rows were not persisted as plannedPayments');
   assert(/collectionDate:\s*status === 'Not Paid'[\s\S]*?\?\s*''/.test(formsSource),
     'Not Paid receipts must clear collectionDate');
-  assert(/convertsCollectedReceiptToDebt[\s\S]*?window\.confirm/.test(formsSource),
+  assert(/convertsCollectedReceiptToDebt[\s\S]*?await appConfirm\(/.test(formsSource),
     'Paid to Not Paid must ask before reversing collected money into debt');
-  assert(/if \(!confirmed\) return;/.test(formsSource),
+  // A "no" returns false and nothing is saved; a "yes" runs the whole save again from the form.
+  assert(/if \(!sure\) return await appConfirm\([\s\S]{0,700}?, 'go'\) && _saveReceiptFromModalInner\(1\);/.test(formsSource),
     'canceling the Paid to Not Paid warning must stop the save');
 });
 
@@ -6626,14 +6631,14 @@ checkAsync('Clear All says "Cleared" only once the server write resolved', async
     loginAs(ADMIN);
     OTHER.permissions = { ads: ['view'] };
     clearNotes();
-    sandbox.clearAllPermissions('u-other');
+    await sandbox.clearAllPermissions('u-other');  // the question (the app's own box) is answered first
     assert(JSON.stringify(OTHER.permissions) === '{}', 'local permissions were not cleared');
     await flush();
     assert(!cleared(), 'toasted "Cleared" before the server answered');
     settle(true); await flush();
     assert(cleared(), 'no "Cleared" toast after the write landed');
     clearNotes();
-    sandbox.clearAllPermissions('u-other');
+    await sandbox.clearAllPermissions('u-other');
     settle(false); await flush();
     assert(!cleared(), 'toasted "Cleared" after the server refused');
   } finally {

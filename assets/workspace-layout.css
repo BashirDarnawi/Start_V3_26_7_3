@@ -352,3 +352,15 @@ pre.font-sans { font-family: inherit; }
 @media (min-width: 700px) and (max-width: 1099.98px) {
   .workspace-directory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* The app's own question box (appConfirm, appPrompt): it replaces the browser's confirm and prompt.
+   Above every other dialog, because a question can be asked from inside one. */
+#app-ask { z-index: 150; }
+#app-ask .app-dialog-title { margin: 0 0 12px; }
+#app-ask-text p { margin: 0 0 10px; color: var(--ui-ink); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+#app-ask-text:empty { display: none; }
+#app-ask .glass-input { margin-block: 4px 6px; }
+#app-ask .management-button-row { margin-block-start: 16px; }
+#app-ask .management-button-row > button { min-height: 44px; }
+.management-button.is-danger { border-color: #be123c; background: #be123c; color: #fff; }
+.management-button.is-danger:hover:not(:disabled) { border-color: #9f1239; background: #9f1239; }

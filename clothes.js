@@ -1006,7 +1006,7 @@ async function adjustClothesVariantQty(productId, color, size, delta) {
   updateClothesProductsFiltered();
 }
 
-async function deleteClothesProduct(id) {
+async function deleteClothesProduct(id, seen) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const product = getVisibleClothesProducts().find(p => p.id === id);
@@ -1046,8 +1046,8 @@ async function deleteClothesProduct(id) {
       ? `\n\n⚠️ ${activeOrders} طلب نشط يحتوي هذا المنتج — إلغاؤه أو إرجاعه لن يعيد القطع إلى المخزون.`
       : `\n\n⚠️ ${activeOrders} active order(s) contain this product — canceling or returning them will NOT put the pieces back in stock.`;
   }
-  const ok = confirm(msg);
-  if (!ok) return;
+  // The app's own question box. The answer counts only for the facts it was given: after a yes the check runs again.
+  if (seen !== msg) return await appConfirm(msg, 'delete') && deleteClothesProduct(id, msg);
   const deleted = await deleteRecord(state.clothesProducts, id);
   if (!deleted) return;
   showNotification(
@@ -1283,9 +1283,9 @@ function addClothesVariantRow() {
   refreshClothesVariantRows();
 }
 
-function removeClothesVariantRow(idx) {
+async function removeClothesVariantRow(idx, sure) {
   const held = Math.max(0, Math.floor(Number(_clothesTempVariants[idx]?.qty) || 0));
-  if (held > 0 && !confirm(clothesIsAr() ? `هذا الخيار يحتوي ${held} قطعة في المخزون. حذفه يزيلها من العدّ. متابعة؟` : `This variant holds ${held} pieces in stock. Removing it drops them from the count. Continue?`)) return;
+  if (held > 0 && !sure) return await appConfirm(clothesIsAr() ? `هذا الخيار يحتوي ${held} قطعة في المخزون. حذفه يزيلها من العدّ. متابعة؟` : `This variant holds ${held} pieces in stock. Removing it drops them from the count. Continue?`, 'go') && removeClothesVariantRow(idx, true);
   _clothesTempVariants.splice(idx, 1);
   if (_clothesTempVariants.length === 0) _clothesTempVariants.push({ color: '', size: '', qty: 0 });
   refreshClothesVariantRows();
@@ -1578,7 +1578,7 @@ function _clothesShipmentUnreceiveShortfall(shipment) {
   return out;
 }
 
-async function setClothesShipmentStatus(shipmentId, newStatus) {
+async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
@@ -1588,10 +1588,13 @@ async function setClothesShipmentStatus(shipmentId, newStatus) {
   const receiving = newStatus === 'Received' && !shipment.stockApplied;
   const unreceiving = shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied;
   if (receiving) {
-    const ok = confirm(isAr
-      ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
-      : 'Confirm receiving this shipment? Quantities will be ADDED to stock.');
-    if (!ok) { updateClothesShipmentsFiltered(); return; }
+    // Asked once; after a yes every check above runs again on the shipment as it is then.
+    if (!sure) {
+      if (await appConfirm(isAr
+        ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
+        : 'Confirm receiving this shipment? Quantities will be ADDED to stock.')) return setClothesShipmentStatus(shipmentId, newStatus, true);
+      updateClothesShipmentsFiltered(); return;
+    }
   } else if (unreceiving) {
     // Un-receiving removes this shipment's pieces from stock. If some of those
     // pieces were already SOLD, the removal would floor at zero and silently
@@ -1610,10 +1613,12 @@ async function setClothesShipmentStatus(shipmentId, newStatus) {
       updateClothesShipmentsFiltered();
       return;
     }
-    const ok = confirm(isAr
-      ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
-      : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
-    if (!ok) { updateClothesShipmentsFiltered(); return; }
+    if (!sure) {
+      if (await appConfirm(isAr
+        ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
+        : 'Move this shipment back? Its quantities will be REMOVED from stock again.')) return setClothesShipmentStatus(shipmentId, newStatus, true);
+      updateClothesShipmentsFiltered(); return;
+    }
   }
 
   if (isServerModeEnabled()) {
@@ -1658,7 +1663,7 @@ async function setClothesShipmentStatus(shipmentId, newStatus) {
   updateClothesShipmentsFiltered();
 }
 
-async function deleteClothesShipment(id) {
+async function deleteClothesShipment(id, sure) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const shipment = getVisibleClothesShipments().find(s => s.id === id);
@@ -1671,8 +1676,7 @@ async function deleteClothesShipment(id) {
     );
     return;
   }
-  const ok = confirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?');
-  if (!ok) return;
+  if (!sure) return await appConfirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?', 'delete') && deleteClothesShipment(id, true);
   if (isServerModeEnabled()) {
     try {
       const response = await apiMutateClothesShipment({
@@ -2426,7 +2430,7 @@ async function applyClothesOrderStockDelta(order, sign) {
   return true;
 }
 
-async function setClothesOrderStatus(orderId, newStatus) {
+async function setClothesOrderStatus(orderId, newStatus, sure) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_ORDER_STATUSES.some(s => s.id === newStatus)) return;
@@ -2438,17 +2442,22 @@ async function setClothesOrderStatus(orderId, newStatus) {
   const updates = { status: newStatus };
 
   if (wasActive && !willBeActive && order.stockDeducted) {
-    const ok = confirm(isAr
-      ? 'سيتم إرجاع قطع هذا الطلب إلى المخزون. متابعة؟'
-      : 'This order\'s pieces will be RETURNED to stock. Continue?');
-    if (!ok) { updateClothesOrdersFiltered(); return; }
+    // Asked once, before anything moves; after a yes every check above runs again on the order as it is then.
+    if (!sure) {
+      if (await appConfirm(isAr
+        ? 'سيتم إرجاع قطع هذا الطلب إلى المخزون. متابعة؟'
+        : 'This order\'s pieces will be RETURNED to stock. Continue?', 'go')) return setClothesOrderStatus(orderId, newStatus, true);
+      updateClothesOrdersFiltered(); return;
+    }
     if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, 1)) return;
     updates.stockDeducted = false;
   } else if (!wasActive && willBeActive && !order.stockDeducted) {
-    const ok = confirm(isAr
-      ? 'سيتم خصم قطع هذا الطلب من المخزون مرة أخرى. متابعة؟'
-      : 'This order\'s pieces will be TAKEN from stock again. Continue?');
-    if (!ok) { updateClothesOrdersFiltered(); return; }
+    if (!sure) {
+      if (await appConfirm(isAr
+        ? 'سيتم خصم قطع هذا الطلب من المخزون مرة أخرى. متابعة؟'
+        : 'This order\'s pieces will be TAKEN from stock again. Continue?', 'go')) return setClothesOrderStatus(orderId, newStatus, true);
+      updateClothesOrdersFiltered(); return;
+    }
     if (!isServerModeEnabled() && !await applyClothesOrderStockDelta(order, -1)) return;
     updates.stockDeducted = true;
   }
@@ -2491,7 +2500,7 @@ async function setClothesOrderStatus(orderId, newStatus) {
   updateClothesOrdersFiltered();
 }
 
-async function setClothesOrderPayment(orderId, newPaymentStatus) {
+async function setClothesOrderPayment(orderId, newPaymentStatus, typed) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_PAYMENT_STATUSES.some(s => s.id === newPaymentStatus)) return;
@@ -2507,7 +2516,9 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
     updates.amountPaidLYD = 0;
     updates.paidAt = null;
   } else if (newPaymentStatus === 'Partially Paid') {
-    const answer = prompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${totals.totalLYD.toFixed(2)} د.ل)` : `Amount paid so far (total ${totals.totalLYD.toFixed(2)} LYD)`, String(Number(order.amountPaidLYD || 0).toFixed(2)));
+    // The amount is asked once in the app's own box; the typed answer is then checked against the order as it is at that moment.
+    if (typed === undefined) return setClothesOrderPayment(orderId, newPaymentStatus, await appPrompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${totals.totalLYD.toFixed(2)} د.ل)` : `Amount paid so far (total ${totals.totalLYD.toFixed(2)} LYD)`, String(Number(order.amountPaidLYD || 0).toFixed(2))));
+    const answer = typed;
     if (answer === null || !String(answer).trim()) { updateClothesOrdersFiltered(); return; }  // the select must not show a status that was not saved
     const partial = clothesParsePromptMoney(answer);  // NaN (refused) for text that is not a plain amount
     if (!(partial >= 0) || partial > totals.totalLYD + 0.005) {
@@ -2555,16 +2566,16 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
   updateClothesOrdersFiltered();
 }
 
-async function deleteClothesOrder(id) {
+async function deleteClothesOrder(id, seen) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   const order = getVisibleClothesOrders().find(o => o.id === id);
   if (!order) return;
   const willRestore = order.stockDeducted === true;
-  const ok = confirm(isAr
+  const question = isAr
     ? (willRestore ? 'هل تريد حذف هذا الطلب؟ ستعود قطعه إلى المخزون.' : 'هل تريد حذف هذا الطلب؟')
-    : (willRestore ? 'Delete this order? Its pieces will return to stock.' : 'Delete this order?'));
-  if (!ok) return;
+    : (willRestore ? 'Delete this order? Its pieces will return to stock.' : 'Delete this order?');
+  if (seen !== question) return await appConfirm(question, 'delete') && deleteClothesOrder(id, question);
   if (isServerModeEnabled()) {
     let attempt = null;
     try {
@@ -3247,7 +3258,7 @@ function getClothesOrderStockShortages(lines) {
 }
 
 // Called by handleModalSubmit for state.activeModal === 'clothes-order'.
-async function saveClothesOrderFromModal() {
+async function saveClothesOrderFromModal(sure) {
   if (!clothesCanUse()) return false;
   const isAr = clothesIsAr();
 
@@ -3404,17 +3415,15 @@ async function saveClothesOrderFromModal() {
     if (!await applyClothesOrderStockDelta(editTarget, 1)) return false; // restore old pieces
   }
   const shortages = getClothesOrderStockShortages(lines);
-  if (shortages.length) {
-    const ok = confirm((isAr
+  if (shortages.length && !sure) {
+    // Put the old pieces back the way they were BEFORE asking, so nothing is half-done while the
+    // question is open. After a yes the whole save runs again from the form, in one go.
+    if (editTarget && editTarget.stockDeducted) await applyClothesOrderStockDelta(editTarget, -1);
+    return await appConfirm((isAr
       ? 'تنبيه: المخزون غير كافٍ للقطع التالية:\n\n'
       : 'Warning: not enough stock for these items:\n\n') + shortages.join('\n') + (isAr
       ? '\n\nهل تريد المتابعة رغم ذلك؟ (سيصبح المخزون صفراً)'
-      : '\n\nContinue anyway? (stock will floor at zero)'));
-    if (!ok) {
-      // Put the old pieces back the way they were and abort
-      if (editTarget && editTarget.stockDeducted) await applyClothesOrderStockDelta(editTarget, -1);
-      return false;
-    }
+      : '\n\nContinue anyway? (stock will floor at zero)'), 'go') ? saveClothesOrderFromModal(true) : false;
   }
 
   if (editTarget) {

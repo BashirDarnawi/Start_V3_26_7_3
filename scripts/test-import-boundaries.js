@@ -44,6 +44,10 @@ function changeContext(f, change) {
   if (change === 'server-mode') f.state.serverMode = true;
 }
 
+// The import now asks its question in the app's own box (answered at once here), so the flow reaches
+// its first pending step a few turns later: let everything that is ready run before looking.
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
 let passed = 0, failed = 0;
 async function test(name, fn) {
   try { await fn(); passed += 1; console.log(`  PASS ${name}`); }
@@ -100,7 +104,7 @@ async function main() {
       await test(`local backup: ${change} during ${boundary} cannot import`, async () => {
       const f = fixture();
       f.sandbox.apiAdminBulkImport = async () => { f.writes.push('server-restore'); throw new Error('Stop at fake server boundary'); };
-      f.sandbox.confirm = () => { f.writes.push('server-restore-prompt'); return false; };
+      f.sandbox.appConfirm = async () => { f.writes.push('server-restore-prompt'); return false; };  // the app's own question box
       f.sandbox.stopServerLiveSync = () => {};
       f.sandbox.startServerLiveSync = () => {};
       f.sandbox.importData();
@@ -135,6 +139,7 @@ async function main() {
       f.sandbox.__pendingHash = () => new Promise(resolve => { finish = resolve; });
       f.sandbox.importData(); f.choose();
       const running = f.load({ ...legacyBackup, users: [{ id: 'legacy_user', name: 'Legacy', password: 'Legacy test password' }] });
+      await settle();
       assert.equal(typeof finish, 'function');
       assert.equal(f.state.customers[0]?.id, 'c1', 'import was published before hashing completed');
       assert.equal(f.state.users.some(user => user.password), false, 'plaintext password entered live state');
@@ -191,7 +196,7 @@ async function main() {
       if (step === 'sync-logs') f.sandbox.syncLogsToIndexedDB = pending;
       f.sandbox.importData(); f.choose();
       const running = f.load(legacyBackup);
-      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+      await settle();
       assert.equal(typeof finish, 'function');
       changeContext(f, 'other-admin');
       f.state.customers = [{ id: 'new_account_customer' }];

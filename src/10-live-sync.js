@@ -1657,7 +1657,7 @@ function closeSensitiveAuthenticatedUi() {
     () => closeCustomerAdDebtCoverageModal({ force: true, restoreFocus: false }),
     () => _closeCompanyCoverageReceiptPicker(false),
     () => closeMetaInsightsModal(), () => closeMetaAdsConnectionModal(),
-    () => closeCommandPalette(), () => closeAnalyticsBreakdown(false), () => closeDollarPurchaseManager(false),
+    () => closeCommandPalette(), () => closeAnalyticsBreakdown(false), () => closeDollarPurchaseManager(false), () => closeAppAsk(),
     () => resetAdsStudioSessionState(), () => resetReceiptCustomerRiskWarningState()
   ];
   for (const close of closers) { try { close(); } catch (_) {} }

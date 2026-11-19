@@ -500,11 +500,11 @@ async function metaAdsRunMutation(action, metaAdId = '') {
   }
 }
 
-function metaAdsLinkSelected(metaAdId) {
+async function metaAdsLinkSelected(metaAdId, sure) {
   const target = metaAdsFindLocalAd(metaAdsUi.targetAdId);
   if (!target) return;
   const isChanging = target.metaAdId && String(target.metaAdId) !== String(metaAdId);
-  if (isChanging && !confirm(metaAdsIsArabic() ? 'هل تريد تغيير إعلان Meta المرتبط؟ لن تتغير الأموال أو الوصل أو الصور.' : 'Change the linked Meta ad? Money, receipts and photos will not change.')) return;
+  if (isChanging && !sure) return await appConfirm(metaAdsIsArabic() ? 'هل تريد تغيير إعلان Meta المرتبط؟ لن تتغير الأموال أو الوصل أو الصور.' : 'Change the linked Meta ad? Money, receipts and photos will not change.') && metaAdsLinkSelected(metaAdId, 1);
   metaAdsRunMutation('link', String(metaAdId || ''));
 }
 
@@ -521,8 +521,8 @@ function metaAdsSyncCurrent() {
   metaAdsRunMutation('sync');
 }
 
-function metaAdsUnlinkCurrent() {
-  if (!confirm(metaAdsIsArabic() ? 'إلغاء الربط؟ ستبقى كل أموال ووصل وصور Albayan كما هي.' : 'Unlink Meta? All Albayan money, receipts and photos will remain unchanged.')) return;
+async function metaAdsUnlinkCurrent() {
+  if (!await appConfirm(metaAdsIsArabic() ? 'إلغاء الربط؟ ستبقى كل أموال ووصل وصور Albayan كما هي.' : 'Unlink Meta? All Albayan money, receipts and photos will remain unchanged.')) return;
   metaAdsRunMutation('unlink');
 }
 
@@ -766,12 +766,12 @@ function metaFbRefresh() {
   });
 }
 
-function metaFbDisconnect() {
+async function metaFbDisconnect() {
   const isAr = metaAdsIsArabic();
   const question = isAr
     ? 'فصل فيسبوك؟ سيُحذف المفتاح المحفوظ، ويعود Albayan إلى مفتاح إعدادات الاستضافة إن وُجد.'
     : 'Disconnect Facebook? The stored key is removed and Albayan goes back to the hosting-settings key, if one is set.';
-  if (!confirm(question)) return null;
+  if (!await appConfirm(question)) return null;
   return metaFbPost('disconnect', '/disconnect', {}, result => {
     metaFbUi.ticks = null;
     metaFbUi.pick = '';

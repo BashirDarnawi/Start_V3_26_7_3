@@ -380,7 +380,7 @@ async function confirmStopAd(id, source = 'modal') {
     }
     // Company money above the real spend goes back to company funds; never re-applied on its own.
     const companyOnAdUSD = getAdCompanyCoveredUSD(storedAd);
-    if (spentUSD + 0.005 < companyOnAdUSD && !confirm(isAr
+    if (spentUSD + 0.005 < companyOnAdUSD && !await appConfirm(isAr
       ? `أموال الشركة المسجّلة على هذا الإعلان $${companyOnAdUSD.toFixed(2)}، والمصروف الذي أدخلته $${spentUSD.toFixed(2)}.\nسيرجع $${(companyOnAdUSD - spentUSD).toFixed(2)} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
       : `Company funds recorded on this ad: $${companyOnAdUSD.toFixed(2)}. Spend you entered: $${spentUSD.toFixed(2)}.\n$${(companyOnAdUSD - spentUSD).toFixed(2)} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
     let attempt;
@@ -700,7 +700,7 @@ async function confirmStopAd(id, source = 'modal') {
   lucide.createIcons();
 }
 
-async function deleteUser(id) {
+async function deleteUser(id, seen) {
   if (!canManageUsersAction('delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية حذف المستخدمين' : 'Requires the Delete Users permission', 'error');
     return;
@@ -756,7 +756,8 @@ async function deleteUser(id) {
       : `\n\n💰 This user has ${heldCash.length} delivered order(s) whose cash was not handed to the office yet — settle or document that cash before deleting.`;
   }
 
-  if (confirm(warning)) {
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteUser(id, warning);
+  {
     // Return in-flight missions to the pool so they don't stay assigned to a
     // ghost driver. Delivered history keeps the id for the audit trail.
     const cleared = [];
@@ -928,7 +929,7 @@ function printCurrentPage() {
   window.print();
 }
 
-function exportData() {
+async function exportData() {
   const isAr = state.language === 'ar';
   // Local mode exports its whole workspace. Server mode exports only the loaded records (maybe stale or
   // permission-scoped); the online restore cannot write users, wallet ledger, subscriptions or audit history.
@@ -942,7 +943,7 @@ function exportData() {
   }
   const serverPartialSnapshot = isServerModeEnabled();
   if (serverPartialSnapshot) {
-    const proceed = confirm(
+    const proceed = await appConfirm(
       state.language === 'ar'
         ? 'هذا تقرير جزئي من البيانات المحمّلة حالياً، وليس نسخة خادم قابلة للاستعادة. قد يكون قديماً أو ناقصاً، وتم حذف بيانات نظام الملابس للحفاظ على سلامة المخزون. استيراد ملفات الخادم معطّل ويتطلب صيانة خارج التطبيق. هل تريد المتابعة؟'
         : 'This is a PARTIAL report of data currently loaded on this device, not a restorable full-server backup. It may be stale or incomplete. The clothes domain is omitted to protect inventory integrity. Server-file import is disabled and requires an offline maintenance workflow. Continue?'
@@ -1053,7 +1054,7 @@ function exportData() {
   if (cannotPrintOrDownload()) {
     createAutoBackup(STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
     const isAr = state.language === 'ar';
-    const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
+    const wantsCopy = typeof copyTextToClipboard === 'function' && await appConfirm(
       `${inAppLimitationText('download')}\n\n${isAr ? 'هل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟' : 'Copy the backup to the clipboard instead?'}`
     );
     if (wantsCopy) {
@@ -1191,13 +1192,13 @@ function importData() {
       exchangeRateHistory: { visible: countVisible(sanitizedImport.exchangeRateHistory), deleted: countDeleted(sanitizedImport.exchangeRateHistory) }
     };
 
-    const ok1 = confirm(
+    const ok1 = await appConfirm(
       isAr
         ? `استيراد جزئي لبيانات العمل إلى الخادم (أدمن)\n\nسيتم استبدال المجموعات المذكورة لجميع المستخدمين. لن تتم استعادة المستخدمين أو معاملات المحفظة أو الاشتراكات أو سجلات التدقيق، وسيتم تجاهل هذه المصفوفات إن وجدت في الملف.\n\nيحتوي الملف على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد متابعة الاستعادة الجزئية؟`
         : `PARTIAL SERVER BUSINESS-DATA IMPORT (Admin)\n\nThis replaces the listed business collections for all users. It does NOT restore users, wallet transactions, subscriptions, or audit logs; any such arrays in the file are ignored.\n\nFile contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue with this partial restore?`
     );
     if (!ok1) return;
-    const phrase = String(prompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
+    const phrase = String(await appPrompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
     if (phrase !== 'IMPORT') {
       showNotification(isAr ? 'تم الإلغاء' : 'Cancelled', isAr ? 'تم إلغاء الاستيراد.' : 'Import cancelled.', 'info');
       return;
@@ -1440,9 +1441,9 @@ function importData() {
           return;
         }
         const countOf = (k) => (Array.isArray(imported[k]) ? imported[k].length : 0);
-        if (typeof confirm === 'function' && !confirm(isAr
+        if (!await appConfirm(isAr
           ? `سيتم استبدال بيانات هذا الجهاز بالنسخة الاحتياطية (${countOf('receipts')} إيصال، ${countOf('ads')} إعلان، ${countOf('customers')} عميل). هل تريد المتابعة؟`
-          : `This replaces the data on this device with the backup (${countOf('receipts')} receipts, ${countOf('ads')} ads, ${countOf('customers')} customers). Continue?`)) return;
+          : `This replaces the data on this device with the backup (${countOf('receipts')} receipts, ${countOf('ads')} ads, ${countOf('customers')} customers). Continue?`, 'go') || !importIsCurrent()) return;
 
         // Integrity check on the file AS EXPORTED (the export hashed the raw state, before any sanitising)
         if (imported._exportMetadata?.checksum) {
@@ -1563,7 +1564,7 @@ async function clearAllData() {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'مسح جميع البيانات معطّل في وضع الخادم. استخدم أدوات إدارة الخادم.' : 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
     return;
   }
-  if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
+  if (await appConfirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!', 'delete') && !isServerModeEnabled()) {
     // Every stored collection (a hand list missed the wallet, clothes, dollar purchases...),
     // the old recovery key (it could still reset passwords) and no queued write of them.
     for (const name of PERSISTED_COLLECTIONS) { state[name] = []; clearCollectionCorruption(name); }
@@ -1613,7 +1614,7 @@ async function downloadFullServerBackup(button = null) {
     const estimate = await apiFullBackupEstimate();
     const mb = Math.max(1, Math.round(Number(estimate?.approxDownloadBytes || 0) / (1024 * 1024)));
     const records = Number(estimate?.records || 0);
-    const ok = confirm(isAr
+    const ok = await appConfirm(isAr
       ? `تنزيل نسخة كاملة؟\n\n${records} سجل، بحجم تقريبي ${mb} ميجابايت.\n\nالملف يحتوي أسماء العملاء وأرقامهم وصور الوصولات بدون تشفير — احفظه في مكان آمن ولا ترسله في محادثة.`
       : `Download the full backup?\n\n${records} records, roughly ${mb} MB.\n\nThe file contains customer names, phone numbers and receipt photos in the clear — keep it somewhere safe and do not send it in a chat.`);
     if (!ok) return;

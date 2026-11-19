@@ -320,9 +320,9 @@ check('changing an imported ad page is an admin-only warned flow',
   adEditModal.includes('confirmMetaAdPageChange()') &&
   adEditModal.includes('id="ad-page-override-picker"') &&
   adEditModal.includes('id="ad-meta-page-override"') &&
-  forms.includes('function confirmMetaAdPageChange()') &&
+  forms.includes('async function confirmMetaAdPageChange()') &&
   forms.includes('if (!isCurrentUserAdmin()) return;') &&
-  forms.includes('if (!confirm(warning)) return;') &&
+  forms.includes("if (!await appConfirm(warning, 'go')) return;") &&
   forms.includes('هذا الإعلان يخص صفحة فيسبوك') &&
   forms.includes('This ad ran on the Facebook page') &&
   modals.includes("isServerModeEnabled() && document.getElementById('ad-meta-page-override')?.value === '1'") &&
@@ -1440,10 +1440,12 @@ check('social composer enforces the post limits and reuses the safe image pipeli
 check('social studio page linking is admin-only in the UI and destructive actions confirm first',
   socialStudio.includes("function socialOpenLinkSheet() {\n  if (!isCurrentUserAdmin()) return;") &&
   socialStudio.includes("${isAdmin ? `<button type=\"button\" onclick=\"socialOpenLinkSheet()\"") &&
-  socialStudio.includes("const ok = confirm(socialText('Publish this post now?'") &&
-  socialStudio.includes("const ok = confirm(socialText('Delete this post?'") &&
-  socialStudio.includes("const ok = confirm(socialText(`Delete the rule \"${r.name}\"?`") &&
-  socialStudio.includes("const ok = confirm(socialText(`Unlink \"${page.name}\"?"));
+  socialStudio.includes("const ok = await appConfirm(socialText('Publish this post now?'") &&
+  socialStudio.includes("const ok = await appConfirm(socialText('Delete this post?'") &&
+  socialStudio.includes("const ok = await appConfirm(socialText(`Delete the rule \"${r.name}\"?`") &&
+  socialStudio.includes("const ok = await appConfirm(socialText(`Unlink \"${page.name}\"?") &&
+  // asked in the app's own box: an answer that arrives in another session, or while another action runs, does nothing
+  (socialStudio.match(/const ok = await appConfirm\([^\n]*\n  if \(!ok \|\| !(?:socialStudioContextIsCurrent\(context\)|isCurrent\(\))/g) || []).length === 4);
 
 check('social studio screens are bilingual, RTL-aware and phone friendly with live-sync-safe fields',
   (socialStudio.match(/socialText\(/g) || []).length >= 80 &&
@@ -6935,13 +6937,15 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // Review loop r1 #35: the classic staff "Close campaign / Stop & refund" prompt reads the amount with the
   // strict studio parser (Arabic digits and separators): an ambiguous or garbled amount is refused, never
   // silently turned into a smaller refund.
+  // The amount is asked in the app's own box (appPrompt, a promise): the flow starts in one run() and is
+  // read in the next, after its promises settled.
   run(`var __promptAnswer = ''; var __stopCalls = [];
-    function prompt() { return __promptAnswer; }
+    function appPrompt() { return Promise.resolve(__promptAnswer); }
     function apiStopAdCampaignRequest(id, expected, operationId, reason, refundMinor) { __stopCalls.push({ id, refundMinor }); return new Promise(() => {}); }
     var __keptStopRows = state.adCampaignRequests;
     state.adCampaignRequests = __keptStopRows.concat([{ id: 'r_stop', createdBy: 'c1', status: 'Approved', name: 'Stop me', paidMinorUSD: 200000, publishStatus: 'live', _created: 50, _lastModified: 50 }]);`);
-  const stopWith = answer => json(`(function () { __promptAnswer = ${JSON.stringify(answer)}; __stopCalls.length = 0; __notes.length = 0; stopAdsStudioCampaignOnce('r_stop');
-    return { refund: __stopCalls.length ? __stopCalls[0].refundMinor : null, invalid: __notes.some(note => note.title === 'Invalid amount') }; })()`) || {};
+  const stopWith = answer => { run(`__promptAnswer = ${JSON.stringify(answer)}; __stopCalls.length = 0; __notes.length = 0; stopAdsStudioCampaignOnce('r_stop');`);
+    return json(`({ refund: __stopCalls.length ? __stopCalls[0].refundMinor : null, invalid: __notes.some(note => note.title === 'Invalid amount') })`) || {}; };
   const refused = ['1.234,56', '١٬٢٣٤x', '50abc', '12.5.3', '12.345'].map(answer => [answer, stopWith(answer)]);
   const accepted = [['1,234.56', 123456], ['12,50', 1250], ['١٬٢٣٤', 123400], ['٥٠٫٢٥', 5025], ['0.00', 0]].map(([answer, minor]) => [answer, minor, stopWith(answer)]);
   run('state.adCampaignRequests = __keptStopRows;');
@@ -6957,7 +6961,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // field is empty and an empty answer is refused. One past its end date with no stop request closes as
   // 'completed' (stage 11 "Finished"); a stop request or a future end keeps the server's staff_stop default.
   run(`var __promptSeen = []; var __promptTake = null;
-    function prompt(message, value) { __promptSeen.push({ message: String(message), value: String(value) }); return __promptTake === null ? String(value) : __promptTake; }
+    function appPrompt(message, value) { __promptSeen.push({ message: String(message), value: String(value) }); return Promise.resolve(__promptTake === null ? String(value) : __promptTake); }
     function apiStopAdCampaignRequest(id, expected, operationId, reason, refundMinor, closeReason) { __stopCalls.push({ id, refundMinor, closeReason: closeReason === undefined ? '(none)' : closeReason }); return new Promise(() => {}); }
     var __kept26 = state.adCampaignRequests;
     var __lnk26 = { createdBy: 'c1', status: 'Approved', name: 'Linked close', paidMinorUSD: 10000, publishStatus: 'meta_review', metaCampaignId: '120200000000000026', metaAdAccountId: '111', startDate: '2025-01-01', endDate: '2025-01-05', _created: 60, _lastModified: 60 };
@@ -6972,8 +6976,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     ['r_c26', 'r_c26_asked', 'r_c26_future'].forEach(id => _adsStudioResults.byId.set(id, { state: 'done', at: Date.now(), promise: null, data: adsStudioCleanResults({
       stage: { stage: 10 }, results: { metaUsedMinor: 3000, paidMinor: 10000 },
       staff: { metaCampaignId: '120200000000000026', currency: 'USD', spendMinorUSD: 3000, spendConfirmedAt: '2025-01-08T00:00:00Z' } }) }));`);
-  const close26 = (id, take = null) => json(`(function () { __promptTake = ${JSON.stringify(take)}; __promptSeen.length = 0; __stopCalls.length = 0; __notes.length = 0; stopAdsStudioCampaignOnce('${id}');
-    return { prompt: __promptSeen[0] || null, call: __stopCalls[0] || null, invalid: __notes.some(note => note.title === 'Invalid amount') }; })()`) || {};
+  const close26 = (id, take = null) => { run(`__promptTake = ${JSON.stringify(take)}; __promptSeen.length = 0; __stopCalls.length = 0; __notes.length = 0; stopAdsStudioCampaignOnce('${id}');`);
+    return json(`({ prompt: __promptSeen[0] || null, call: __stopCalls[0] || null, invalid: __notes.some(note => note.title === 'Invalid amount') })`) || {}; };
   const linkedDefault = close26('r_c26');
   const linkedAbove = close26('r_c26', '80.00');
   const unreadDefault = close26('r_c26_unread');

@@ -71,5 +71,10 @@ module.exports = function loadBrowserSource() {
   sandbox.showNotification = () => {};
   sandbox.forceFullRender = () => {};
   sandbox.render = () => {};
-  return { sandbox, state, run };
+  // The app's own question box replaced the browser's confirm and prompt: answered at once, like the stubs
+  // above. A test of the box itself puts the real functions back: Object.assign(sandbox, questionBox).
+  const questionBox = { appConfirm: sandbox.appConfirm, appPrompt: sandbox.appPrompt };
+  sandbox.appConfirm = async () => true;
+  sandbox.appPrompt = async () => null;
+  return { sandbox, state, run, questionBox };
 };

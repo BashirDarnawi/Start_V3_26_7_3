@@ -613,12 +613,12 @@ function planManagerSetField(index, field, value) {
   document.getElementById('plan-manager-dirty')?.classList.remove('hidden');
 }
 
-function planManagerReload() {
-  if (_planManager.dirty && !window.confirm(ccText('Discard unsaved plan changes and reload from the server?', 'تجاهل تغييرات الخطط غير المحفوظة وإعادة التحميل من الخادم؟'))) return;
+async function planManagerReload() {
+  if (_planManager.dirty && !await appConfirm(ccText('Discard unsaved plan changes and reload from the server?', 'تجاهل تغييرات الخطط غير المحفوظة وإعادة التحميل من الخادم؟'))) return;
   return loadPlanManager(true);
 }
 
-function planManagerAddBundle() {
+async function planManagerAddBundle(sure) {
   const read = id => String(document.getElementById(id)?.value || '').trim();
   const rawId = read('plan-new-id').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
   const name = read('plan-new-name').slice(0, 80);
@@ -641,7 +641,8 @@ function planManagerAddBundle() {
     return;
   }
   const priceMinor = Math.max(0, Math.round(parsedPrice * 100));
-  if (priceMinor === 0 && !window.confirm(ccText('This bundle will be free for customers - add it anyway?', 'ستكون هذه الباقة مجانية للعملاء - هل تريد إضافتها على أي حال؟'))) return;
+  // Asked once; after a yes the form is read and checked again.
+  if (priceMinor === 0 && !sure) return await appConfirm(ccText('This bundle will be free for customers - add it anyway?', 'ستكون هذه الباقة مجانية للعملاء - هل تريد إضافتها على أي حال؟')) && planManagerAddBundle(1);
   _planManager.plans.push({
     id: rawId,
     serviceIds: services,

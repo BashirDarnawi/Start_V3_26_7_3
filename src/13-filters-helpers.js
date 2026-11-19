@@ -2358,7 +2358,7 @@ function applyPermissionTemplate(userId, templateKey) {
   _syncPermissionBoxes(userId);
 }
 
-function clearAllPermissions(userId) {
+async function clearAllPermissions(userId, sure) {
   if (!canManageUsersAction('managePermissions')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
@@ -2366,7 +2366,7 @@ function clearAllPermissions(userId) {
   const user = state.users.find(u => u.id === userId);
   if (!user) return;
   
-  if (!confirm(state.language === 'ar' ? `مسح جميع صلاحيات ${user.name}؟ سيفقد الوصول إلى معظم الميزات.` : `Clear all permissions for ${user.name}? They will lose access to most features.`)) return;
+  if (!sure) return await appConfirm(state.language === 'ar' ? `مسح جميع صلاحيات ${user.name}؟ سيفقد الوصول إلى معظم الميزات.` : `Clear all permissions for ${user.name}? They will lose access to most features.`) && clearAllPermissions(userId, 1);
   
   user.permissions = {};
   user._lastModified = getMonotonicTime();
@@ -4428,10 +4428,10 @@ function openReceiptDeliveryCancelModal(receiptId) {
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   // Backdrop taps are how phone users dismiss the keyboard — never let one
   // silently destroy a typed cancel reason. Empty form still closes instantly.
-  modal.onclick = (e) => {
+  modal.onclick = async (e) => {
     if (e.target !== modal) return;
     const typedReason = String(document.getElementById('delivery-cancel-reason')?.value || '');
-    if (typedReason.trim() && !confirm(state.language === 'ar' ? 'تجاهل السبب المكتوب؟' : 'Discard the typed reason?')) return;
+    if (typedReason.trim() && !await appConfirm(state.language === 'ar' ? 'تجاهل السبب المكتوب؟' : 'Discard the typed reason?')) return;
     modal.remove();
   };
   modal.innerHTML = `

@@ -4306,7 +4306,7 @@ async function handleModalSubmit() {
           const approveMsg = isArPage
             ? `توجد صفحة أخرى بنفس الاسم "${pageName}".\n\nهل توافق (كأدمن) على استخدام نفس الاسم لصفحة أخرى؟`
             : `Another page named "${pageName}" already exists.\n\nDo you (as Admin) approve using the same name for another page?`;
-          if (!confirm(approveMsg)) return;
+          if (!await appConfirm(approveMsg) || !submitIsCurrent()) return;
         } else {
           showNotification(
             isArPage ? 'اسم مكرر' : 'Duplicate Name',
@@ -4628,7 +4628,7 @@ async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   return count;
 }
 
-async function deleteCustomer(id) {
+async function deleteCustomer(id, seen) {
   if (!currentUserHasPermission('customers', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
@@ -4660,16 +4660,18 @@ async function deleteCustomer(id) {
     if (isAr) {
       warning += `\n\n⚠️ تحذير: لدى هذا العميل ${linkedReceipts.length} وصل و ${linkedAds.length} إعلان.`;
       warning += `\n\nاختر:`;
-      warning += `\n• موافق = حذف العميل وجميع وصولاته وإعلاناته`;
+      warning += `\n• حذف = حذف العميل وجميع وصولاته وإعلاناته`;
       warning += `\n• إلغاء = الإبقاء على كل شيء`;
     } else {
       warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
       warning += `\n\nChoose an option:`;
-      warning += `\n• OK = Delete customer AND all their receipts/ads`;
+      warning += `\n• Delete = Delete customer AND all their receipts/ads`;
       warning += `\n• Cancel = Keep everything`;
     }
   }
-  if (confirm(warning)) {
+  // The answer counts only for the facts it was given: after the question the check runs again.
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteCustomer(id, warning);
+  {
     // Cascade delete: ADS first (frees their spend so the transfer undo returns all unspent money),
     // then receipts, via deleteRecord (rollback, toast, audit); ONE all-or-nothing batch.
     const batchDeleteOps = { collectServerOps: [] };
@@ -4705,7 +4707,7 @@ async function deleteCustomer(id) {
   }
 }
 
-async function deletePage(id) {
+async function deletePage(id, seen) {
   if (!currentUserHasPermission('pages', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
@@ -4720,14 +4722,15 @@ async function deletePage(id) {
       ? `\n\n⚠️ ${pageAdsCount} إعلان(ات) تابعة لهذه الصفحة. ستبقى الإعلانات وسجلها، لكن صفحة جديدة بنفس الاسم لن تشملها.`
       : `\n\n⚠️ ${pageAdsCount} ad(s) belong to this page. The ads and their history stay, but a NEW page with the same name will not include them.`;
   }
-  if (confirm(pageWarning)) {
+  if (seen !== pageWarning) return await appConfirm(pageWarning, 'delete') && deletePage(id, pageWarning);
+  {
     if (!await deleteRecord(state.pages, id)) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
   }
 }
 
-async function deleteReceipt(id) {
+async function deleteReceipt(id, seen) {
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
@@ -4782,7 +4785,8 @@ async function deleteReceipt(id) {
       ? `\n\n⚠️ هذا الوصل حوَّل أموالاً إلى ${outgoingTargets.length} وصل(ات) لعملاء آخرين — سيتم حذفها أيضاً لأن مصدر أموالها سيختفي.`
       : `\n\n⚠️ This receipt transferred money to ${outgoingTargets.length} receipt(s) of other customers — those will be deleted too, because their money's source is being removed.`;
   }
-  if (confirm(warning)) {
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteReceipt(id, warning);
+  {
     // Clean every record referencing this receipt (as deleteCustomer), the transfer undo first
     // (it reads spent amounts); one all-or-nothing server batch.
     const batchDeleteOps = { collectServerOps: [] };
@@ -4800,7 +4804,7 @@ async function deleteReceipt(id) {
   }
 }
 
-async function deleteAd(id) {
+async function deleteAd(id, seen) {
   const ad = state.ads.find(a => a.id === id);
   const isAr = state.language === 'ar';
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
@@ -4838,7 +4842,8 @@ async function deleteAd(id) {
   warning += isAr
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
     : `\n\n⚠️ This action cannot be undone!`;
-  if (confirm(warning)) {
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteAd(id, warning);
+  {
     if (!await deleteRecord(state.ads, id)) return;
     if (isServerModeEnabled() && typeof serverLiveSyncTick === 'function') serverLiveSyncTick().catch(() => {});  // the shrunken receipt arrives now
     showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الإعلان' : 'Ad deleted', 'success');

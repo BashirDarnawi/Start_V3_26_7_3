@@ -1691,7 +1691,7 @@ function receiptCreateRetryMatches(row, sent) {
   return serverRecordMatchesCreateRetry(row, cmp);
 }
 
-async function _saveReceiptFromModalInner() {
+async function _saveReceiptFromModalInner(sure) {
   const isArV = state.language === 'ar';
   // Filled only after a NEW delivery receipt is confirmed saved. The share
   // prompt must use the server-returned row because the server may assign the
@@ -2194,10 +2194,10 @@ async function _saveReceiptFromModalInner() {
       || editTarget.isPaid === true;
     const convertsCollectedReceiptToDebt = wasRecordedPaid && status === 'Not Paid';
     if (convertsCollectedReceiptToDebt) {
-      const confirmed = window.confirm(isArV
+      // Asked once; after a yes the whole save runs again from the form, in one go.
+      if (!sure) return await appConfirm(isArV
         ? 'هذا الوصل مسجل كأموال مستلمة. تغييره إلى غير مدفوع سيعكس الدفع إلى دين على العميل، وسيحوّل تمويل الإعلانات المرتبطة بأمان. هل تريد المتابعة؟'
-        : 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?');
-      if (!confirmed) return;
+        : 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?', 'go') && _saveReceiptFromModalInner(1);
     }
     // Money already committed cannot be edited away: ads funded from this
     // receipt (including delivery-due funding) plus money transferred to
@@ -3116,7 +3116,7 @@ function handleAdPageChange(preserveFunding = false) {
 
 // Admin-only, deliberately warned: unlock the page picker on a Meta-imported ad (a fast unwarned pick
 // once attached an ad to another business's page); the server needs this confirmed flag too.
-function confirmMetaAdPageChange() {
+async function confirmMetaAdPageChange() {
   if (!isCurrentUserAdmin()) return;
   const isArM = state.language === 'ar';
   const adData = state.modalData || {};
@@ -3125,7 +3125,7 @@ function confirmMetaAdPageChange() {
   const warning = isArM
     ? `هذا الإعلان يخص صفحة فيسبوك "${fbName}".\n\nربطه بصفحة أخرى في النظام يغيّر الصفحة التي تُحسب عليها تقارير ومصاريف هذا الإعلان. تابع فقط إذا كنت متأكداً أن هذا ما تريده.\n\nهل تريد المتابعة؟`
     : `This ad ran on the Facebook page "${fbName}".\n\nLinking it to a different page in the system changes which page this ad's reports and spending count under. Continue only if you are sure this is what you want.\n\nContinue?`;
-  if (!confirm(warning)) return;
+  if (!await appConfirm(warning, 'go')) return;
   const overrideFlag = document.getElementById('ad-meta-page-override');
   if (overrideFlag) overrideFlag.value = '1';
   document.getElementById('ad-meta-page-locked-display')?.classList.add('hidden');

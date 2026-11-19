@@ -452,7 +452,7 @@ async function init() {
         const confirmMsg = state.language === 'ar'
           ? 'رابط يطلب مزامنة بيانات هذا الجهاز مع خادم خارجي:\n\n' + url.host + '\n\nلا توافق إلا إذا كنت تثق بمصدر هذا الرابط. هل تريد المتابعة؟'
           : 'This link asks to sync ALL data on this device with an external server:\n\n' + url.host + '\n\nOnly continue if you trust where this link came from. Enable sync?';
-        if (!window.confirm(confirmMsg)) {
+        if (!await appConfirm(confirmMsg, 'go')) {
           addSecurityLog('cloud_connect_rejected', 'User declined sys_connect to ' + url.host);
           throw new Error('User declined the connection request');
         }

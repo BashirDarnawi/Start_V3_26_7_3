@@ -656,13 +656,13 @@ function rememberLoginAccount(user) {
   _loginPrefillEmail = '';
 }
 
-function removeSavedLoginAccount(email) {
+async function removeSavedLoginAccount(email) {
   const target = _normalizeSavedAccountEmail(email);
   if (!target) return;
   const isAr = state.language === 'ar';
   const entry = getSavedLoginAccounts().find(acc => acc.email === target);
   const label = (entry && entry.name) ? entry.name : target;
-  const ok = confirm(isAr
+  const ok = await appConfirm(isAr
     ? `إزالة "${label}" من هذا الجهاز؟ لن يُحذف الحساب نفسه.`
     : `Remove "${label}" from this device? The account itself is not deleted.`);
   if (!ok) return;
@@ -4327,7 +4327,7 @@ async function checkStuckDeliveries() {
     return;
   }
 
-  const hoursInput = prompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
+  const hoursInput = await appPrompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
   if (!hoursInput) return;
 
   const hours = parseInt(normalizeDigitsAscii(String(hoursInput || '')), 10);
@@ -4545,7 +4545,7 @@ function deliveryStatusChoices(item, module = 'receipts') {
 }
 
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
-async function removeDeliveryMission(itemId) {
+async function removeDeliveryMission(itemId, sure) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -4589,7 +4589,8 @@ async function removeDeliveryMission(itemId) {
   const removeMsg = state.language === 'ar'
     ? 'إزالة مهمة التوصيل هذه؟\n\nسيتم إلغاء تعيين السائق وإزالتها من عمليات التوصيل.\nسيبقى الوصل في شاشة الوصولات.'
     : 'Remove this delivery mission?\n\nThis will unassign the driver and remove it from Delivery Operations.\nThe receipt will remain in Receipts.';
-  if (!confirm(removeMsg)) return;
+  // Asked once; after a yes every check above runs again on the record as it is then.
+  if (!sure) return await appConfirm(removeMsg, 'delete') && removeDeliveryMission(itemId, 1);
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
@@ -6445,7 +6446,7 @@ async function cleanupAuditLogs() {
     return;
   }
 
-  const daysToKeep = prompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
+  const daysToKeep = await appPrompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
   if (!daysToKeep) return;
 
   const days = parseInt(normalizeDigitsAscii(String(daysToKeep || '')), 10);
@@ -6454,7 +6455,7 @@ async function cleanupAuditLogs() {
     return;
   }
 
-  if (!confirm(isAr ? `⚠️ حذف كل سجلات التدقيق الأقدم من ${days} يوماً؟\n\nلا يمكن التراجع عن هذا الإجراء.\nيُنصح بعمل نسخة احتياطية أولاً.` : `⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`)) {
+  if (!await appConfirm(isAr ? `⚠️ حذف كل سجلات التدقيق الأقدم من ${days} يوماً؟\n\nلا يمكن التراجع عن هذا الإجراء.\nيُنصح بعمل نسخة احتياطية أولاً.` : `⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`, 'delete')) {
     return;
   }
   

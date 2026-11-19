@@ -1273,6 +1273,224 @@ async function main() {
     assert.ok(empty.includes('AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin()') && empty.includes('An Admin creates ads on the pages that arrive through Meta Sync on the Ads screen.'));
     assert.ok(empty.includes('Please add a Facebook Page first before creating an ad.') && empty.includes("'Open Pages'") && !empty.includes("'Add Page'"));
   });
+  // Redesign round 2: the browser's confirm and prompt boxes are gone everywhere. The app asks in its own
+  // box (appConfirm, appPrompt): same question, same answer, in the app's look and language.
+  const questionBoxFixture = (language = 'en') => {
+    const fixture = loadBrowserSource();
+    const { sandbox, state, questionBox } = fixture;
+    Object.assign(sandbox, questionBox);
+    state.language = language;
+    const boxes = [], keys = [], focus = [];
+    // A stand-in element: text put in comes out escaped (as a real element does it), and the box's field and
+    // two buttons can be reached. Only what is put on the page counts as a box.
+    sandbox.document.createElement = () => ({ attrs: {}, innerHTML: '', gone: false, shown: false,
+      set textContent(value) { this.innerHTML = String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); },
+      setAttribute(name, value) { this.attrs[name] = value; }, remove() { this.gone = true; },
+      querySelector(selector) {
+        if (selector !== 'input' || !this.innerHTML.includes('<input')) return null;
+        return (this.input ||= { value: (this.innerHTML.match(/<input[^>]* value="([^"]*)"/) || [])[1] || '', focus() { focus.push('field'); }, select() {} });
+      },
+      querySelectorAll() { return (this.buttons ||= [{ focus() { focus.push('cancel'); } }, { focus() { focus.push('yes'); } }]); } });
+    sandbox.document.body.appendChild = box => { box.shown = true; boxes.push(box); };
+    sandbox.document.addEventListener = (type, handler) => { if (type === 'keydown') keys.push(handler); };
+    sandbox.document.removeEventListener = (type, handler) => { const at = keys.indexOf(handler); if (at >= 0) keys.splice(at, 1); };
+    const press = (key, extra = {}) => { const event = { key, stopped: false, preventDefault() {}, stopImmediatePropagation() { this.stopped = true; }, ...extra }; keys.slice().forEach(handler => handler(event)); return event; };
+    const last = () => boxes[boxes.length - 1];
+    return { ...fixture, boxes, keys, focus, press, last };
+  };
+  await test('redesign round 2: the app asks in its own box: it names the thing, Cancel has the focus, a delete has a red Delete, and the text is shown as text', async () => {
+    const { sandbox, boxes, keys, focus, last } = questionBoxFixture();
+    for (const box of ['alert', 'confirm', 'prompt']) sandbox[box] = sandbox.window[box] = () => { throw new Error(`the browser ${box} box is gone`); };
+    const asked = sandbox.appConfirm('Delete this page?\n\n3 ad(s) belong to <b>Shop & Co</b>.\nThis cannot be undone.', 'delete');
+    const box = last();
+    assert.ok(box.shown && box.id === 'app-ask' && box.attrs.role === 'alertdialog' && box.attrs['aria-modal'] === 'true');
+    assert.ok(box.attrs['aria-labelledby'] === 'app-ask-title' && box.attrs['aria-describedby'] === 'app-ask-text');
+    assert.ok(box.className.includes('mobile-dialog-overlay') && box.className.includes('app-dialog-overlay'), 'it is a dialog of the app: a sheet on a phone, a window on a desk');
+    assert.ok(box.innerHTML.includes('<h2 id="app-ask-title" class="app-dialog-title">Delete this page?</h2>'), box.innerHTML);
+    assert.ok(box.innerHTML.includes('<p>3 ad(s) belong to &lt;b&gt;Shop &amp; Co&lt;/b&gt;.</p><p>This cannot be undone.</p>'), 'each line is a paragraph, and markup in a name stays text');
+    assert.ok(/<button type="button" class="app-dialog-cancel management-button">Cancel<\/button><button type="button" class="management-button is-danger">Delete<\/button>/.test(box.innerHTML), box.innerHTML);
+    assert.ok(box.innerHTML.includes('dir="ltr"') && !box.innerHTML.includes('<input'));
+    assert.deepEqual(focus, ['cancel'], 'the focus starts on Cancel, never on the confirming button');
+    assert.equal(keys.length, 1);
+    box.onclick({ target: box.buttons[1] });
+    assert.equal(await asked, true);
+    assert.ok(box.gone && keys.length === 0, 'the box and its key handler are gone after the answer');
+    // An ordinary question says "Confirm", a warning to go on says "Continue", any other word is the button itself.
+    const plain = sandbox.appConfirm('Clear all permissions for Sara?');
+    assert.ok(last().innerHTML.includes('class="management-button is-primary">Confirm</button>'));
+    last().onclick({ target: last().buttons[0] });
+    assert.equal(await plain, false, 'Cancel answers no');
+    const go = sandbox.appConfirm('Not enough stock.\nContinue anyway?', 'go');
+    assert.ok(last().innerHTML.includes('class="management-button is-primary">Continue</button>'));
+    last().onclick({ target: last() });
+    assert.equal(await go, false, 'a click beside the box answers no');
+    const own = sandbox.appConfirm('Stop this campaign?', 'Stop <now>');
+    assert.ok(last().innerHTML.includes('class="management-button is-primary">Stop &lt;now&gt;</button>'));
+    last().onclick({ target: { not: 'a button of the box' } });
+    assert.equal(boxes.filter(item => !item.gone).length, 1, 'a click on the text answers nothing');
+    sandbox.closeAppAsk();
+    assert.equal(await own, false, 'signing out closes the question with a no');
+    // One long sentence is not a title: the box says "Please confirm" and shows the sentence below it.
+    const long = 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?';
+    const sentence = sandbox.appConfirm(long, 'go');
+    assert.ok(last().innerHTML.includes('>Please confirm</h2>') && last().innerHTML.includes(`<p>${long}</p>`), last().innerHTML);
+    last().onclick({ target: last().buttons[1] });
+    assert.equal(await sentence, true);
+  });
+  await test('redesign round 2: the question box by keyboard: Escape answers no, Tab stays inside, and the search palette cannot open behind it', async () => {
+    const { sandbox, keys, focus, press, last } = questionBoxFixture();
+    const asked = sandbox.appConfirm('Delete this shipment?', 'delete');
+    focus.length = 0;
+    sandbox.document.activeElement = last().buttons[0];
+    assert.equal(press('Tab').stopped, true);
+    sandbox.document.activeElement = last().buttons[1];
+    press('Tab');
+    sandbox.document.activeElement = last().buttons[0];
+    press('Tab', { shiftKey: true });
+    sandbox.document.activeElement = { outside: true };
+    press('Tab');
+    assert.deepEqual(focus, ['yes', 'cancel', 'yes', 'cancel'], 'Tab and Shift+Tab go round the two buttons; from outside it comes back in');
+    assert.equal(press('k', { ctrlKey: true }).stopped, true, 'Ctrl+K is swallowed while a question is open');
+    assert.equal(press('k', { metaKey: true }).stopped, true);
+    assert.equal(press('a').stopped, false, 'other keys are left alone');
+    assert.equal(press('Enter', { target: last().buttons[0] }).stopped, false, 'Enter on a button is the button\'s own click');
+    assert.equal(press('Escape').stopped, true);
+    assert.equal(await asked, false);
+    assert.equal(keys.length, 0);
+    assert.equal(press('Escape').stopped, false, 'with no question open, Escape belongs to the page again');
+  });
+  await test('redesign round 2: a question with a field hands back the typed text, or nothing on Cancel; a second question cancels the first; Arabic reads right to left', async () => {
+    const { sandbox, state, focus, press, last, boxes } = questionBoxFixture();
+    const days = sandbox.appPrompt('Delete audit logs older than how many days? (default: 365)', '365');
+    assert.ok(/<input id="app-ask-input" class="glass-input[^"]*" dir="auto" autocomplete="off" aria-labelledby="app-ask-title" value="365">/.test(last().innerHTML), last().innerHTML);
+    assert.deepEqual(focus, ['field'], 'the field has the focus: there is something to type');
+    last().input.value = '30';
+    assert.equal(press('Enter', { target: last().input }).stopped, true);
+    assert.equal(await days, '30', 'Enter in the field confirms what was typed');
+    const typed = sandbox.appPrompt('Type IMPORT to confirm (case-sensitive):');
+    assert.ok(last().innerHTML.includes(' value="">'));
+    last().input.value = 'IMPORT';
+    last().onclick({ target: last().buttons[1] });
+    assert.equal(await typed, 'IMPORT');
+    const cancelled = sandbox.appPrompt('Amount paid so far (total 45.00 LYD)', '<"5">');
+    assert.ok(last().innerHTML.includes('value="&lt;&quot;5&quot;&gt;"'), 'the suggested text is escaped');
+    press('Escape');
+    assert.equal(await cancelled, null, 'Cancel hands back nothing, as the browser prompt did');
+    const emptied = sandbox.appPrompt('Refund amount in USD (0 to 70.00):', '70.00');
+    last().input.value = '';
+    last().onclick({ target: last().buttons[1] });
+    assert.equal(await emptied, '', 'an emptied field is an empty answer, not a Cancel');
+    // One at a time.
+    const first = sandbox.appConfirm('First?');
+    const firstBox = last();
+    const second = sandbox.appPrompt('Second?', 'x');
+    assert.equal(await first, false, 'the earlier question is answered no');
+    assert.ok(firstBox.gone && !last().gone && boxes.filter(item => !item.gone).length === 1);
+    last().onclick({ target: last().buttons[0] });
+    assert.equal(await second, null);
+    state.language = 'ar';
+    const arabic = sandbox.appConfirm('هل تريد حذف هذه الصفحة؟', 'delete');
+    assert.ok(last().innerHTML.includes('dir="rtl"') && last().innerHTML.includes('>إلغاء</button>') && last().innerHTML.includes('is-danger">حذف</button>'), last().innerHTML);
+    assert.ok(!/[A-Za-z]{3,}/.test(last().innerHTML.replace(/<[^>]+>/g, ' ')), 'no English word in the Arabic box');
+    last().onclick({ target: last().buttons[1] });
+    assert.equal(await arabic, true);
+    const arabicLong = sandbox.appConfirm('هذا الوصل مسجل كأموال مستلمة. تغييره إلى غير مدفوع سيعكس الدفع إلى دين على العميل، وسيحوّل تمويل الإعلانات المرتبطة بأمان. هل تريد المتابعة؟', 'go');
+    assert.ok(last().innerHTML.includes('>يرجى التأكيد</h2>') && last().innerHTML.includes('>متابعة</button>'));
+    sandbox.closeAppAsk();
+    assert.equal(await arabicLong, false);
+  });
+  await test('redesign round 2: a yes counts only for the facts it was given: when the records change while the question is open, the delete asks again or stops', async () => {
+    // A customer delete in local mode: a second receipt arrives while the question is open.
+    const { sandbox, state } = loadBrowserSource();
+    const receipt = id => ({ id, customerId: 'c1', status: 'Paid', isPaid: true, amountUSD: 10, amountLocal: 50, exchangeRate: 5, payments: [], transfers: [], createdBy: 'admin' });
+    state.receipts = [receipt('r1')];
+    const deleted = [];
+    sandbox.deleteRecord = async (array, id) => { deleted.push(id); const row = array.find(item => item.id === id); if (row) row._deleted = true; return true; };
+    sandbox.flushBatchDeletes = async () => true;
+    sandbox.undoTransferIntoReceipt = async () => {};
+    sandbox.cleanupAdFundingLinks = async () => {};
+    sandbox.cascadeDeleteOutgoingTransfers = async () => 0;
+    const asked = [];
+    let answers = [true, false];
+    let arriving = [receipt('r2')];
+    sandbox.appConfirm = async (text, kind) => { asked.push([String(text), kind]); state.receipts.push(...arriving.splice(0)); return answers.shift(); };
+    await sandbox.deleteCustomer('c1');
+    assert.equal(asked.length, 2, 'the facts changed: the app asks again');
+    assert.ok(asked[0][0].includes('1 receipt(s)') && asked[1][0].includes('2 receipt(s)'), JSON.stringify(asked));
+    assert.ok(asked.every(([text, kind]) => kind === 'delete' && text.includes('• Delete = Delete customer AND all their receipts/ads') && text.includes('• Cancel = Keep everything') && !text.includes('OK =')), 'the text names the buttons of the app\'s own box');
+    assert.deepEqual(deleted, [], 'a no to the second question deletes nothing');
+    asked.length = 0; answers = [true];
+    await sandbox.deleteCustomer('c1');
+    assert.equal(asked.length, 1, 'nothing changed this time: one question');
+    assert.deepEqual(deleted, ['r1', 'r2', 'c1'], 'everything the question named, and nothing else');
+    state.language = 'ar';
+    state.customers = [{ id: 'c2', name: 'سارة', createdBy: 'admin' }];
+    state.receipts = [{ ...receipt('r3'), customerId: 'c2' }];
+    asked.length = 0; answers = [false];
+    await sandbox.deleteCustomer('c2');
+    assert.ok(asked[0][0].includes('• حذف = حذف العميل وجميع وصولاته وإعلاناته') && asked[0][0].includes('• إلغاء = الإبقاء على كل شيء') && !asked[0][0].includes('موافق ='), asked[0][0]);
+    state.language = 'en';
+    // A delivery job is handed over while "Remove this delivery mission?" is open: after the yes the checks run again.
+    const jobs = loadBrowserSource();
+    const notes = [];
+    jobs.sandbox.showNotification = (title, message) => notes.push([title, message]);
+    const saved = [];
+    jobs.sandbox.updateRecord = async (array, id, updates) => { saved.push(id); Object.assign(array.find(item => item.id === id), updates); return true; };
+    jobs.state.receipts = [{ id: 'd1', recordType: 'receipt', customerId: 'c1', createdBy: 'admin', status: 'Not Paid', statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'Needs Delivery', amountUSD: 10, payments: [], transfers: [] }];
+    jobs.sandbox.appConfirm = async () => { jobs.state.receipts[0].deliveryStatus = 'Delivered'; return true; };
+    await jobs.sandbox.removeDeliveryMission('d1');
+    assert.deepEqual(saved, [], 'a job delivered in the meantime is not removed');
+    assert.equal(notes.pop()?.[1], 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.');
+    jobs.state.receipts[0].deliveryStatus = 'Needs Delivery';
+    jobs.sandbox.appConfirm = async () => false;
+    await jobs.sandbox.removeDeliveryMission('d1');
+    assert.deepEqual(saved, [], 'a no removes nothing');
+    jobs.sandbox.appConfirm = async () => true;
+    await jobs.sandbox.removeDeliveryMission('d1');
+    assert.deepEqual(saved, ['d1']);
+  });
+  await test('redesign round 2: a Clothes order that is short of stock asks with the stock untouched: a no changes nothing, a yes saves in one go', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    sandbox.isServerModeEnabled = () => false;
+    state.clothesProducts = [{ id: 'p1', name: 'Dress', costUSD: 5, priceLYD: 20, variants: [{ color: 'Red', size: 'M', qty: 1 }], createdBy: 'admin' }];
+    // An order that already holds 2 pieces is edited to 5: the 2 come back first, so 3 are in stock and 5 are wanted.
+    state.clothesOrders = [{ id: 'o1', orderNo: 1, customerName: 'Sara', phone: '0911111111', status: 'New', paymentStatus: 'Not Paid', amountPaidLYD: 0, deliveryFeeLYD: 0,
+      stockDeducted: true, lines: [{ productId: 'p1', color: 'Red', size: 'M', qty: 2, priceLYD: 20 }], _lastModified: 4, createdBy: 'admin' }];
+    state.modalData = state.clothesOrders[0];
+    const fields = { 'clothes-order-editing-id': 'o1', 'clothes-order-customer': 'Sara', 'clothes-order-phone': '0911111111', 'clothes-order-fee': '0', 'clothes-order-paystatus': 'Not Paid', 'clothes-order-paid': '0' };
+    sandbox.document.getElementById = id => (id in fields ? { value: fields[id] } : null);
+    const stock = () => state.clothesProducts[0].variants[0].qty;
+    const patches = [];
+    sandbox.updateRecord = async (array, id, updates) => {
+      if (array === state.clothesOrders) patches.push(JSON.parse(JSON.stringify(updates)));
+      Object.assign(array.find(item => item.id === id), updates);
+      return true;
+    };
+    sandbox.addRecord = async () => true;
+    sandbox.updateClothesProductsFiltered = () => {};
+    const lines = "_clothesTempOrderLines = [{ productId: 'p1', color: 'Red', size: 'M', qty: 5, priceLYD: 20 }];";
+    run(`_clothesDraftId = ''; ${lines}`);
+    const asked = [];
+    let answer = false;
+    sandbox.appConfirm = async (text, kind) => { asked.push({ text: String(text), kind, stockWhileOpen: stock() }); return answer; };
+    assert.equal(await sandbox.saveClothesOrderFromModal(), false);
+    assert.equal(asked.length, 1);
+    assert.ok(asked[0].text.includes('not enough stock') && asked[0].text.includes('Dress Red/M: 3 available, 5') && asked[0].kind === 'go', JSON.stringify(asked[0]));
+    assert.equal(asked[0].stockWhileOpen, 1, 'while the question is open the stock is as it was before Save (before: the old pieces were out of the count)');
+    assert.equal(stock(), 1, 'a no leaves the stock alone');
+    // (Putting the old pieces back and taking them again notes the taken count on the order's lines, as it always did.)
+    const orderSaves = () => patches.filter(patch => 'stockDeducted' in patch);
+    assert.deepEqual(orderSaves(), [], 'and saves nothing of the form');
+    assert.equal(state.clothesOrders[0].lines[0].qty, 2, 'the order still holds its 2 pieces');
+    answer = true;
+    run(lines);
+    assert.equal(await sandbox.saveClothesOrderFromModal(), true);
+    assert.equal(asked.length, 2, 'asked once more for the new Save, and only once');
+    assert.equal(stock(), 0, 'a yes takes what there is: the stock ends at zero');
+    assert.equal(orderSaves().length, 1);
+    assert.equal(orderSaves()[0].stockDeducted, true);
+    assert.equal(orderSaves()[0].lines[0].qty, 5);
+  });
   await test('audit export pages by the last row cursor and a failed page downloads nothing (n=7)', async () => {
     const { sandbox } = loadBrowserSource();
     const notes = [];
@@ -1472,7 +1690,7 @@ async function main() {
     const asked = [];
     sandbox.window.location.assign = url => assigned.push(url);
     sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
-    sandbox.confirm = text => { asked.push(text); return answer; };
+    sandbox.appConfirm = async text => { asked.push(text); return answer; };  // the app's own question box
     sandbox.apiJson = async (url, options = {}) => {
       // Plain host-realm copies, so deepEqual compares values and not the sandbox's object prototypes.
       const body = options.body === undefined ? undefined : JSON.parse(JSON.stringify(options.body));
@@ -1653,7 +1871,7 @@ async function main() {
     assert.equal(keep.asked.length, 1);
     assert.ok(/Disconnect Facebook\?/.test(keep.asked[0]));
     assert.equal(keep.calls.filter(c => c.method === 'POST').length, 0, 'No sends nothing');
-    keep.sandbox.confirm = () => true;
+    keep.sandbox.appConfirm = async () => true;
     await keep.sandbox.metaFbDisconnect();
     assert.deepEqual(keep.calls.filter(c => c.method === 'POST').map(c => [c.url, c.body]), [['/api/meta-ads/connection/disconnect', {}]]);
     assert.equal(metaFbState(keep.html()), 'not-connected');
@@ -1804,7 +2022,7 @@ async function main() {
       state.clothesOrders = [{ id: 'o1', orderNo: 3, customerName: 'Sara', status: 'New', paymentStatus: 'Paid', amountPaidLYD: 1500,
         deliveryFeeLYD: 0, lines: [{ productId: 'p1', qty: 1, priceLYD: 1500 }], _lastModified: 4, createdBy: 'admin' }];
       let sent = null;
-      sandbox.prompt = () => typed;
+      sandbox.appPrompt = async () => typed;  // the app's own question box with a field
       sandbox.isServerModeEnabled = () => true;
       sandbox.apiMutateClothesOrder = async request => { sent = request; return {}; };
       sandbox.applyClothesOrderMutationResponse = () => {};
@@ -3312,10 +3530,10 @@ async function main() {
     run('printReceiptCard')({ closest: () => card });
     run('printCurrentPage()');
     const asked = [];
-    sandbox.confirm = text => { asked.push(text); return false; };
+    sandbox.appConfirm = async text => { asked.push(text); return false; };  // the app's own question box
     sandbox.createAutoBackup = () => {};
     sandbox.addAuditLog = () => {};
-    run('exportData()');
+    await run('exportData()');
     const clothes = clothesFixture();
     clothes.run('Platform.detect()').isCapacitor = true;
     clothes.sandbox.document.createElement = tag => ({ tag, style: {}, dataset: {}, setAttribute() {}, remove() {}, click() { clicks.push(tag); } });
@@ -4610,7 +4828,7 @@ async function main() {
         deliveryFeeLYD: 5, lines: [{ productId: 'p1', qty: 2, priceLYD: 20 }], _lastModified: 4, createdBy: 'admin' }];
       let sent = null;
       let patched = null;
-      sandbox.prompt = () => '45';
+      sandbox.appPrompt = async () => '45';
       sandbox.isServerModeEnabled = () => serverMode;
       sandbox.apiMutateClothesOrder = async request => { sent = request; return {}; };
       sandbox.applyClothesOrderMutationResponse = () => {};
@@ -6432,12 +6650,12 @@ async function main() {
     const calls = [];
     sandbox.apiJson = async url => { calls.push(url); return { version: 3, plans: [{ ...plan }] }; };
     const asked = [];
-    sandbox.window.confirm = text => { asked.push(text); return false; };
+    sandbox.appConfirm = async text => { asked.push(text); return false; };  // the app's own question box
     await sandbox.planManagerReload();
     assert.equal(calls.length, 0, 'kept the edit: nothing reloaded');
     assert.equal(run('_planManager.plans[0].priceMinor'), 15000);
     assert.ok(asked.length === 1 && asked[0].includes('Discard unsaved plan changes'), JSON.stringify(asked));
-    sandbox.window.confirm = text => { asked.push(text); return true; };
+    sandbox.appConfirm = async text => { asked.push(text); return true; };
     await sandbox.planManagerReload();
     assert.deepEqual(calls, ['/api/admin/subscription-plans']);
     assert.equal(run('_planManager.plans[0].priceMinor'), 10000, 'the server copy is back');
@@ -6461,50 +6679,50 @@ async function main() {
     sandbox.render = () => { renders += 1; };
     const asked = [];
     let answer = false;
-    sandbox.window.confirm = text => { asked.push(String(text)); return answer; };
+    sandbox.appConfirm = async text => { asked.push(String(text)); return answer; };  // the app's own question box
     // The add-bundle boxes, all filled in but the price; two systems are ticked.
     const boxes = { 'plan-new-id': { value: 'pro_bundle' }, 'plan-new-name': { value: 'Pro Bundle' }, 'plan-new-name-ar': { value: 'الباقة الاحترافية' },
       'plan-new-price': { value: '' }, 'plan-new-days': { value: '30' }, 'plan-new-svc-clothes_system': { checked: true }, 'plan-new-svc-ad_maker': { checked: true } };
     sandbox.document.getElementById = id => boxes[id] || null;
-    const add = price => {
+    const add = async price => {
       run('_planManager.plans = []; _planManager.dirty = false;');
       notes.length = 0; asked.length = 0; renders = 0;
       boxes['plan-new-price'].value = price;
-      sandbox.planManagerAddBundle();
+      await sandbox.planManagerAddBundle();  // the free-bundle question (the app's own box) is answered first
       return JSON.parse(run('JSON.stringify(_planManager.plans)'));
     };
     // '' is an empty box, and also what a number box hands back for text it cannot read ("abc").
     // The raw texts are refused as well, should a box ever pass them through.
     for (const price of ['', '   ', 'abc', '1,234.50', '-5', 'Infinity', '1e307', '10000000001']) {  // 1e307 became priceMinor Infinity (saved as null)
-      assert.deepEqual(add(price), [], `before: a price of "${price}" still added a bundle (0 LYD, "best value")`);
+      assert.deepEqual(await add(price), [], `before: a price of "${price}" still added a bundle (0 LYD, "best value")`);
       assert.deepEqual(notes.map(note => [note.title, note.type]), [['Enter the bundle price', 'warning']], `"${price}": one warning`);
       assert.ok(asked.length === 0 && renders === 0 && run('_planManager.dirty') === false, `"${price}": no question, no redraw, Save stays off`);
     }
     state.language = 'ar';
-    add('');
+    await add('');
     assert.equal(notes[0]?.title, 'أدخل سعر الباقة');
     assert.ok(!/[A-Za-z]{3,}/.test(`${notes[0]?.title} ${notes[0]?.message}`), JSON.stringify(notes));
     state.language = 'en';
     // A typed price is added as typed (a comma decimal too; rounded, not cut: 19.99 * 100 is 1998.99...), with no question.
-    const [bundle] = add('150');
+    const [bundle] = await add('150');
     assert.equal(bundle.priceMinor, 15000);
     assert.equal(bundle.badge, 'best_value');
     assert.deepEqual(bundle.serviceIds, ['clothes_system', 'ad_maker']);
     assert.ok(asked.length === 0 && notes.length === 0 && renders === 1 && run('_planManager.dirty') === true, 'added, redrawn once and marked unsaved');
-    assert.equal(add('150,5')[0].priceMinor, 15050);
-    assert.equal(add('19.99')[0].priceMinor, 1999);
+    assert.equal((await add('150,5'))[0].priceMinor, 15050);
+    assert.equal((await add('19.99'))[0].priceMinor, 1999);
     // A free bundle stays possible, but only as a choice: "no" adds nothing, "yes" adds it.
-    assert.deepEqual(add('0'), [], 'before: a 0 price was added without a question');
+    assert.deepEqual(await add('0'), [], 'before: a 0 price was added without a question');
     assert.ok(asked.length === 1 && asked[0].includes('free for customers'), JSON.stringify(asked));
     assert.ok(notes.length === 0 && renders === 0 && run('_planManager.dirty') === false, 'a "no" leaves the list alone');
-    assert.deepEqual(add('0.004'), [], 'a price that would be stored as 0.00 LYD is a free bundle too');
+    assert.deepEqual(await add('0.004'), [], 'a price that would be stored as 0.00 LYD is a free bundle too');
     assert.equal(asked.length, 1);
     state.language = 'ar';
-    add('0');
+    await add('0');
     assert.ok(asked.length === 1 && asked[0].includes('مجانية') && !/[A-Za-z]{3,}/.test(asked[0]), JSON.stringify(asked));
     state.language = 'en';
     answer = true;
-    const [free] = add('0');
+    const [free] = await add('0');
     assert.equal(asked.length, 1, 'asked once');
     assert.equal(free.priceMinor, 0);
     assert.ok(renders === 1 && run('_planManager.dirty') === true);
@@ -8465,7 +8683,7 @@ async function main() {
       state.ads = [{ id: 'adS', customerId: 'c1', status: 'Active', paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop', amountUSD: 100, companyDirectCoverageUSD: 60,
         companyFundingAllocations: [{ receiptId: 'r1', amountUSD: 40 }], receiptAllocations: [], dueAllocations: [], _lastModified: 5 }];
       const asked = []; const bodies = [];
-      sandbox.confirm = text => { asked.push(text); return answer; };
+      sandbox.appConfirm = async text => { asked.push(text); return answer; };  // the app's own question box
       sandbox.isServerModeEnabled = () => true;
       sandbox.showNotification = () => {};
       sandbox.apiStopAd = async (id, body) => { bodies.push(body); return { ad: { id: 'adS', data: { ...state.ads[0], status: 'Stopped' }, lastModified: 6 }, updatedReceipts: [] }; };

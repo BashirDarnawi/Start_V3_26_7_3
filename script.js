@@ -7188,6 +7188,59 @@ function showNotification(title, message, type = 'info') {
     setTimeout(() => notification.remove(), 300);
   }, 5000);
 }
+
+// The app's own question box, in place of the browser's confirm and prompt boxes: the same question
+// and the same answer (true or false; with a text field, the typed text or null), in the app's look
+// and language. One at a time: a new question cancels the one before it.
+let _appAsk = null;
+
+function closeAppAsk(answer) {
+  const open = _appAsk;
+  if (!open) return;
+  _appAsk = null;
+  document.removeEventListener('keydown', open.key, true);
+  open.host.remove();
+  try { open.from?.focus?.(); } catch (_) {}
+  open.done(answer === undefined ? (open.input ? null : false) : answer);
+}
+
+// kind: 'delete' (red "Delete"), 'go' ("Continue"), any other text is the button's own label.
+function appConfirm(message, kind = '', ask) {
+  closeAppAsk();
+  return new Promise(done => {
+    const ar = state.language === 'ar', host = document.createElement('div');
+    const lines = Security.escapeHtml(String(message)).split('\n').filter(line => line.trim());
+    const title = lines[0].length > 90 ? (ar ? 'يرجى التأكيد' : 'Please confirm') : lines.shift();
+    const yes = { '': ['Confirm', 'تأكيد'], delete: ['Delete', 'حذف'], go: ['Continue', 'متابعة'] }[kind]?.[+ar] || Security.escapeHtml(kind);
+    host.id = 'app-ask';
+    host.className = 'mobile-dialog-overlay app-dialog-overlay fixed inset-0 flex items-center justify-center p-4';
+    host.setAttribute('role', 'alertdialog');
+    host.setAttribute('aria-modal', 'true');
+    host.setAttribute('aria-labelledby', 'app-ask-title');
+    host.setAttribute('aria-describedby', 'app-ask-text');
+    host.innerHTML = `<div class="app-dialog-panel glass-panel w-full max-w-md" dir="${ar ? 'rtl' : 'ltr'}"><h2 id="app-ask-title" class="app-dialog-title">${title}</h2><div id="app-ask-text">${lines.map(line => `<p>${line}</p>`).join('')}</div>${ask === undefined ? '' : `<input id="app-ask-input" class="glass-input w-full rounded-xl px-3 py-2" dir="auto" autocomplete="off" aria-labelledby="app-ask-title" value="${Security.escapeHtml(String(ask))}">`}<div class="management-button-row"><button type="button" class="app-dialog-cancel management-button">${ar ? 'إلغاء' : 'Cancel'}</button><button type="button" class="management-button ${kind === 'delete' ? 'is-danger' : 'is-primary'}">${yes}</button></div></div>`;
+    const input = host.querySelector('input'), [no, ok] = host.querySelectorAll('button'), stops = input ? [input, no, ok] : [no, ok];
+    const key = event => {
+      if (event.key === 'Escape') closeAppAsk();
+      else if (event.key === 'Enter' && event.target === input) closeAppAsk(input.value);
+      else if (event.key === 'Tab') stops[(stops.indexOf(document.activeElement) + (event.shiftKey ? stops.length - 1 : 1)) % stops.length].focus();
+      else if (!((event.ctrlKey || event.metaKey) && event.key === 'k')) return;  // no search palette behind a question
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    let from = null;
+    try { from = document.activeElement; } catch (_) {}
+    _appAsk = { host, key, done, input, from };
+    host.onclick = event => { if (event.target === host || event.target === no) closeAppAsk(); else if (event.target === ok) closeAppAsk(input ? input.value : true); };
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(host);
+    try { (input || no).focus(); input?.select(); } catch (_) {}
+  });
+}
+
+function appPrompt(message, value = '', kind = '') {
+  return appConfirm(message, kind, value);
+}
 // ==========================================
 // DATA HELPERS
 // ==========================================
@@ -14008,7 +14061,7 @@ function closeSensitiveAuthenticatedUi() {
     () => closeCustomerAdDebtCoverageModal({ force: true, restoreFocus: false }),
     () => _closeCompanyCoverageReceiptPicker(false),
     () => closeMetaInsightsModal(), () => closeMetaAdsConnectionModal(),
-    () => closeCommandPalette(), () => closeAnalyticsBreakdown(false), () => closeDollarPurchaseManager(false),
+    () => closeCommandPalette(), () => closeAnalyticsBreakdown(false), () => closeDollarPurchaseManager(false), () => closeAppAsk(),
     () => resetAdsStudioSessionState(), () => resetReceiptCustomerRiskWarningState()
   ];
   for (const close of closers) { try { close(); } catch (_) {} }
@@ -16007,13 +16060,13 @@ function rememberLoginAccount(user) {
   _loginPrefillEmail = '';
 }
 
-function removeSavedLoginAccount(email) {
+async function removeSavedLoginAccount(email) {
   const target = _normalizeSavedAccountEmail(email);
   if (!target) return;
   const isAr = state.language === 'ar';
   const entry = getSavedLoginAccounts().find(acc => acc.email === target);
   const label = (entry && entry.name) ? entry.name : target;
-  const ok = confirm(isAr
+  const ok = await appConfirm(isAr
     ? `إزالة "${label}" من هذا الجهاز؟ لن يُحذف الحساب نفسه.`
     : `Remove "${label}" from this device? The account itself is not deleted.`);
   if (!ok) return;
@@ -19678,7 +19731,7 @@ async function checkStuckDeliveries() {
     return;
   }
 
-  const hoursInput = prompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
+  const hoursInput = await appPrompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
   if (!hoursInput) return;
 
   const hours = parseInt(normalizeDigitsAscii(String(hoursInput || '')), 10);
@@ -19896,7 +19949,7 @@ function deliveryStatusChoices(item, module = 'receipts') {
 }
 
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
-async function removeDeliveryMission(itemId) {
+async function removeDeliveryMission(itemId, sure) {
   const id = String(itemId || '');
   if (!id) return;
 
@@ -19940,7 +19993,8 @@ async function removeDeliveryMission(itemId) {
   const removeMsg = state.language === 'ar'
     ? 'إزالة مهمة التوصيل هذه؟\n\nسيتم إلغاء تعيين السائق وإزالتها من عمليات التوصيل.\nسيبقى الوصل في شاشة الوصولات.'
     : 'Remove this delivery mission?\n\nThis will unassign the driver and remove it from Delivery Operations.\nThe receipt will remain in Receipts.';
-  if (!confirm(removeMsg)) return;
+  // Asked once; after a yes every check above runs again on the record as it is then.
+  if (!sure) return await appConfirm(removeMsg, 'delete') && removeDeliveryMission(itemId, 1);
 
   const nowIso = new Date().toISOString();
   const uid = state.currentUser?.id || '';
@@ -21796,7 +21850,7 @@ async function cleanupAuditLogs() {
     return;
   }
 
-  const daysToKeep = prompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
+  const daysToKeep = await appPrompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
   if (!daysToKeep) return;
 
   const days = parseInt(normalizeDigitsAscii(String(daysToKeep || '')), 10);
@@ -21805,7 +21859,7 @@ async function cleanupAuditLogs() {
     return;
   }
 
-  if (!confirm(isAr ? `⚠️ حذف كل سجلات التدقيق الأقدم من ${days} يوماً؟\n\nلا يمكن التراجع عن هذا الإجراء.\nيُنصح بعمل نسخة احتياطية أولاً.` : `⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`)) {
+  if (!await appConfirm(isAr ? `⚠️ حذف كل سجلات التدقيق الأقدم من ${days} يوماً؟\n\nلا يمكن التراجع عن هذا الإجراء.\nيُنصح بعمل نسخة احتياطية أولاً.` : `⚠️ Delete all audit logs older than ${days} days?\n\nThis action cannot be undone.\nConsider backing up first.`, 'delete')) {
     return;
   }
   
@@ -22865,7 +22919,7 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
         ? `سينتهي وصولك فوراً. أنت مدفوع حتى ${paidUntil} — ستفقد ${days} يوماً مدفوعاً ولا يوجد استرداد. هل أنت متأكد؟`
         : `Your access ends immediately. You are paid until ${paidUntil} — ${days} paid day(s) will be lost and there is no refund. Are you sure?`)
       : (isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
-    const ok = confirm(warning);
+    const ok = await appConfirm(warning);
     if (!ok) return;
     await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
     showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');
@@ -26469,7 +26523,7 @@ function applyPermissionTemplate(userId, templateKey) {
   _syncPermissionBoxes(userId);
 }
 
-function clearAllPermissions(userId) {
+async function clearAllPermissions(userId, sure) {
   if (!canManageUsersAction('managePermissions')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
@@ -26477,7 +26531,7 @@ function clearAllPermissions(userId) {
   const user = state.users.find(u => u.id === userId);
   if (!user) return;
   
-  if (!confirm(state.language === 'ar' ? `مسح جميع صلاحيات ${user.name}؟ سيفقد الوصول إلى معظم الميزات.` : `Clear all permissions for ${user.name}? They will lose access to most features.`)) return;
+  if (!sure) return await appConfirm(state.language === 'ar' ? `مسح جميع صلاحيات ${user.name}؟ سيفقد الوصول إلى معظم الميزات.` : `Clear all permissions for ${user.name}? They will lose access to most features.`) && clearAllPermissions(userId, 1);
   
   user.permissions = {};
   user._lastModified = getMonotonicTime();
@@ -28539,10 +28593,10 @@ function openReceiptDeliveryCancelModal(receiptId) {
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
   // Backdrop taps are how phone users dismiss the keyboard — never let one
   // silently destroy a typed cancel reason. Empty form still closes instantly.
-  modal.onclick = (e) => {
+  modal.onclick = async (e) => {
     if (e.target !== modal) return;
     const typedReason = String(document.getElementById('delivery-cancel-reason')?.value || '');
-    if (typedReason.trim() && !confirm(state.language === 'ar' ? 'تجاهل السبب المكتوب؟' : 'Discard the typed reason?')) return;
+    if (typedReason.trim() && !await appConfirm(state.language === 'ar' ? 'تجاهل السبب المكتوب؟' : 'Discard the typed reason?')) return;
     modal.remove();
   };
   modal.innerHTML = `
@@ -33329,7 +33383,7 @@ function receiptCreateRetryMatches(row, sent) {
   return serverRecordMatchesCreateRetry(row, cmp);
 }
 
-async function _saveReceiptFromModalInner() {
+async function _saveReceiptFromModalInner(sure) {
   const isArV = state.language === 'ar';
   // Filled only after a NEW delivery receipt is confirmed saved. The share
   // prompt must use the server-returned row because the server may assign the
@@ -33832,10 +33886,10 @@ async function _saveReceiptFromModalInner() {
       || editTarget.isPaid === true;
     const convertsCollectedReceiptToDebt = wasRecordedPaid && status === 'Not Paid';
     if (convertsCollectedReceiptToDebt) {
-      const confirmed = window.confirm(isArV
+      // Asked once; after a yes the whole save runs again from the form, in one go.
+      if (!sure) return await appConfirm(isArV
         ? 'هذا الوصل مسجل كأموال مستلمة. تغييره إلى غير مدفوع سيعكس الدفع إلى دين على العميل، وسيحوّل تمويل الإعلانات المرتبطة بأمان. هل تريد المتابعة؟'
-        : 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?');
-      if (!confirmed) return;
+        : 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?', 'go') && _saveReceiptFromModalInner(1);
     }
     // Money already committed cannot be edited away: ads funded from this
     // receipt (including delivery-due funding) plus money transferred to
@@ -34754,7 +34808,7 @@ function handleAdPageChange(preserveFunding = false) {
 
 // Admin-only, deliberately warned: unlock the page picker on a Meta-imported ad (a fast unwarned pick
 // once attached an ad to another business's page); the server needs this confirmed flag too.
-function confirmMetaAdPageChange() {
+async function confirmMetaAdPageChange() {
   if (!isCurrentUserAdmin()) return;
   const isArM = state.language === 'ar';
   const adData = state.modalData || {};
@@ -34763,7 +34817,7 @@ function confirmMetaAdPageChange() {
   const warning = isArM
     ? `هذا الإعلان يخص صفحة فيسبوك "${fbName}".\n\nربطه بصفحة أخرى في النظام يغيّر الصفحة التي تُحسب عليها تقارير ومصاريف هذا الإعلان. تابع فقط إذا كنت متأكداً أن هذا ما تريده.\n\nهل تريد المتابعة؟`
     : `This ad ran on the Facebook page "${fbName}".\n\nLinking it to a different page in the system changes which page this ad's reports and spending count under. Continue only if you are sure this is what you want.\n\nContinue?`;
-  if (!confirm(warning)) return;
+  if (!await appConfirm(warning, 'go')) return;
   const overrideFlag = document.getElementById('ad-meta-page-override');
   if (overrideFlag) overrideFlag.value = '1';
   document.getElementById('ad-meta-page-locked-display')?.classList.add('hidden');
@@ -41750,7 +41804,7 @@ async function handleModalSubmit() {
           const approveMsg = isArPage
             ? `توجد صفحة أخرى بنفس الاسم "${pageName}".\n\nهل توافق (كأدمن) على استخدام نفس الاسم لصفحة أخرى؟`
             : `Another page named "${pageName}" already exists.\n\nDo you (as Admin) approve using the same name for another page?`;
-          if (!confirm(approveMsg)) return;
+          if (!await appConfirm(approveMsg) || !submitIsCurrent()) return;
         } else {
           showNotification(
             isArPage ? 'اسم مكرر' : 'Duplicate Name',
@@ -42072,7 +42126,7 @@ async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   return count;
 }
 
-async function deleteCustomer(id) {
+async function deleteCustomer(id, seen) {
   if (!currentUserHasPermission('customers', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
@@ -42104,16 +42158,18 @@ async function deleteCustomer(id) {
     if (isAr) {
       warning += `\n\n⚠️ تحذير: لدى هذا العميل ${linkedReceipts.length} وصل و ${linkedAds.length} إعلان.`;
       warning += `\n\nاختر:`;
-      warning += `\n• موافق = حذف العميل وجميع وصولاته وإعلاناته`;
+      warning += `\n• حذف = حذف العميل وجميع وصولاته وإعلاناته`;
       warning += `\n• إلغاء = الإبقاء على كل شيء`;
     } else {
       warning += `\n\n⚠️ WARNING: This customer has ${linkedReceipts.length} receipt(s) and ${linkedAds.length} ad(s).`;
       warning += `\n\nChoose an option:`;
-      warning += `\n• OK = Delete customer AND all their receipts/ads`;
+      warning += `\n• Delete = Delete customer AND all their receipts/ads`;
       warning += `\n• Cancel = Keep everything`;
     }
   }
-  if (confirm(warning)) {
+  // The answer counts only for the facts it was given: after the question the check runs again.
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteCustomer(id, warning);
+  {
     // Cascade delete: ADS first (frees their spend so the transfer undo returns all unspent money),
     // then receipts, via deleteRecord (rollback, toast, audit); ONE all-or-nothing batch.
     const batchDeleteOps = { collectServerOps: [] };
@@ -42149,7 +42205,7 @@ async function deleteCustomer(id) {
   }
 }
 
-async function deletePage(id) {
+async function deletePage(id, seen) {
   if (!currentUserHasPermission('pages', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
@@ -42164,14 +42220,15 @@ async function deletePage(id) {
       ? `\n\n⚠️ ${pageAdsCount} إعلان(ات) تابعة لهذه الصفحة. ستبقى الإعلانات وسجلها، لكن صفحة جديدة بنفس الاسم لن تشملها.`
       : `\n\n⚠️ ${pageAdsCount} ad(s) belong to this page. The ads and their history stay, but a NEW page with the same name will not include them.`;
   }
-  if (confirm(pageWarning)) {
+  if (seen !== pageWarning) return await appConfirm(pageWarning, 'delete') && deletePage(id, pageWarning);
+  {
     if (!await deleteRecord(state.pages, id)) return;
     showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الصفحة' : 'Page deleted', 'success');
     render();
   }
 }
 
-async function deleteReceipt(id) {
+async function deleteReceipt(id, seen) {
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
@@ -42226,7 +42283,8 @@ async function deleteReceipt(id) {
       ? `\n\n⚠️ هذا الوصل حوَّل أموالاً إلى ${outgoingTargets.length} وصل(ات) لعملاء آخرين — سيتم حذفها أيضاً لأن مصدر أموالها سيختفي.`
       : `\n\n⚠️ This receipt transferred money to ${outgoingTargets.length} receipt(s) of other customers — those will be deleted too, because their money's source is being removed.`;
   }
-  if (confirm(warning)) {
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteReceipt(id, warning);
+  {
     // Clean every record referencing this receipt (as deleteCustomer), the transfer undo first
     // (it reads spent amounts); one all-or-nothing server batch.
     const batchDeleteOps = { collectServerOps: [] };
@@ -42244,7 +42302,7 @@ async function deleteReceipt(id) {
   }
 }
 
-async function deleteAd(id) {
+async function deleteAd(id, seen) {
   const ad = state.ads.find(a => a.id === id);
   const isAr = state.language === 'ar';
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
@@ -42282,7 +42340,8 @@ async function deleteAd(id) {
   warning += isAr
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
     : `\n\n⚠️ This action cannot be undone!`;
-  if (confirm(warning)) {
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteAd(id, warning);
+  {
     if (!await deleteRecord(state.ads, id)) return;
     if (isServerModeEnabled() && typeof serverLiveSyncTick === 'function') serverLiveSyncTick().catch(() => {});  // the shrunken receipt arrives now
     showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
@@ -43699,7 +43758,7 @@ async function confirmStopAd(id, source = 'modal') {
     }
     // Company money above the real spend goes back to company funds; never re-applied on its own.
     const companyOnAdUSD = getAdCompanyCoveredUSD(storedAd);
-    if (spentUSD + 0.005 < companyOnAdUSD && !confirm(isAr
+    if (spentUSD + 0.005 < companyOnAdUSD && !await appConfirm(isAr
       ? `أموال الشركة المسجّلة على هذا الإعلان $${companyOnAdUSD.toFixed(2)}، والمصروف الذي أدخلته $${spentUSD.toFixed(2)}.\nسيرجع $${(companyOnAdUSD - spentUSD).toFixed(2)} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
       : `Company funds recorded on this ad: $${companyOnAdUSD.toFixed(2)}. Spend you entered: $${spentUSD.toFixed(2)}.\n$${(companyOnAdUSD - spentUSD).toFixed(2)} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
     let attempt;
@@ -44019,7 +44078,7 @@ async function confirmStopAd(id, source = 'modal') {
   lucide.createIcons();
 }
 
-async function deleteUser(id) {
+async function deleteUser(id, seen) {
   if (!canManageUsersAction('delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية حذف المستخدمين' : 'Requires the Delete Users permission', 'error');
     return;
@@ -44075,7 +44134,8 @@ async function deleteUser(id) {
       : `\n\n💰 This user has ${heldCash.length} delivered order(s) whose cash was not handed to the office yet — settle or document that cash before deleting.`;
   }
 
-  if (confirm(warning)) {
+  if (seen !== warning) return await appConfirm(warning, 'delete') && deleteUser(id, warning);
+  {
     // Return in-flight missions to the pool so they don't stay assigned to a
     // ghost driver. Delivered history keeps the id for the audit trail.
     const cleared = [];
@@ -44247,7 +44307,7 @@ function printCurrentPage() {
   window.print();
 }
 
-function exportData() {
+async function exportData() {
   const isAr = state.language === 'ar';
   // Local mode exports its whole workspace. Server mode exports only the loaded records (maybe stale or
   // permission-scoped); the online restore cannot write users, wallet ledger, subscriptions or audit history.
@@ -44261,7 +44321,7 @@ function exportData() {
   }
   const serverPartialSnapshot = isServerModeEnabled();
   if (serverPartialSnapshot) {
-    const proceed = confirm(
+    const proceed = await appConfirm(
       state.language === 'ar'
         ? 'هذا تقرير جزئي من البيانات المحمّلة حالياً، وليس نسخة خادم قابلة للاستعادة. قد يكون قديماً أو ناقصاً، وتم حذف بيانات نظام الملابس للحفاظ على سلامة المخزون. استيراد ملفات الخادم معطّل ويتطلب صيانة خارج التطبيق. هل تريد المتابعة؟'
         : 'This is a PARTIAL report of data currently loaded on this device, not a restorable full-server backup. It may be stale or incomplete. The clothes domain is omitted to protect inventory integrity. Server-file import is disabled and requires an offline maintenance workflow. Continue?'
@@ -44372,7 +44432,7 @@ function exportData() {
   if (cannotPrintOrDownload()) {
     createAutoBackup(STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
     const isAr = state.language === 'ar';
-    const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
+    const wantsCopy = typeof copyTextToClipboard === 'function' && await appConfirm(
       `${inAppLimitationText('download')}\n\n${isAr ? 'هل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟' : 'Copy the backup to the clipboard instead?'}`
     );
     if (wantsCopy) {
@@ -44510,13 +44570,13 @@ function importData() {
       exchangeRateHistory: { visible: countVisible(sanitizedImport.exchangeRateHistory), deleted: countDeleted(sanitizedImport.exchangeRateHistory) }
     };
 
-    const ok1 = confirm(
+    const ok1 = await appConfirm(
       isAr
         ? `استيراد جزئي لبيانات العمل إلى الخادم (أدمن)\n\nسيتم استبدال المجموعات المذكورة لجميع المستخدمين. لن تتم استعادة المستخدمين أو معاملات المحفظة أو الاشتراكات أو سجلات التدقيق، وسيتم تجاهل هذه المصفوفات إن وجدت في الملف.\n\nيحتوي الملف على (ظاهر / محذوف):\n- العملاء: ${counts.customers.visible} / ${counts.customers.deleted}\n- الصفحات: ${counts.pages.visible} / ${counts.pages.deleted}\n- الإعلانات: ${counts.ads.visible} / ${counts.ads.deleted}\n- الوصولات: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- أسعار الصرف: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nهل تريد متابعة الاستعادة الجزئية؟`
         : `PARTIAL SERVER BUSINESS-DATA IMPORT (Admin)\n\nThis replaces the listed business collections for all users. It does NOT restore users, wallet transactions, subscriptions, or audit logs; any such arrays in the file are ignored.\n\nFile contains (visible / deleted):\n- Customers: ${counts.customers.visible} / ${counts.customers.deleted}\n- Pages: ${counts.pages.visible} / ${counts.pages.deleted}\n- Ads: ${counts.ads.visible} / ${counts.ads.deleted}\n- Receipts: ${counts.receipts.visible} / ${counts.receipts.deleted}\n- Exchange Rates: ${counts.exchangeRateHistory.visible} / ${counts.exchangeRateHistory.deleted}\n\nContinue with this partial restore?`
     );
     if (!ok1) return;
-    const phrase = String(prompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
+    const phrase = String(await appPrompt(isAr ? 'اكتب IMPORT للتأكيد (حساس لحالة الأحرف):' : 'Type IMPORT to confirm (case-sensitive):') || '');
     if (phrase !== 'IMPORT') {
       showNotification(isAr ? 'تم الإلغاء' : 'Cancelled', isAr ? 'تم إلغاء الاستيراد.' : 'Import cancelled.', 'info');
       return;
@@ -44759,9 +44819,9 @@ function importData() {
           return;
         }
         const countOf = (k) => (Array.isArray(imported[k]) ? imported[k].length : 0);
-        if (typeof confirm === 'function' && !confirm(isAr
+        if (!await appConfirm(isAr
           ? `سيتم استبدال بيانات هذا الجهاز بالنسخة الاحتياطية (${countOf('receipts')} إيصال، ${countOf('ads')} إعلان، ${countOf('customers')} عميل). هل تريد المتابعة؟`
-          : `This replaces the data on this device with the backup (${countOf('receipts')} receipts, ${countOf('ads')} ads, ${countOf('customers')} customers). Continue?`)) return;
+          : `This replaces the data on this device with the backup (${countOf('receipts')} receipts, ${countOf('ads')} ads, ${countOf('customers')} customers). Continue?`, 'go') || !importIsCurrent()) return;
 
         // Integrity check on the file AS EXPORTED (the export hashed the raw state, before any sanitising)
         if (imported._exportMetadata?.checksum) {
@@ -44882,7 +44942,7 @@ async function clearAllData() {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'مسح جميع البيانات معطّل في وضع الخادم. استخدم أدوات إدارة الخادم.' : 'Clear-all is disabled in server mode. Use backend admin tools.', 'error');
     return;
   }
-  if (confirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!')) {
+  if (await appConfirm(state.language === 'ar' ? 'مسح جميع البيانات؟ لا يمكن التراجع عن هذا الإجراء!' : 'Clear all data? This cannot be undone!', 'delete') && !isServerModeEnabled()) {
     // Every stored collection (a hand list missed the wallet, clothes, dollar purchases...),
     // the old recovery key (it could still reset passwords) and no queued write of them.
     for (const name of PERSISTED_COLLECTIONS) { state[name] = []; clearCollectionCorruption(name); }
@@ -44932,7 +44992,7 @@ async function downloadFullServerBackup(button = null) {
     const estimate = await apiFullBackupEstimate();
     const mb = Math.max(1, Math.round(Number(estimate?.approxDownloadBytes || 0) / (1024 * 1024)));
     const records = Number(estimate?.records || 0);
-    const ok = confirm(isAr
+    const ok = await appConfirm(isAr
       ? `تنزيل نسخة كاملة؟\n\n${records} سجل، بحجم تقريبي ${mb} ميجابايت.\n\nالملف يحتوي أسماء العملاء وأرقامهم وصور الوصولات بدون تشفير — احفظه في مكان آمن ولا ترسله في محادثة.`
       : `Download the full backup?\n\n${records} records, roughly ${mb} MB.\n\nThe file contains customer names, phone numbers and receipt photos in the clear — keep it somewhere safe and do not send it in a chat.`);
     if (!ok) return;
@@ -45443,7 +45503,7 @@ async function init() {
         const confirmMsg = state.language === 'ar'
           ? 'رابط يطلب مزامنة بيانات هذا الجهاز مع خادم خارجي:\n\n' + url.host + '\n\nلا توافق إلا إذا كنت تثق بمصدر هذا الرابط. هل تريد المتابعة؟'
           : 'This link asks to sync ALL data on this device with an external server:\n\n' + url.host + '\n\nOnly continue if you trust where this link came from. Enable sync?';
-        if (!window.confirm(confirmMsg)) {
+        if (!await appConfirm(confirmMsg, 'go')) {
           addSecurityLog('cloud_connect_rejected', 'User declined sys_connect to ' + url.host);
           throw new Error('User declined the connection request');
         }

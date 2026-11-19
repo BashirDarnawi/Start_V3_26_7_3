@@ -505,3 +505,56 @@ function showNotification(title, message, type = 'info') {
     setTimeout(() => notification.remove(), 300);
   }, 5000);
 }
+
+// The app's own question box, in place of the browser's confirm and prompt boxes: the same question
+// and the same answer (true or false; with a text field, the typed text or null), in the app's look
+// and language. One at a time: a new question cancels the one before it.
+let _appAsk = null;
+
+function closeAppAsk(answer) {
+  const open = _appAsk;
+  if (!open) return;
+  _appAsk = null;
+  document.removeEventListener('keydown', open.key, true);
+  open.host.remove();
+  try { open.from?.focus?.(); } catch (_) {}
+  open.done(answer === undefined ? (open.input ? null : false) : answer);
+}
+
+// kind: 'delete' (red "Delete"), 'go' ("Continue"), any other text is the button's own label.
+function appConfirm(message, kind = '', ask) {
+  closeAppAsk();
+  return new Promise(done => {
+    const ar = state.language === 'ar', host = document.createElement('div');
+    const lines = Security.escapeHtml(String(message)).split('\n').filter(line => line.trim());
+    const title = lines[0].length > 90 ? (ar ? 'يرجى التأكيد' : 'Please confirm') : lines.shift();
+    const yes = { '': ['Confirm', 'تأكيد'], delete: ['Delete', 'حذف'], go: ['Continue', 'متابعة'] }[kind]?.[+ar] || Security.escapeHtml(kind);
+    host.id = 'app-ask';
+    host.className = 'mobile-dialog-overlay app-dialog-overlay fixed inset-0 flex items-center justify-center p-4';
+    host.setAttribute('role', 'alertdialog');
+    host.setAttribute('aria-modal', 'true');
+    host.setAttribute('aria-labelledby', 'app-ask-title');
+    host.setAttribute('aria-describedby', 'app-ask-text');
+    host.innerHTML = `<div class="app-dialog-panel glass-panel w-full max-w-md" dir="${ar ? 'rtl' : 'ltr'}"><h2 id="app-ask-title" class="app-dialog-title">${title}</h2><div id="app-ask-text">${lines.map(line => `<p>${line}</p>`).join('')}</div>${ask === undefined ? '' : `<input id="app-ask-input" class="glass-input w-full rounded-xl px-3 py-2" dir="auto" autocomplete="off" aria-labelledby="app-ask-title" value="${Security.escapeHtml(String(ask))}">`}<div class="management-button-row"><button type="button" class="app-dialog-cancel management-button">${ar ? 'إلغاء' : 'Cancel'}</button><button type="button" class="management-button ${kind === 'delete' ? 'is-danger' : 'is-primary'}">${yes}</button></div></div>`;
+    const input = host.querySelector('input'), [no, ok] = host.querySelectorAll('button'), stops = input ? [input, no, ok] : [no, ok];
+    const key = event => {
+      if (event.key === 'Escape') closeAppAsk();
+      else if (event.key === 'Enter' && event.target === input) closeAppAsk(input.value);
+      else if (event.key === 'Tab') stops[(stops.indexOf(document.activeElement) + (event.shiftKey ? stops.length - 1 : 1)) % stops.length].focus();
+      else if (!((event.ctrlKey || event.metaKey) && event.key === 'k')) return;  // no search palette behind a question
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    let from = null;
+    try { from = document.activeElement; } catch (_) {}
+    _appAsk = { host, key, done, input, from };
+    host.onclick = event => { if (event.target === host || event.target === no) closeAppAsk(); else if (event.target === ok) closeAppAsk(input ? input.value : true); };
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(host);
+    try { (input || no).focus(); input?.select(); } catch (_) {}
+  });
+}
+
+function appPrompt(message, value = '', kind = '') {
+  return appConfirm(message, kind, value);
+}

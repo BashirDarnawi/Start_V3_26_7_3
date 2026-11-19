@@ -120,6 +120,10 @@ function makeSandbox() {
 const sandbox = makeSandbox();
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js' });
+// The app's own question box (appConfirm, appPrompt) replaced the browser's confirm and prompt. In these
+// tests it answers at once, like the browser stubs above did: yes to a question, nothing typed in a field.
+sandbox.appConfirm = async () => true;
+sandbox.appPrompt = async () => null;
 
 // Top-level `const`/`let` (state, Security, …) live in the context's LEXICAL
 // scope, not on the global object — pull them across. Function declarations
@@ -1378,14 +1382,14 @@ async function main() {
   // F-addelete: the real deleteAd() against a stubbed server. `serverTick` plays the live-sync answer
   // (the receipt the server shrank in the same step as the delete).
   async function driveDeleteAd(adId, serverTick = () => {}) {
-    const kept = { apiDeleteEntity: sandbox.apiDeleteEntity, serverLiveSyncTick: sandbox.serverLiveSyncTick, confirm: sandbox.confirm };
+    const kept = { apiDeleteEntity: sandbox.apiDeleteEntity, serverLiveSyncTick: sandbox.serverLiveSyncTick, appConfirm: sandbox.appConfirm };
     const seen = { serverCalls: [], confirms: [], notes: [] };
     const before = notes.length;
     S.serverMode = true;
     try {
       sandbox.apiDeleteEntity = async (collection, id) => { seen.serverCalls.push(`${collection}/${id}`); return { ok: true, lastModified: Date.now() }; };
       sandbox.serverLiveSyncTick = async () => { serverTick(); };
-      sandbox.confirm = text => { seen.confirms.push(String(text)); return true; };
+      sandbox.appConfirm = async text => { seen.confirms.push(String(text)); return true; };  // the app's own question box
       await sandbox.deleteAd(adId);
       await new Promise(resolve => setTimeout(resolve, 0));
     } finally {

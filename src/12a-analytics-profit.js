@@ -581,7 +581,7 @@ async function saveDollarPurchase(event) {
 
 async function deleteDollarPurchase(id) {
   if (!isCurrentUserAdmin() || !Security.isValidRecordId(id)) return;
-  if (!confirm(state.language === 'ar' ? 'حذف شراء الدولار هذا؟ سيُعاد حساب الربح والمخزون.' : 'Delete this dollar purchase? Profit and inventory will be recalculated.')) return;
+  if (!await appConfirm(state.language === 'ar' ? 'حذف شراء الدولار هذا؟ سيُعاد حساب الربح والمخزون.' : 'Delete this dollar purchase? Profit and inventory will be recalculated.', 'delete')) return;
   const ok = await deleteRecord(state.dollarPurchases, id);
   if (ok) {
     showNotification(state.language === 'ar' ? 'تم حذف شراء الدولار' : 'Dollar purchase deleted', state.language === 'ar' ? 'أعيد حساب الربح والمخزون.' : 'Profit and inventory were recalculated.', 'success');

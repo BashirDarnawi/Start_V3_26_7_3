@@ -1041,18 +1041,18 @@ function checkAdsStudioMetaNow(id, button = null) {
   return operation;
 }
 
-function deleteAdsStudioCampaign(id, button = null) {
+function deleteAdsStudioCampaign(id, button = null, sure = false) {
   const campaignId = String(id || '');
   if (_adsStudioDeletePromises.has(campaignId)) return _adsStudioDeletePromises.get(campaignId);
   const campaign = findVisibleAdsStudioCampaign(campaignId);
   const status = String(campaign?.status || '');
   if (!campaign || !['Draft', 'Changes Requested', 'Approved', 'Rejected', 'Stopped'].includes(status) || !canActOnRecord('adCampaignRequests', 'delete', campaign.createdBy)) return Promise.resolve(false);
   const isTerminal = status === 'Approved' || status === 'Rejected' || status === 'Stopped';
-  const confirmed = confirm(adsStudioText(
+  // Asked once in the app's own box; after a yes the checks above run again on the campaign as it is then.
+  if (!sure) return appConfirm(adsStudioText(
     isTerminal ? 'Archive this campaign and remove its stored creative images?' : 'Delete this campaign draft?',
     isTerminal ? 'أرشفة هذه الحملة وحذف صورها الإعلانية المخزنة؟' : 'حذف مسودة هذه الحملة؟'
-  ));
-  if (!confirmed) return Promise.resolve(false);
+  ), isTerminal ? '' : 'delete').then(yes => !!yes && deleteAdsStudioCampaign(id, button, true));
   setAdsStudioActionButtonBusy(button, true);
   const operation = (async () => {
     const deleted = await deleteRecord(state.adCampaignRequests, campaignId);
@@ -1349,7 +1349,7 @@ async function stopAdsStudioCampaignOnce(id) {
     const cap = launched ? adsStudioSettleCap(campaign, paid) : null;
     const most = cap === null ? remaining : Math.min(cap, remaining);
     const used = cap === null ? ['', ''] : [`Meta used ${adsStudioMoney(paid - cap)} of ${adsStudioMoney(paid)}. `, `استخدمت ميتا ${adsStudioMoney(paid - cap)} من ${adsStudioMoney(paid)}. `];
-    const answer = prompt(
+    const answer = await appPrompt(
       adsStudioText(
         `${launched ? `Close this campaign. ${used[0]}Unspent budget to refund` : 'Refund amount'} in USD (0 to ${(most / 100).toFixed(2)}):`,
         `${launched ? `إغلاق هذه الحملة. ${used[1]}المبلغ غير المصروف المراد استرداده` : 'مبلغ الاسترداد'} بالدولار (من 0 إلى ${(most / 100).toFixed(2)}):`
@@ -1371,7 +1371,7 @@ async function stopAdsStudioCampaignOnce(id) {
     const endDate = String(campaign.endDate || '');
     const stopAsked = String(campaign.stopRequestedAt || '').trim();
     if (launched && !stopAsked && /^\d{4}-\d{2}-\d{2}$/.test(endDate) && endDate < _adsStudioDateOffset(0)) closeReason = 'completed';
-  } else if (!confirm(adsStudioText(
+  } else if (!await appConfirm(adsStudioText(
     `Stop this campaign? ${adsStudioMoneyWithLyd(paid)} returns to your wallet.`,
     `إيقاف هذه الحملة؟ سيعود ${adsStudioMoneyWithLyd(paid)} إلى محفظتك.`
   ))) {

@@ -144,6 +144,24 @@ all form labels or all table cells. Do not clip dropdowns to achieve rounded
 corners. Keep the phone overlay as the single main scroll surface; dropdown
 results may retain their own bounded scroll area.
 
+**Questions.** The app never opens the browser's `confirm`, `prompt` or
+`alert` boxes. A question is asked in the app's own box with
+`await appConfirm(text, kind)` (`'delete'` gives a red "Delete", `'go'` gives
+"Continue", any other word is the button's own label) and a typed value with
+`await appPrompt(text, suggested)`; both live in `src/07-i18n-render-core.js`
+and may be called by every system. The first line of the text is the title
+and each further line is a paragraph; the text is shown as text. Cancel,
+Escape and a click beside the box answer `false` (`null` for a field), the
+focus starts on Cancel or on the field, and a new question cancels the one
+before it. Because the page keeps running while a question is open, a "yes"
+counts only for what was asked: after it, read the record again before
+changing it. Where the question states facts (how many receipts a delete
+takes along), run the check again and compare the text
+(`if (seen !== warning) return await appConfirm(warning, 'delete') && again(id, warning)`),
+so a change in the meantime asks again; where it is a plain question, run the
+function again with a `sure` flag. Never ask in the middle of a change:
+finish or undo the step first, then ask.
+
 Build with `npm run build`. Propagate with `npm run sync:mobile` and verify
 with `npm run verify:mobile`. Do not hand-edit generated JavaScript or native
 copies. These commands do not publish Docker images or redeploy the live site.
@@ -156,6 +174,9 @@ copies. These commands do not publish Docker images or redeploy the live site.
   IDs/values/actions, localized labels, touch targets and long-form scrolling.
 - `npm run test:e2e`: modal checks plus critical and design-system browser
   flows on desktop Chromium, Android-sized Chromium and iPhone-sized WebKit.
+- `tests/e2e/question-box.spec.js`: the app's own question box on every engine
+  and size (field, delete question, keyboard, phone sheet, Arabic); the money
+  journeys answer it and fail if a browser box appears.
 - `tests/e2e/design-system.spec.js`: all manager routes and lazy subsystem
   tabs; populated small-screen rows; long bilingual names and large balances;
   filter persistence; existing edit/photo/link actions; dark/RTL layouts;

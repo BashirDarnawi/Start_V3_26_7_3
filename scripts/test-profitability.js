@@ -43,6 +43,7 @@ const sandbox = {
   can: (module, action) => module === 'analytics' && action === 'viewFinancials' && financialAccess,
   showNotification() { notifications += 1; },
   confirm: () => true,
+  appConfirm: async () => true,  // the app's own question box (it replaced the browser's confirm)
   addRecord: async () => true,
   deleteRecord: async () => true,
   RenderQueue: { schedule() {} },

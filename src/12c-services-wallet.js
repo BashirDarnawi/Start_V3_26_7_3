@@ -703,7 +703,7 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
         ? `سينتهي وصولك فوراً. أنت مدفوع حتى ${paidUntil} — ستفقد ${days} يوماً مدفوعاً ولا يوجد استرداد. هل أنت متأكد؟`
         : `Your access ends immediately. You are paid until ${paidUntil} — ${days} paid day(s) will be lost and there is no refund. Are you sure?`)
       : (isRTL ? 'هل تريد إلغاء الاشتراك؟' : 'Cancel this subscription?');
-    const ok = confirm(warning);
+    const ok = await appConfirm(warning);
     if (!ok) return;
     await SUBSCRIPTIONS.cancel(state.currentUser.id, sid);
     showNotification(isRTL ? 'نجاح' : 'Success', isRTL ? 'تم إلغاء الاشتراك' : 'Subscription canceled', 'success');

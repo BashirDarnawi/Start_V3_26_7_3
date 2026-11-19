@@ -128,7 +128,9 @@ async function main() {
     await test(`late ${label} cannot modify another session or start further requests`, async () => {
       const f = fixture(), gate = deferred(); let requests = 0;
       f.sandbox.apiJson = () => { requests++; return gate.promise; };
-      const op = start(f); f.switchSession();
+      // Unlink, publish and the two deletes ask first, in the app's own box (answered yes at once here):
+      // let the request start, then change the session while it is under way.
+      const op = start(f); await flush(); f.switchSession();
       f.run("_social.busy = true; _social.composer = { id: 'keep_b' }; _social.settings = { marker: 'B' };");
       gate.resolve({ post: { id: 'saved_a' }, settings: { masterEnabled: false }, rule: { id: 'rule_a' } }); await op;
       assert.equal(requests, 1); assert.equal(f.run('_social.busy'), true);

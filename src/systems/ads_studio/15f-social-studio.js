@@ -442,8 +442,8 @@ async function socialUnlinkPage(pageId) {
   const context = captureSocialStudioContext();
   const page = socialPageById(pageId);
   if (!page) return;
-  const ok = confirm(socialText(`Unlink "${page.name}"? Scheduled posts for this page will stop and its reply rules will no longer run.`, `إلغاء ربط "${page.name}"؟ ستتوقف المنشورات المجدولة لهذه الصفحة ولن تعمل قواعد الرد الخاصة بها.`));
-  if (!ok) return;
+  const ok = await appConfirm(socialText(`Unlink "${page.name}"? Scheduled posts for this page will stop and its reply rules will no longer run.`, `إلغاء ربط "${page.name}"؟ ستتوقف المنشورات المجدولة لهذه الصفحة ولن تعمل قواعد الرد الخاصة بها.`));
+  if (!ok || !socialStudioContextIsCurrent(context)) return;
   try {
     await socialApi(`/pages/${encodeURIComponent(pageId)}/unlink`, { method: 'POST', body: {} });
     if (!socialStudioContextIsCurrent(context)) return;
@@ -894,8 +894,8 @@ function renderSocialPostDone() {
 async function socialPublishPost(postId) {
   if (_social.busy) return;
   const context = captureSocialStudioContext();
-  const ok = confirm(socialText('Publish this post now?', 'نشر هذا المنشور الآن؟'));
-  if (!ok) return;
+  const ok = await appConfirm(socialText('Publish this post now?', 'نشر هذا المنشور الآن؟'));
+  if (!ok || !socialStudioContextIsCurrent(context) || _social.busy) return;
   _social.busy = true;
   render();
   try {
@@ -927,8 +927,8 @@ async function socialCancelPost(postId) {
 
 async function socialDeletePost(postId) {
   const context = captureSocialStudioContext();
-  const ok = confirm(socialText('Delete this post?', 'حذف هذا المنشور؟'));
-  if (!ok) return;
+  const ok = await appConfirm(socialText('Delete this post?', 'حذف هذا المنشور؟'), 'delete');
+  if (!ok || !socialStudioContextIsCurrent(context)) return;
   try {
     const res = await socialApi(`/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' });
     if (!socialStudioContextIsCurrent(context)) return;
@@ -1155,8 +1155,8 @@ async function socialRuleDelete() {
   if (!r || !r.id || _social.busy) return;
   const context = captureSocialStudioContext();
   const isCurrent = () => socialStudioContextIsCurrent(context) && _social.ruleDraft === r;
-  const ok = confirm(socialText(`Delete the rule "${r.name}"?`, `حذف القاعدة "${r.name}"؟`));
-  if (!ok) return;
+  const ok = await appConfirm(socialText(`Delete the rule "${r.name}"?`, `حذف القاعدة "${r.name}"؟`), 'delete');
+  if (!ok || !isCurrent() || _social.busy) return;
   _social.busy = true;
   try {
     await socialApi(`/rules/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
