@@ -2458,7 +2458,10 @@ async function main() {
           assert.deepEqual(has(webWallet, 'onclick="hubOpenChargeWallet()"', "onclick=\"navigateTo('plans')\"", language === 'ar' ? 'اشحن المحفظة' : 'Charge wallet', language === 'ar' ? 'قنوات التمويل الخارجية' : 'external funding rails'), [], `${platform} ${language} Wallet`);
           f = PLATFORMS[platform]({ language, role: 'Employee', subscribed: true });
           const webHub = String(f.sandbox.renderServicesHub());
-          assert.deepEqual(has(webHub, language === 'ar' ? '25 LYD / شهر' : '25 LYD / month', language === 'ar' ? 'اشترك' : 'Subscribe'), [], `${platform} ${language} hub pills`);
+          assert.deepEqual(has(webHub, language === 'ar' ? '25 LYD / شهر' : '25 LYD / month'), [], `${platform} ${language} hub pills`);
+          // A service with no price in the catalog still reads "Subscribe" on the website. The three tiles that used to
+          // show it on the hub (the two shipping services and the warehouse) are "Coming soon" since the redesign.
+          assert.equal(f.sandbox.hubServiceStatus('ad_maker').label, language === 'ar' ? 'اشترك' : 'Subscribe', `${platform} ${language} unpriced service`);
           const webPlans = String(f.sandbox.renderPlansView());
           assert.deepEqual(has(webPlans, "onclick=\"openPlanPaywall('bundle1')\"", "onclick=\"openPlanPaywall('svc:clothes_system')\"", '90 LYD', '50 LYD',
             language === 'ar' ? '>اشترك<' : '>Subscribe<', language === 'ar' ? '>جدّد<' : '>Renew<', language === 'ar' ? 'الأفضل قيمة' : 'Best value', language === 'ar' ? 'وفّر 20%' : 'Save 20%', 'onclick="hubOpenChargeWallet()"'), [], `${platform} ${language} Plans`);
@@ -2468,6 +2471,45 @@ async function main() {
       // The App Review note tells Apple the same thing, and quotes the line the reviewer will see.
       const reviewGuide = fs.readFileSync(path.join(__dirname, '..', 'docs', 'store', 'IOS_APP_STORE_RELEASE.md'), 'utf8').replace(/\n\s*>\s?/g, ' ').replace(/\s+/g, ' ');
       assert.ok(reviewGuide.includes('Nothing can be bought in the iPhone app.') && reviewGuide.includes(`the iPhone app shows "${NEUTRAL.en}"`), 'the App Review note does not say what the iPhone app shows');
+    });
+
+    await test('redesign M4: services that are not built yet sit under "Coming soon" as plain cards that open nothing, and their plans cannot be bought', async () => {
+      const UNBUILT = ['international_shipping', 'local_shipping', 'warehouse', 'albayan_cards', 'ship_through_us', 'managed_social_ads'];
+      for (const language of ['en', 'ar']) {
+        const f = PLATFORMS.web({ language });
+        const soonWord = language === 'ar' ? 'قريباً' : 'Coming soon';
+        for (const id of UNBUILT) assert.equal(f.sandbox.hubServiceStatus(id).kind, 'coming', `${id} is coming soon`);
+        const hub = String(f.sandbox.renderServicesHub());
+        const [live, soon] = hub.split('data-hub-soon');
+        assert.ok(soon, `${language}: the hub has a Coming soon group`);
+        assert.ok(live.includes(`<div class="hub-section-title mt-6">${soonWord}</div>`), `${language}: the group has its heading`);
+        for (const id of UNBUILT) {
+          assert.ok(!hub.includes(`handleServiceClick('${id}')`), `${language}: ${id} opens nothing`);
+          const name = f.run('SERVICES')[id][language === 'ar' ? 'nameAr' : 'name'];
+          assert.ok(soon.includes(`>${name}<`) && !live.includes(`>${name}<`), `${language}: ${name} is in the Coming soon group only`);
+        }
+        assert.ok(!/<button[^>]*>/.test(soon), `${language}: a coming-soon card is not a button`);
+        assert.ok(live.includes("handleServiceClick('smart_systems')"), `${language}: Smart Systems still opens`);
+        assert.ok(!hub.includes('opacity-70'), `${language}: no card is dimmed (dimmed text failed the contrast check)`);
+        assert.ok(!hub.includes('hub-hero'), `${language}: the promotion banner is gone`);
+        // Smart Systems: the same rule for its systems.
+        const systems = String(f.sandbox.renderSmartSystems());
+        const [liveSystems, soonSystems] = systems.split('data-hub-soon');
+        assert.ok(soonSystems && !/<button[^>]*>/.test(soonSystems) && !systems.includes('opacity-70'), `${language}: Smart Systems`);
+        for (const id of ['crm', 'store_system']) assert.ok(!systems.includes(`handleSmartSystemClick('${id}')`), `${language}: ${id} opens nothing`);
+        for (const id of ['albayan_manager', 'clothes_system', 'ad_maker']) assert.ok(liveSystems.includes(`handleSmartSystemClick('${id}')`), `${language}: ${id} still opens`);
+        // Plans & bundles (owner decision, 19 Nov 2026): a plan made only of unbuilt services is shown with no price and no button.
+        f.state.subscriptionPlans = [
+          { id: 'svc:warehouse', name: 'Warehouse monthly', nameAr: 'المستودع شهرياً', serviceIds: ['warehouse'], priceMinor: 4000, durationDays: 30, currency: 'LYD' },
+          { id: 'svc:clothes_system', name: 'Clothes monthly', nameAr: 'الملابس شهرياً', serviceIds: ['clothes_system'], priceMinor: 5000, durationDays: 30, currency: 'LYD' },
+          { id: 'mixed', name: 'Mixed', nameAr: 'مختلطة', serviceIds: ['clothes_system', 'warehouse'], priceMinor: 7000, durationDays: 30, currency: 'LYD' }
+        ];
+        const plans = String(f.sandbox.renderPlansView());
+        assert.ok(!plans.includes("openPlanPaywall('svc:warehouse')") && !plans.includes('40 LYD'), `${language}: the warehouse plan has no price and no button`);
+        assert.ok(String(f.sandbox.renderPlanRow(f.state.subscriptionPlans[0])).includes(`>${soonWord}<`), `${language}: it reads Coming soon`);
+        assert.ok(plans.includes("openPlanPaywall('svc:clothes_system')") && plans.includes('50 LYD'), `${language}: a built service is still sold`);
+        assert.ok(plans.includes("openPlanPaywall('mixed')") && plans.includes('70 LYD'), `${language}: a bundle with a built service is still sold`);
+      }
     });
 
     await test('F-iap-shell: in the iPhone app the subscribe sheet only says the service is not active (no price, no Subscribe, no Charge wallet) and loads no prices; on the website and in the Android app it still sells', async () => {

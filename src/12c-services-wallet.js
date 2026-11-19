@@ -203,10 +203,12 @@ function renderServicesHub() {
       <i data-lucide="${chevron}" class="w-4 h-4 text-slate-400 flex-shrink-0"></i>
     </button>`).join('');
 
-  const exploreHtml = exploreTiles.map(({ service, status, onclick }) => {
-    const disabled = status.kind === 'coming';
+  // Not built yet: a plain card under "Coming soon" that opens nothing.
+  const tile = ({ service, status, onclick }) => {
+    const open = status.kind !== 'coming';
+    const tag = open ? 'button' : 'div';
     return `
-      <button type="button" onclick="${onclick}" class="hub-card hub-tile relative overflow-hidden w-full p-4 text-start touch-target ${disabled ? 'opacity-70' : ''}">
+      <${tag} ${open ? `type="button" onclick="${onclick}" ` : ''}class="hub-card hub-tile relative overflow-hidden w-full p-4 text-start touch-target">
         <i data-lucide="${hubEsc(service.icon || 'box')}" class="hub-tile-watermark" aria-hidden="true"></i>
         <span class="relative block">
           ${hubServiceIcon(service)}
@@ -218,8 +220,10 @@ function renderServicesHub() {
             ${status.kind === 'locked' ? `<i data-lucide="lock" class="w-3.5 h-3.5 text-amber-500"></i>` : ''}
           </span>
         </span>
-      </button>`;
-  }).join('');
+      </${tag}>`;
+  };
+  const soonTiles = exploreTiles.filter(item => item.status.kind === 'coming');
+  const exploreHtml = exploreTiles.filter(item => item.status.kind !== 'coming').map(tile).join('');
 
   return `
     <div class="hub-shell">
@@ -242,18 +246,6 @@ function renderServicesHub() {
 
       ${hubWalletCard({ topUp: true, plansLink: false })}
 
-      <div class="hub-hero relative overflow-hidden rounded-3xl p-5 mb-6 text-white">
-        <div class="absolute -top-10 -end-6 w-40 h-40 rounded-full bg-white/10"></div>
-        <div class="relative flex items-center justify-between gap-4">
-          <div class="min-w-0">
-            <div class="text-[11px] font-bold uppercase tracking-[0.14em] text-white/70">${hubText('New on Albayan', 'جديد في البيان')}</div>
-            <div class="mt-1 text-xl font-extrabold">${hubText('Ads Studio: posts & auto-replies', 'استوديو الإعلانات: منشورات وردود تلقائية')}</div>
-            <div class="mt-1 text-sm text-white/80">${hubText('Welcome to our partner success platform', 'أهلاً بشركاء النجاح')}</div>
-          </div>
-          <i data-lucide="sparkles" class="w-12 h-12 text-white/60 flex-shrink-0"></i>
-        </div>
-      </div>
-
       ${activeRows.length ? `
         <div class="hub-section-title">${hubText('Your services', 'خدماتك')}</div>
         <div class="space-y-2.5 mb-6">${activeHtml}</div>
@@ -266,6 +258,10 @@ function renderServicesHub() {
       <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         ${exploreHtml}
       </div>
+      ${soonTiles.length ? `
+        <div class="hub-section-title mt-6">${hubText('Coming soon', 'قريباً')}</div>
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3" data-hub-soon>${soonTiles.map(tile).join('')}</div>
+      ` : ''}
     </div>
   `;
 }
@@ -288,13 +284,14 @@ function renderSmartSystems() {
       : hubText('Requires subscription', 'يتطلب اشتراكاً');
   const headerCta = parentStatus.kind === 'active' ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك');
 
-  const rows = children.map(child => {
+  const row = child => {
     const status = hubServiceStatus(child.id);
     const locked = status.kind === 'locked';
     const pillTone = locked ? 'rose' : status.tone;
     const pillLabel = locked ? hubText('Requires subscription', 'يتطلب اشتراكاً') : status.label;
+    const tag = child.comingSoon ? 'div' : 'button';
     return `
-      <button type="button" onclick="handleSmartSystemClick('${hubEsc(child.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target ${status.kind === 'coming' ? 'opacity-70' : ''}">
+      <${tag} ${child.comingSoon ? '' : `type="button" onclick="handleSmartSystemClick('${hubEsc(child.id)}')" `}class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
         ${hubServiceIcon(child)}
         <span class="flex-1 min-w-0">
           <span class="block truncate text-[15px] font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? child.nameAr : child.name)}</span>
@@ -304,8 +301,9 @@ function renderSmartSystems() {
           ${hubPill(pillLabel, pillTone)}
           ${locked ? `<i data-lucide="lock" class="w-4 h-4 text-slate-400"></i>` : ''}
         </span>
-      </button>`;
-  }).join('');
+      </${tag}>`;
+  };
+  const soon = children.filter(child => child.comingSoon);
 
   return `
     <div class="hub-shell">
@@ -324,7 +322,8 @@ function renderSmartSystems() {
           </div>
         </div>
       </div>
-      <div class="space-y-2.5">${rows}</div>
+      <div class="space-y-2.5">${children.filter(child => !child.comingSoon).map(row).join('')}</div>
+      ${soon.length ? `<div class="hub-section-title mt-6">${hubText('Coming soon', 'قريباً')}</div><div class="space-y-2.5" data-hub-soon>${soon.map(row).join('')}</div>` : ''}
     </div>
   `;
 }
@@ -366,6 +365,8 @@ function renderPlanRow(plan) {
   const price = Math.max(0, Number(plan.priceMinor) || 0);
   const { active, days } = hubPlanIsActive(plan);
   const soon = active && days !== null && days <= 7;
+  // Owner decision, Nov 2026: a plan for unbuilt services is shown but not sold here.
+  const unbuilt = (plan.serviceIds || []).every(sid => (SERVICES[sid] || SMART_SYSTEMS_CHILDREN[sid])?.comingSoon);
   const includes = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).map(sid =>
     `<span class="rounded-full bg-slate-100 dark:bg-slate-800 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">${hubEsc(hubServiceName(sid))}</span>`).join('');
   return `
@@ -377,10 +378,10 @@ function renderPlanRow(plan) {
       ${isBundle ? `<div class="flex flex-wrap gap-1.5 my-1.5">${includes}</div>` : `<div class="text-xs text-slate-500 dark:text-slate-400">${hubText('Single service', 'خدمة واحدة')}</div>`}
       ${!noBuy && Number(plan.savingsPct) > 0 ? `<div class="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${hubText(`Save ${Number(plan.savingsPct)}%`, `وفّر ${Number(plan.savingsPct)}%`)}</div>` : ''}
       <div class="mt-2.5 flex items-center justify-between gap-3">
-        ${noBuy ? '' : `<span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>`}
-        ${active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : noBuy ? hubPill(hubText('Not active', 'غير مفعّلة')) : ''}
+        ${noBuy || unbuilt ? '' : `<span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>`}
+        ${unbuilt ? hubPill(hubText('Coming soon', 'قريباً')) : active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : noBuy ? hubPill(hubText('Not active', 'غير مفعّلة')) : ''}
       </div>
-      ${noBuy ? '' : `<button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>`}
+      ${noBuy || unbuilt ? '' : `<button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>`}
     </div>`;
 }
 
@@ -928,15 +929,6 @@ function handleServiceClick(serviceId) {
   const service = SERVICES[serviceId];
   if (!service) return;
 
-  if (service.comingSoon) {
-    showNotification(
-      state.language === 'ar' ? 'قريباً' : 'Coming Soon',
-      state.language === 'ar' ? 'هذه الخدمة ستكون متاحة قريباً' : 'This service will be available soon',
-      'info'
-    );
-    return;
-  }
-
   const access = checkServiceAccess(serviceId);
   if (!access.allowed) {
     if (access.reason === 'not_subscribed') {
@@ -954,15 +946,6 @@ function handleServiceClick(serviceId) {
 function handleSmartSystemClick(systemId) {
   const system = SMART_SYSTEMS_CHILDREN[systemId];
   if (!system) return;
-
-  if (system.comingSoon) {
-    showNotification(
-      state.language === 'ar' ? 'قريباً' : 'Coming Soon',
-      state.language === 'ar' ? 'هذا النظام سيكون متاحاً قريباً' : 'This system will be available soon',
-      'info'
-    );
-    return;
-  }
 
   const access = checkServiceAccess(systemId);
   if (!access.allowed) {

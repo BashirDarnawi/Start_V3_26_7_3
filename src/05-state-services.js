@@ -16,7 +16,7 @@ const SERVICES = {
     color: 'from-blue-500 to-cyan-500',
     description: 'Ship worldwide',
     descriptionAr: 'شحن عالمي',
-    comingSoon: false,
+    comingSoon: true,
     requiresSubscription: true,
     // Pricing offer (local demo). In server mode, pricing should come from the backend.
     subscription: { price: 0, durationDays: 30 }
@@ -30,7 +30,7 @@ const SERVICES = {
     color: 'from-emerald-500 to-green-500',
     description: 'Local delivery',
     descriptionAr: 'توصيل محلي',
-    comingSoon: false,
+    comingSoon: true,
     requiresSubscription: true,
     subscription: { price: 0, durationDays: 30 }
   },
@@ -43,7 +43,7 @@ const SERVICES = {
     color: 'from-orange-500 to-red-500',
     description: 'Storage solutions',
     descriptionAr: 'حلول التخزين',
-    comingSoon: false,
+    comingSoon: true,
     requiresSubscription: true,
     subscription: { price: 0, durationDays: 30 }
   },
