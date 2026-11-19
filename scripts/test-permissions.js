@@ -3103,7 +3103,10 @@ check('a stale customer confirmation never looks current beside new Meta numbers
   // that its SORTING also uses (a stale ad must not sink to the bottom).
   const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
   assert(viewsSource.includes('function getAdReconciliationDisplayState(ad)'), 'the reconciliation display state helper is missing');
-  assert(viewsSource.includes('const st = getAdReconciliationDisplayState(ad);') && viewsSource.includes('done.set(ad, st.informedApplies ||'), 'reconciliation sorting still trusts the raw stored flag');
+  // Since the redesign (Milestone 4) that judgement is one function, isAdReconciliationDone, shared by the
+  // sorting here and by the owner dashboard's "waiting for reconciliation" count.
+  assert(viewsSource.includes('const st = getAdReconciliationDisplayState(ad);') && viewsSource.includes('return st.informedApplies ||')
+    && viewsSource.includes('done.set(ad, isAdReconciliationDone(ad));'), 'reconciliation sorting still trusts the raw stored flag');
 
   // A confirmed $10 remainder, then Meta reports MORE spend => remainder $5:
   // the old confirmation must not render as checked/done.
@@ -3124,6 +3127,7 @@ check('a stale customer confirmation never looks current beside new Meta numbers
   const fresh = sandbox.getAdReconciliationDisplayState(matchingAd);
   assert(fresh.informedApplies === true, 'a still-valid confirmation was wrongly invalidated');
   assert(fresh.staleConfirmation === false, 'a valid confirmation was flagged stale');
+  assert(sandbox.isAdReconciliationDone(confirmedAd) === false && sandbox.isAdReconciliationDone(matchingAd) === true, 'the shared "done" judgement ignores the displayed remainder');
 
   loginAs(ADMIN);
   S.language = 'en';

@@ -360,8 +360,8 @@ function renderClothesComingSoonPanel(icon, title, titleAr, desc, descAr) {
   `;
 }
 
-function renderClothesDashboardTab() {
-  const isAr = clothesIsAr();
+// The dashboard's warehouse, shipment and order sums (the same records the tabs show).
+function clothesDashboardSums() {
   const products = getVisibleClothesProducts();
   const shipments = getVisibleClothesShipments();
   const orders = getVisibleClothesOrders();
@@ -406,6 +406,21 @@ function renderClothesDashboardTab() {
   outValueLYD = Math.round(outValueLYD * 100) / 100;
   collectedLYD = Math.round(collectedLYD * 100) / 100;
   owedLYD = Math.round(owedLYD * 100) / 100;
+  return { products, shipments, orders, totalPieces, stockValueUSD, lowStock, inTransitUSD, receivedUSD, outCount, outValueLYD, collectedLYD, owedLYD };
+}
+
+// The Clothes System's door for the owner dashboard (docs/SMART_SYSTEMS.md, D36): how many items are
+// low (and what "low" means), and what customers still owe. Both come from the dashboard sums above,
+// so the two screens can never disagree. Nothing else is handed out.
+function clothesOwnerSummary() {
+  if (!clothesCanUse()) return null;
+  const sums = clothesDashboardSums();
+  return { lowStock: sums.lowStock.length, lowStockAt: CLOTHES_LOW_STOCK_THRESHOLD, owedLYD: sums.owedLYD };
+}
+
+function renderClothesDashboardTab() {
+  const isAr = clothesIsAr();
+  const { products, shipments, orders, totalPieces, stockValueUSD, lowStock, inTransitUSD, receivedUSD, outCount, outValueLYD, collectedLYD, owedLYD } = clothesDashboardSums();
 
   // Profit (needs the exchange rate; hidden gracefully when unset)
   const rate = getClothesExchangeRate();

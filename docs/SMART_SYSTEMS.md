@@ -22,6 +22,21 @@ one wallet and one set of subscriptions; the code of each system is kept apart.
 
 `server/test_system_boundaries.py` and `scripts/test-system-boundaries.js` (in `npm test` and CI) fail the build when a rule is broken.
 
+## The owner dashboard and the systems
+
+The owner dashboard (Control Center, `src/12b-control-center.js`) is a platform screen. It shows a few
+numbers from each system and follows the same separation:
+
+- **A system hands over a summary through its own door, and nothing else.** The Ads Studio's door is on the
+  server: the team desk counter `GET /api/studio/staff/pulse` (counts only, never a name or an amount). The
+  Clothes System's door is `clothesOwnerSummary()` in its own bundle: how many items are low and what
+  customers still owe, taken from the sums its own dashboard shows. The dashboard asks for the Clothes
+  bundle only when there are Clothes records to count.
+- **The dashboard never reads a system's records itself** and never calls a system's screen functions.
+- **It opens a system by its address** (`/ads-studio?tab=review&section=tickets`,
+  `/clothes-system?tab=products`), the way a bookmark would. The system reads its own tab from the address.
+- A new system that wants a line on the dashboard adds its own door in the same way.
+
 ## Adding a new system (template)
 
 1. `server/systems/<name>/__init__.py` with a docstring and `OWNED_TYPES = frozenset({...})` (new, unique record type names).

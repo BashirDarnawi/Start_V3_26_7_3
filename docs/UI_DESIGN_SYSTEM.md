@@ -56,11 +56,27 @@ migration. Existing records use the new views automatically.
 - Deliveries use job cards, a driver overview and a collection summary.
   Reconciliation uses planned/actual/remaining cards and the existing customer
   notification confirmation. Search still swaps only its result region.
-- Control Center groups priority tasks and financial/protection work. Settings
-  has a section navigation rail; Audit uses a filterable activity timeline.
-  No setting or financial tool is removed to simplify the page.
+- Control Center is the owner dashboard and the Admin's first screen after
+  sign-in (since November 2026). Its "Today" tab lists the work that is
+  waiting across the whole business, grouped as Office, Deliveries,
+  Collections, Ads Studio and Clothes: one line per kind of work, shown only
+  while its count is above zero, with one button that opens the list behind
+  the number. Beside it: four money figures, month close, and one summary line
+  for the server. The "System and plans" tab holds encrypted backup, live
+  connections, setup tasks (plain words first, technical steps folded) and
+  the plan and price manager. Month close and unlock use the app's own
+  dialog, never a browser prompt. Every figure is read from the function its
+  own screen uses (`getDeliveryStats`, `isAdReconciliationDone`,
+  `shellDebtorRows`, `shellMonthCollected`, the Clothes door
+  `clothesOwnerSummary`, the Studio desk counter), so the two can never
+  disagree; `scripts/test-review-regressions.js` checks each one. Design and
+  sources: `docs/redesign/ADMIN_DASHBOARD.md`.
+- Settings has a section navigation rail; Audit uses a filterable activity
+  timeline. No setting or financial tool is removed to simplify the page.
 - Ad previews use the existing media viewer and Meta budget helpers. An
   unknown budget or remaining amount never creates a guessed progress bar.
+- A service that is not built yet is a plain card under "Coming soon" on the
+  Services Hub and Smart Systems: readable, not dimmed, and it opens nothing.
 - **More** retains the other manager destinations. Services Hub, wallet,
   subscriptions, clothes, Ads Studio and social tools remain separate routes.
 - Studio section buttons and its setup progress fit phones without horizontal

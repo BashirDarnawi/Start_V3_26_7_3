@@ -1631,7 +1631,8 @@ const AUTHENTICATED_DIALOG_IDS = Object.freeze([
   'customer-ad-coverage-modal', 'company-coverage-receipt-picker', 'collect-receipt-modal',
   'new-receipt-chooser', 'destroyed-receipt-dialog', 'edit-history-modal', 'meta-history-modal',
   'meta-ad-preview-modal', 'meta-insights-modal', 'meta-ads-modal', 'stop-ad-modal',
-  'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning'
+  'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning',
+  'control-center-dialog'
 ]);
 
 // Typed searches and record filters must not greet the next person on this device.

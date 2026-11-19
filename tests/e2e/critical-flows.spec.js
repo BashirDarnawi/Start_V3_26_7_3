@@ -13,11 +13,12 @@ async function signIn(page) {
     page.locator('#login-form button[type="submit"]').click()
   ]);
   expect(loginResponse.ok(), `Login failed with HTTP ${loginResponse.status()}`).toBe(true);
-  // Admins land on the Services Hub, which intentionally has no workspace
-  // sidebar. Wait on authenticated application state instead of a screen-
-  // specific element, then each test can open the route it needs.
+  // Admins land on the owner dashboard (the Control Center), which is loaded on
+  // demand. Wait on authenticated application state, then on the dashboard
+  // itself; each test can then open the route it needs.
   await page.waitForFunction(() => typeof state !== 'undefined' && !!state.currentUser?.id);
-  await expect(page.getByText(/welcome,?\s*e2e administrator/i)).toBeVisible();
+  await expect(page.locator('.control-workspace h1')).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe('/control-center');
   // The live-sync poller starts only after the post-login full data load has
   // settled; waiting for it makes every seed and refresh below deterministic.
   await waitForLiveSync(page);

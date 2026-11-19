@@ -424,7 +424,7 @@ function renderPlansView() {
       ${body}
       ${isCurrentUserAdmin() && isServerModeEnabled() ? `
         <p class="mt-5 text-center text-xs text-slate-500 dark:text-slate-400">
-          ${hubText('Prices are set in Control Center → Plan manager.', 'تُضبط الأسعار من مركز التحكم ← إدارة الباقات.')}
+          ${hubText('Prices are set in Control Center → System and plans.', 'تُضبط الأسعار من مركز التحكم ← النظام والباقات.')}
         </p>` : ''}
     </div>
   `;

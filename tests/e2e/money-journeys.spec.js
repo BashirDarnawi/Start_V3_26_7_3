@@ -585,14 +585,31 @@ test('closing a month blocks receipt edits with 423 until an admin unlocks it wi
       input.value = value;
       input.dispatchEvent(new Event('change', { bubbles: true }));
     }, period);
+    // The dashboard asks in its own dialog (no browser box). Leftover fixtures from
+    // other specs may leave checks open: the dialog then lists them and takes the
+    // written reason the server requires.
+    const dialog = page.locator('#control-center-dialog');
+    const confirmInDialog = async reasonText => {
+      await expect(dialog).toBeVisible();
+      const reason = dialog.locator('#control-center-dialog-reason');
+      if (await reason.count()) {
+        await expect(dialog.locator('#control-center-dialog-confirm')).toBeDisabled();
+        await reason.fill(reasonText);
+      }
+      await dialog.locator('#control-center-dialog-confirm').click();
+    };
     const [closeResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/admin/operations/financial-periods/close')),
-      page.getByRole('button', { name: /close month/i }).click()
+      (async () => {
+        await page.getByRole('button', { name: 'Close month', exact: true }).click();
+        await confirmInDialog(`E2E forced close ${tag}: leftover fixtures from other specs`);
+      })()
     ]);
     const closeBody = await closeResponse.text();
     expect(closeResponse.status(), closeBody).toBe(200);
     expect(JSON.parse(closeBody).status).toBe('closed');
-    const closedRow = page.locator('.management-closed-periods > div', { hasText: period });
+    await expect(dialog).toHaveCount(0);
+    const closedRow = page.locator(`.management-closed-periods > div[data-period="${period}"]`);
     await expect(closedRow.getByRole('button', { name: /unlock/i })).toBeVisible();
 
     // --- A later edit of a receipt in that month is refused (HTTP 423). ---
@@ -622,7 +639,11 @@ test('closing a month blocks receipt edits with 423 until an admin unlocks it wi
     await expect(closedRow.getByRole('button', { name: /unlock/i })).toBeVisible();
     const [unlockResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes(`/api/admin/operations/financial-periods/${period}/unlock`)),
-      closedRow.getByRole('button', { name: /unlock/i }).click()
+      (async () => {
+        await closedRow.getByRole('button', { name: /unlock/i }).click();
+        // Unlocking always needs a reason: the dialog's button stays off until it is written.
+        await confirmInDialog(`E2E unlock ${tag}: correct a receipt of the closed month`);
+      })()
     ]);
     const unlockBody = await unlockResponse.text();
     expect(unlockResponse.status(), unlockBody).toBe(200);
@@ -638,7 +659,7 @@ test('closing a month blocks receipt edits with 423 until an admin unlocks it wi
     const row = (Array.isArray(rows) ? rows : []).find(item => String(item.period) === period);
     return row ? String(row.status) : 'missing';
   }).toBe('open');
-  await expect(page.locator('.management-closed-periods > div', { hasText: period })).toHaveCount(0);
+  await expect(page.locator(`.management-closed-periods > div[data-period="${period}"]`)).toHaveCount(0);
 });
 
 // ---------------------------------------------------------------------------

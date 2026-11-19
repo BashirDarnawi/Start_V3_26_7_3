@@ -318,7 +318,6 @@ function closeTopMobileSurface() {
 
 function getMobileLandingView() {
   if (typeof state === 'undefined' || !state.currentUser) return '';
-  if (typeof isAdminRole === 'function' && isAdminRole(state.currentUser.role)) return 'services-hub';
   if (typeof getPostLoginLandingViewForUser === 'function') {
     return getPostLoginLandingViewForUser(state.currentUser);
   }

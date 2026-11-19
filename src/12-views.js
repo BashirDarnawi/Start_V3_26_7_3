@@ -1199,7 +1199,8 @@ function getWorkspaceViewTitle(view = state.currentView) {
     audit: 'auditLogs',
     settings: 'settings',
     'delivery-dashboard': 'dashboard',
-    'clothes-system': 'clothesSystem'
+    'clothes-system': 'clothesSystem',
+    'control-center': 'controlCenter'
   };
   const custom = {
     more: state.language === 'ar' ? 'المزيد' : 'More',
@@ -1276,7 +1277,7 @@ function renderWorkspaceTopbar() {
           <div class="text-[11px] font-bold uppercase tracking-[0.16em] text-indigo-500">${isAr ? 'مساحة العمل' : 'Workspace'}</div>
           <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
         </div>
-        <button type="button" onclick="toggleCommandPalette()" class="workspace-global-search ml-auto" aria-haspopup="dialog" aria-label="${isAr ? 'البحث الذكي في كل النظام' : 'Smart search across the system'}">
+        <button type="button" onclick="toggleCommandPalette()" class="workspace-global-search ml-auto" aria-haspopup="dialog">
           <i data-lucide="search" class="h-4 w-4 text-indigo-500"></i>
           <span class="truncate">${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}</span>
           <kbd>Ctrl K</kbd>
@@ -4053,19 +4054,12 @@ function _getCollectionTargetCached(item) {
   return target;
 }
 
-// logOnly=true (search keystrokes): updateDeliveriesViewFiltered swaps only #delivery-log-results,
-// so the stats tiles and driver panel (the heavy, search-independent part) are skipped.
-function renderDeliveriesView(logOnly) {
-  const logOnlyPass = logOnly === true;
+// The delivery jobs and their totals. The Deliveries screen and the owner dashboard read these same sums.
+function getDeliveryRows() {
   _deliveryCollectionTargetCache.clear();
   _deliveryUsageIndex = null;
-  const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
-  const allReceipts = getVisibleRecords(state.receipts);
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-  const deliveryCustomersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
-
-  const deliveryReceipts = allReceipts
+  return getVisibleRecords(state.receipts)
     .filter(r => {
       if (!r) return false;
       const ds = String(r.deliveryStatus || '').trim();
@@ -4081,15 +4075,13 @@ function renderDeliveriesView(logOnly) {
       amountLocal: Number(r.amountLocal || 0) || 0,
       amountUSD: Number(r.amountUSD || 0) || 0
     }));
+}
 
-  // Skipped on log-only passes (see above); their markup below is guarded the same way.
-  let stats = null;
-  let driverPerformance = [];
-  if (!logOnlyPass) {
+function getDeliveryStats(deliveryReceipts) {
   const deliveredRows = deliveryReceipts.filter(d => d.deliveryStatus === 'Delivered');
   const heldRows = deliveredRows.filter(d => !_isReceivedInOffice(d) && _getCollectedCashLocal(d) > 0);
 
-  stats = {
+  return {
     pendingDelivery: deliveryReceipts.filter(d => d.deliveryStatus === 'Needs Delivery').length,
     pendingAssignment: deliveryReceipts.filter(d => !d.deliveryPersonId && d.deliveryStatus !== 'Canceled' && d.deliveryStatus !== 'Delivered').length,
     inProgress: deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress').length,
@@ -4111,6 +4103,22 @@ function renderDeliveriesView(logOnly) {
     }, 0),
     feeVarianceLYD: deliveredRows.reduce((sum, d) => sum + (d.feeDifferenceStatus ? (Number(d.feeDiff) || 0) : 0), 0),
   };
+}
+
+// logOnly=true (search keystrokes): updateDeliveriesViewFiltered swaps only #delivery-log-results,
+// so the stats tiles and driver panel (the heavy, search-independent part) are skipped.
+function renderDeliveriesView(logOnly) {
+  const logOnlyPass = logOnly === true;
+  const isAr = state.language === 'ar';
+  const deliveryReceipts = getDeliveryRows();
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
+  const deliveryCustomersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+
+  // Skipped on log-only passes (see above); their markup below is guarded the same way.
+  let stats = null;
+  let driverPerformance = [];
+  if (!logOnlyPass) {
+  stats = getDeliveryStats(deliveryReceipts);
 
   driverPerformance = deliveryUsers.map(driver => {
     const driverDeliveries = deliveryReceipts.filter(d => String(d.deliveryPersonId || '') === String(driver.id || ''));
@@ -5445,6 +5453,11 @@ function getAdReconciliationDisplayState(ad) {
   };
 }
 
+function isAdReconciliationDone(ad) {
+  const st = getAdReconciliationDisplayState(ad);
+  return st.informedApplies || ((st.finalSpendFrozen || st.hasSavedSpend) && st.remainingUSD <= 0.005);
+}
+
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
   // Maps instead of a find() per card (3,000 finished ads x 2,000 customers was
@@ -5457,8 +5470,7 @@ function renderReconciliationView() {
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
     .map(ad => {
-      const st = getAdReconciliationDisplayState(ad);
-      done.set(ad, st.informedApplies || ((st.finalSpendFrozen || st.hasSavedSpend) && st.remainingUSD <= 0.005));
+      done.set(ad, isAdReconciliationDone(ad));
       return ad;
     })
     .sort((a, b) => (done.get(a) - done.get(b))

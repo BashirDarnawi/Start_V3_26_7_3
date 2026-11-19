@@ -1323,8 +1323,7 @@ function getAlbayanManagerLandingViewForUser(user) {
 function getPostLoginLandingViewForUser(user) {
   // The studio door leads only into the studio — admins included.
   if (IS_STUDIO_SHELL) return 'ads-studio';
-  const roleLower = String(user?.role || '').toLowerCase();
-  if (roleLower === 'admin') return 'services-hub';
+  // Everyone lands on the first Manager screen they may open; for an Admin that is the owner dashboard (control-center).
   return getAlbayanManagerLandingViewForUser(user);
 }
 

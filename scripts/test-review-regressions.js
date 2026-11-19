@@ -790,10 +790,17 @@ async function main() {
     const notes = [];
     fixture.sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
     fixture.sandbox.loadControlCenterStatus = async () => {};
-    fixture.run('_controlCenter.loadedAt = Date.now();');
+    // The server answers are kept per signed-in person (redesign M4): the fixture's admin already "asked".
+    fixture.run("_controlCenter.loadedAt = Date.now(); _controlCenter.userId = 'admin';");
     // The harness's fake DOM has no innerHTML escaping; use a real escaper so the escaping assertions mean something.
     fixture.run("Security.escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')");
-    return { ...fixture, notes };
+    // What a dialog draws (the fake document keeps no tree).
+    const made = [];
+    const makeElement = fixture.sandbox.document.createElement;
+    fixture.sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    const dialogHtml = () => String((made[made.length - 1] || {}).innerHTML || '');
+    const words = html => String(html).replace(/<[^>]+>/g, ' ');
+    return { ...fixture, notes, dialogHtml, words };
   };
   await test('Control Center: a debt the company covered in full is not an unpaid receipt (n=15)', async () => {
     const { sandbox, state } = controlCenterFixture();
@@ -807,21 +814,28 @@ async function main() {
     assert.equal(facts.attentionCount, 2);
   });
   await test('Control Center: a failing off-site copy, the rolling error rate and every closed month are shown (n=5, 11, 16, 13)', async () => {
-    const { sandbox, run } = controlCenterFixture();
+    const { sandbox, state, run } = controlCenterFixture();
+    state.serverMode = true;
     run(`_controlCenter.operations = {
       backup: { enabled: true, encryptionReady: true, offsiteConfigured: true, lastOffsiteError: '403 <b>InvalidAccessKeyId', lastOffsiteAt: 0, workerRunning: true },
       monitoring: { total_requests: 2000000, error_rate: 0.0002, recent_error_rate: 0.3, recent_sample_size: 1000, response_ms_p95: 100 },
       setupTasks: ['Off-site backup copy is failing - check the S3 bucket, keys and region'],
       financialPeriods: ['2026-06', '2026-05', '2026-04', '2026-03', '2026-02', '2026-01'].map(period => ({ period, status: 'closed' }))
     };`);
-    const html = sandbox.renderControlCenterView();
+    // Server upkeep is the second tab of the owner dashboard (redesign M4); "Today" carries one summary line and the month close.
+    run("_controlCenter.tab = 'system'");
+    let html = sandbox.renderControlCenterView();
     assert.ok(!html.includes('>Connected<') && html.includes('>Failing<'), 'a failed upload is not "Connected"');
     assert.ok(html.includes('403 &lt;b&gt;InvalidAccessKeyId'), 'the upload error is shown, escaped');
-    assert.ok(!html.includes('>Configured<') && html.includes('>Setup needed<'), 'protection is not "Configured" without an off-site copy');
-    assert.ok(/text-rose-600">30\.0% errors/.test(html), 'the health tile uses the rolling window like the task');
-    assert.ok(html.includes("unlockControlCenterMonth('2026-01')"), 'the oldest closed month can be unlocked');
-    run('_controlCenter.operations.monitoring = { total_requests: 100, error_rate: 0.2, recent_error_rate: 0, recent_sample_size: 100 };');
-    assert.ok(/text-emerald-600">0\.0% errors/.test(sandbox.renderControlCenterView()), 'an old incident no longer paints the tile red');
+    assert.ok(/management-chip is-danger"><span aria-hidden="true"><\/span>30\.0% errors/.test(html), 'the health row uses the rolling window like the task');
+    assert.ok(html.includes('The copy outside this server is failing.') && html.includes('Show technical steps'), 'the failing copy is a setup task in plain words');
+    run("_controlCenter.tab = 'today'");
+    html = sandbox.renderControlCenterView();
+    assert.ok(html.includes('Protection: setup needed') && !html.includes('Protection: set up'), 'protection is not "set up" without an off-site copy');
+    assert.ok(html.includes('class="management-note is-urgent" data-system-summary'), 'the one-line summary on Today turns urgent');
+    assert.ok(html.includes("unlockControlCenterMonth('2026-01')") && html.includes('data-period="2026-01"'), 'the oldest closed month can be unlocked');
+    run("_controlCenter.operations.monitoring = { total_requests: 100, error_rate: 0.2, recent_error_rate: 0, recent_sample_size: 100 }; _controlCenter.tab = 'system';");
+    assert.ok(/management-chip is-ok"><span aria-hidden="true"><\/span>0\.0% errors/.test(sandbox.renderControlCenterView()), 'an old incident no longer paints the row red');
   });
   await test('Control Center: Backup now warns when only the local copy was saved and reports a running backup as busy (n=5, 8)', async () => {
     const { sandbox, notes } = controlCenterFixture();
@@ -833,6 +847,272 @@ async function main() {
     await sandbox.runControlCenterBackup();
     assert.equal(notes[notes.length - 1].type, 'info');
     assert.ok(!notes.some(note => note.type === 'error' || note.type === 'success'), JSON.stringify(notes));
+  });
+  // ---- Redesign Milestone 4: the owner dashboard (docs/redesign/ADMIN_DASHBOARD.md) ----
+  await test('redesign M4: the Admin lands on the owner dashboard after sign-in and on a phone; staff and drivers land where they did', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    assert.equal(sandbox.getPostLoginLandingViewForUser({ role: 'Admin', permissions: {} }), 'control-center');
+    assert.equal(sandbox.getPostLoginLandingViewForUser({ role: 'Employee', permissions: { customers: ['view'] } }), 'customers');
+    assert.equal(sandbox.getPostLoginLandingViewForUser({ role: 'Employee', permissions: {} }), 'no-access');
+    assert.equal(sandbox.getPostLoginLandingViewForUser({ role: 'Delivery', permissions: {} }), 'delivery-dashboard');
+    // The phone's Back button uses the same landing screen: Back on the dashboard asks before leaving the app.
+    assert.equal(sandbox.getMobileLandingView(), 'control-center');
+    // The top bar names the screen (it said the app's name before), and the phone's first tab is the dashboard for the Admin only.
+    assert.equal(sandbox.getWorkspaceViewTitle('control-center'), 'Control Center');
+    assert.ok(String(sandbox.renderManagerTabBar()).includes("navigateTo('control-center')"));
+    state.currentUser = { id: 'emp', role: 'Employee', permissions: { analytics: ['view'], receipts: ['view'], customers: ['view'] } };
+    state.users = [state.currentUser];
+    const staffBar = String(sandbox.renderManagerTabBar());
+    assert.ok(staffBar.includes("navigateTo('analytics')") && !staffBar.includes('control-center'), 'staff keep Home');
+    assert.equal(sandbox.getMobileLandingView(), 'analytics');
+  });
+  const dashboardFixture = () => {
+    const f = controlCenterFixture();
+    const { state, sandbox } = f;
+    const day = 86400000, iso = ms => new Date(Date.now() + ms).toISOString();
+    state.customers = [{ id: 'c1', name: 'Old Debt' }, { id: 'c2', name: 'Fresh Debt' }];
+    state.users = [state.currentUser, { id: 'driver1', role: 'Delivery', name: 'Driver' }];
+    state.receipts = [
+      // an office debt, 60 days old: unpaid, and its customer is overdue
+      { id: 'r_old', customerId: 'c1', status: 'Not Paid', isPaid: false, amountUSD: 100, amountLocal: 500, exchangeRate: 5, createdAt: iso(-60 * day), deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' } },
+      // a delivery job with no driver yet: unpaid, and waiting for a driver
+      { id: 'r_wait', customerId: 'c2', status: 'Not Paid', isPaid: false, amountUSD: 40, amountLocal: 200, exchangeRate: 5, createdAt: iso(-2 * day), deliveryStatus: 'Needs Delivery', statusDetail: { notPaidCollection: 'delivery' } },
+      // delivered, and the driver still holds the cash
+      { id: 'r_held', customerId: 'c2', status: 'Paid', isPaid: true, amountUSD: 50, amountLocal: 250, exchangeRate: 5, createdAt: iso(-3 * day), collectionDate: iso(-1 * day), deliveryStatus: 'Delivered', deliveryPersonId: 'driver1', amountCollectedFromCustomer: 250 },
+      // paid this month in the office
+      { id: 'r_paid', customerId: 'c2', status: 'Paid', isPaid: true, amountUSD: 30, amountLocal: 150, exchangeRate: 5, createdAt: iso(0), collectionDate: iso(0), deliveryStatus: 'Office' }
+    ];
+    state.ads = [
+      { id: 'ad_setup', pageId: 'p1', status: 'Active', startDate: iso(0), endDate: iso(5 * day) },  // no customer, amount or payment
+      { id: 'ad_done', customerId: 'c2', amountUSD: 20, paymentStatus: 'Paid', status: 'Active', startDate: iso(-9 * day), endDate: iso(-3 * day) },  // ended: waits for reconciliation
+      { id: 'ad_dup', customerId: 'c2', amountUSD: 20, paymentStatus: 'Paid', status: 'Active', startDate: iso(0), endDate: iso(5 * day), metaSyncErrorCode: 'duplicate_link' },
+      { id: 'ad_fail', customerId: 'c2', amountUSD: 20, paymentStatus: 'Paid', status: 'Active', startDate: iso(0), endDate: iso(5 * day), metaSyncErrorCode: 'token_expired' }
+    ];
+    sandbox.getCurrentProfitabilitySnapshot = () => ({ unpricedSpendUSD: 12.5, knownGrossProfitLYD: 77.5 });
+    return f;
+  };
+  await test('redesign M4: every "Needs you today" line shows the number its own screen shows, and its button opens that screen', async () => {
+    const { sandbox, state, run } = dashboardFixture();
+    const today = sandbox.getControlCenterToday();
+    const groups = sandbox.getControlCenterAttention(today, null);
+    const lines = Object.fromEntries(groups.flatMap(group => group.lines).map(line => [line.id, line]));
+    assert.deepEqual(Array.from(groups, group => group.id), ['office', 'deliveries', 'collections'], 'one group per area that has work; no Studio or Clothes group without their numbers');
+    // Office: the Control Center's own facts (as before the redesign).
+    assert.equal(lines['ads-setup'].count, 1);
+    assert.equal(lines['receipts-unpaid'].count, 2);
+    assert.equal(lines['meta-duplicates'].count, 1);
+    assert.equal(lines['meta-retry'].count, 1);
+    assert.ok(lines['unpriced-spend'].title.includes('$12.50') && lines['unpriced-spend'].count === 1, 'a money line counts as one kind of work');
+    // Reconciliation: the screen's own "Ads ready for review".
+    const reconciliation = String(sandbox.renderReconciliationView());
+    assert.equal(lines.reconciliation.count, Number(/ops-hero-count"><strong>(\d+)<\/strong>/.exec(reconciliation)[1]));
+    assert.equal(lines.reconciliation.count, 1);
+    // Deliveries: the screen's own "Pending Assignment" and "Held by Drivers" / "Driver Cash Value".
+    const deliveries = String(sandbox.renderDeliveriesView());
+    assert.equal(lines['delivery-unassigned'].count, Number(/Pending Assignment<\/span><strong>(\d+)<\/strong>/.exec(deliveries)[1]));
+    assert.equal(lines['driver-cash'].count, Number(/Held by Drivers<\/span><strong>(\d+)/.exec(deliveries)[1]));
+    assert.equal(lines['delivery-unassigned'].count, 1);
+    assert.equal(lines['driver-cash'].count, 1);
+    assert.ok(lines['driver-cash'].detail.startsWith('250.00 LYD'), lines['driver-cash'].detail);
+    assert.equal(today.delivery.driverCashLYD, 250);
+    // Collections: Collect a debt's own list ("N customers · M overdue") and total.
+    const collect = String(sandbox.renderCollectView());
+    assert.equal(lines.overdue.count, Number(/· (\d+) overdue/.exec(collect)[1]));
+    assert.equal(lines.overdue.count, 1);
+    assert.ok(collect.includes(sandbox.shellLyd(today.owedLyd)), 'Owed by customers is Collect a debt\'s total');
+    // Money at a glance: Home's "Collected this month", in this screen's one money format.
+    const home = String(sandbox.renderManagerHomeHero(state.receipts, state.ads, true));
+    assert.ok(home.includes(sandbox.shellLyd(today.month.collectedLyd)) && today.month.collectedLyd === 400, `Home shows the same collected sum (${today.month.collectedLyd})`);
+    const html = String(sandbox.renderControlCenterView());
+    assert.ok(html.includes('<bdi>400.00 LYD</bdi>') && html.includes('<bdi>77.50 LYD</bdi>'), 'two decimals and the currency, always');
+    assert.ok(html.includes(`<bdi>${sandbox.controlCenterMoney(today.owedLyd)} LYD</bdi>`) && html.includes(`<bdi>${sandbox.controlCenterMoney(today.delivery.uncollectedLYD)} LYD</bdi>`));
+    // Every line is drawn once, with its count and one button; the header counts kinds of work.
+    for (const line of Object.values(lines)) assert.ok(html.includes(`data-attention="${line.id}"`) && html.includes(`onclick="${line.open}"`), line.id);
+    assert.ok(html.includes('9 kinds of work are waiting') && html.includes('<span class="management-count">9</span>'));
+    assert.ok(html.includes('<bdi>2</bdi></span>\n      <span class="management-attention-text"><strong>receipts are unpaid</strong>'), 'the number, then the words');
+    // Buttons open the list behind the number.
+    const visited = [];
+    sandbox.navigateTo = view => { visited.push(view); state.currentView = view; };
+    sandbox.collectSetFilter = mode => visited.push(`collect:${mode}`);
+    sandbox.controlCenterOpenOverdue();
+    assert.deepEqual(visited, ['collect', 'collect:overdue']);
+    sandbox.controlCenterOpenReceipts();
+    assert.equal(state.receiptStatusFilter, 'unpaid');
+    sandbox.controlCenterOpenAds('setup');
+    assert.equal(state.adFilters.payment, 'pending_setup');
+    state.deliveryFilter = { status: 'Delivered' };
+    sandbox.controlCenterOpenDeliveries();
+    assert.deepEqual(JSON.parse(JSON.stringify(state.deliveryFilter)), {}, 'Deliveries opens unfiltered');
+    // A system is opened at its own address; the dashboard never sets a system's tab itself.
+    const pushed = [];
+    sandbox.window.history.pushState = (entry, title, url) => pushed.push(url);
+    sandbox.restoreViewStateFromUrl = () => {};
+    sandbox.navigateToInternal = (view, push) => visited.push(`${view}:${push}`);
+    sandbox.controlCenterOpenDesk('tickets');
+    sandbox.controlCenterOpenAddress('clothes-system', 'tab=products');
+    assert.deepEqual(pushed, ['/ads-studio?tab=review&section=tickets', '/clothes-system?tab=products']);
+    assert.deepEqual(visited.slice(-2), ['ads-studio:false', 'clothes-system:false']);
+    void run;
+  });
+  await test('redesign M4: the Studio lines come from the desk counter (a stop request is counted once), and a counter that did not answer is never shown as zero', async () => {
+    const { sandbox, state, run } = dashboardFixture();
+    state.serverMode = true;
+    const counts = sandbox.controlCenterStudioCounts({ waitingReview: 2, stopRequests: 3, openTickets: 5, stopTicketsOpen: 2, paymentsWaiting: 1, alerts: 4, updatedAt: '2026-11-19T10:00:00Z' });
+    assert.deepEqual(JSON.parse(JSON.stringify(counts)), { stopRequests: 3, waitingReview: 2, otherTickets: 3, paymentsWaiting: 1, alerts: 4 });
+    // A reviewer's answer has no paymentsWaiting; junk is not a count.
+    assert.deepEqual(JSON.parse(JSON.stringify(sandbox.controlCenterStudioCounts({ waitingReview: '7', stopRequests: -1, openTickets: 1, stopTicketsOpen: 4 }))), { stopRequests: 0, waitingReview: 0, otherTickets: 0, paymentsWaiting: 0, alerts: 0 });
+    assert.equal(sandbox.controlCenterStudioCounts(null), null);
+    const studio = sandbox.getControlCenterAttention(sandbox.getControlCenterToday(), counts).find(group => group.id === 'studio');
+    assert.deepEqual(Array.from(studio.lines, line => [line.id, line.count]), [['studio-stop', 3], ['studio-review', 2], ['studio-payments', 1], ['studio-tickets', 3], ['studio-alerts', 4]], 'a stop request first, and never inside the tickets count');
+    assert.deepEqual(Array.from(studio.lines, line => line.open), ["controlCenterOpenDesk('tickets')", "controlCenterOpenDesk('requests')", "controlCenterOpenDesk('more')", "controlCenterOpenDesk('tickets')", "controlCenterOpenDesk('health')"]);
+    // The real loader asks the Studio's own server door together with the two checks it already made.
+    delete sandbox.loadControlCenterStatus;
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '12b-control-center.js'), 'utf8').match(/async function loadControlCenterStatus[\s\S]*?\n}\n/)[0]);
+    const asked = [];
+    sandbox.apiOperationsStatus = async () => ({ backup: {}, monitoring: {} });
+    sandbox.apiMetaAdsStatus = async () => ({ configured: true });
+    sandbox.apiJson = async (url, options) => { asked.push(`${options.method} ${url}`); return { waitingReview: 1, stopRequests: 0, openTickets: 0, stopTicketsOpen: 0, alerts: 0, paymentsWaiting: 0 }; };
+    sandbox.RenderQueue = { schedule() {} };
+    await sandbox.loadControlCenterStatus(true);
+    assert.deepEqual(asked, ['GET /api/studio/staff/pulse']);
+    assert.equal(run('_controlCenter.studio.waitingReview'), 1);
+    assert.ok(String(sandbox.renderControlCenterView()).includes('data-attention="studio-review"'));
+    // The counter fails: the group says so and offers the desk; the browser's own lines stay.
+    sandbox.apiJson = async () => { throw new Error('502'); };
+    await sandbox.loadControlCenterStatus(true);
+    const failed = String(sandbox.renderControlCenterView());
+    assert.ok(failed.includes('Could not read the Studio desk.') && failed.includes("onclick=\"navigateTo('ads-studio')\"") && !failed.includes('data-attention="studio-'), 'no Studio number is invented');
+    assert.ok(failed.includes('data-attention="receipts-unpaid"') && !run('_controlCenter.error'), 'the other lines and checks are untouched');
+    // Local mode: nothing is asked of a server, and the server-fed cards say why they are empty.
+    state.serverMode = false;
+    asked.length = 0;
+    sandbox.apiOperationsStatus = async () => { asked.push('operations'); return {}; };
+    sandbox.apiJson = async url => { asked.push(url); return {}; };
+    run('_controlCenter.loadedAt = 0; _controlCenter.studio = null; _controlCenter.studioFailed = false;');
+    await sandbox.loadControlCenterStatus(true);
+    assert.deepEqual(asked, []);
+    const local = String(sandbox.renderControlCenterView());
+    assert.ok(local.includes('This device only (local mode)') && (local.match(/Needs the server connection\./g) || []).length === 2 && !local.includes('Studio desk'), 'month close and system say they need the server');
+    assert.ok(local.includes('data-attention="receipts-unpaid"') && !local.includes('id="control-center-period"'));
+  });
+  await test('redesign M4: the Clothes lines come through the Clothes System\'s own door and equal its dashboard', async () => {
+    const { sandbox, state, run } = dashboardFixture();
+    assert.equal(sandbox.getControlCenterToday().clothes, null, 'without the Clothes bundle there is no Clothes line (never a guess)');
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '15b-clothes.js'), 'utf8'));
+    state.clothesProducts = [
+      { id: 'cp1', name: 'Shirt', costUSD: 5, variants: [{ color: 'Red', size: 'M', qty: 2 }, { color: 'Red', size: 'L', qty: 9 }, { color: 'Blue', size: 'M', qty: 0 }] },
+      { id: 'cp2', name: 'Deleted', _deleted: true, costUSD: 5, variants: [{ color: 'Red', size: 'M', qty: 0 }] }
+    ];
+    state.clothesShipments = [];
+    state.clothesOrders = [
+      { id: 'co1', status: 'On the way', items: [{ productId: 'cp1', qty: 1, priceLYD: 100 }], amountPaidLYD: 40 },
+      { id: 'co2', status: 'Canceled', items: [{ productId: 'cp1', qty: 1, priceLYD: 999 }], amountPaidLYD: 0 }
+    ];
+    const sums = sandbox.clothesDashboardSums();
+    const door = JSON.parse(JSON.stringify(sandbox.clothesOwnerSummary()));
+    assert.deepEqual(door, { lowStock: sums.lowStock.length, lowStockAt: 2, owedLYD: sums.owedLYD });
+    assert.equal(door.lowStock, 2, 'two colour and size lines are at or under two pieces');
+    const clothesDashboard = String(sandbox.renderClothesDashboardTab());
+    assert.ok(clothesDashboard.includes(sandbox.clothesFmtLYD(door.owedLYD)), 'the Clothes dashboard shows the same "still owed"');
+    const clothes = sandbox.getControlCenterAttention(sandbox.getControlCenterToday(), null).find(group => group.id === 'clothes');
+    assert.deepEqual(Array.from(clothes.lines, line => [line.id, line.count, line.open]), [
+      ['clothes-low', 2, "controlCenterOpenAddress('clothes-system', 'tab=products')"],
+      ...(door.owedLYD > 0 ? [['clothes-owed', 1, "controlCenterOpenAddress('clothes-system', 'tab=orders')"]] : [])]);
+    assert.equal(clothes.lines[0].detail, 'Two pieces or fewer.');
+    // Someone who may not use the Clothes System gets nothing through the door.
+    state.currentUser = { id: 'emp', role: 'Employee', permissions: {} };
+    assert.equal(sandbox.clothesOwnerSummary(), null);
+  });
+  await test('redesign M4: with nothing waiting the dashboard says so in one sentence, never a row of zeros', async () => {
+    const { sandbox, state, run } = controlCenterFixture();
+    state.serverMode = true;
+    run("_controlCenter.studio = { stopRequests: 0, waitingReview: 0, otherTickets: 0, paymentsWaiting: 0, alerts: 0 }; _controlCenter.operations = { backup: {}, monitoring: {}, financialPeriods: [] }; _controlCenter.meta = {};");
+    const html = String(sandbox.renderControlCenterView());
+    assert.ok(html.includes('Nothing needs you right now.') && /Checked at \d/.test(html));
+    assert.ok(!html.includes('data-attention=') && !html.includes('management-attention-note'), 'no line, no zero');
+    assert.ok(html.includes('Money at a glance') && html.includes('id="control-center-period"') && html.includes('management-doors'), 'money, month close and doors stay');
+    assert.ok(/is still open<\/span>/.test(html) && html.includes('management-month is-due'), 'last month is still open: the card stands out');
+    run(`_controlCenter.operations.financialPeriods = [{ period: '${sandbox.controlCenterPreviousMonth()}', status: 'closed' }];`);
+    const closed = String(sandbox.renderControlCenterView());
+    assert.ok(/is closed<\/span>/.test(closed) && !closed.includes('management-month is-due'));
+    // A second admin on the same device starts clean: no answer of the first is shown.
+    state.currentUser = { id: 'admin-two', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser];
+    sandbox.renderControlCenterView();
+    assert.equal(run('_controlCenter.operations'), null);
+    assert.equal(run('_controlCenter.studio'), null);
+    assert.equal(run('_controlCenter.userId'), 'admin-two');
+  });
+  await test('redesign M4: closing or unlocking a month uses the app\'s own dialog: it lists what is open and takes the reason the server requires', async () => {
+    const { sandbox, state, run, notes, dialogHtml, words } = controlCenterFixture();
+    state.serverMode = true;
+    for (const box of ['alert', 'confirm', 'prompt']) sandbox.window[box] = () => { throw new Error(`the browser ${box} box is gone`); };
+    const sent = [];
+    sandbox.apiCloseFinancialPeriod = async (period, reason) => { sent.push(['close', period, reason]); return { status: 'closed' }; };
+    sandbox.apiUnlockFinancialPeriod = async (period, reason) => { sent.push(['unlock', period, reason]); return { status: 'open' }; };
+    const fields = { 'control-center-period': { value: '2026-08' } };
+    sandbox.document.getElementById = id => fields[id] || null;
+    // 1. Nothing open: one question, no reason field, the confirming button is ready.
+    sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [] });
+    await sandbox.closeControlCenterMonth();
+    let dialog = dialogHtml();
+    assert.ok(dialog.includes('Close August 2026?') && dialog.includes('cannot be changed') && !dialog.includes('control-center-dialog-reason'), words(dialog));
+    assert.ok(/id="control-center-dialog-confirm" onclick="confirmControlCenterDialog\(\)" class="management-button is-primary" >Close August 2026</.test(dialog), 'the button names what it does');
+    await sandbox.confirmControlCenterDialog();
+    assert.deepEqual(sent.pop(), ['close', '2026-08', '']);
+    assert.equal(notes[notes.length - 1].type, 'success');
+    assert.equal(run('_controlCenter.dialog'), null, 'the dialog closes after the server said yes');
+    // 2. Open checks: they are listed with their counts, and the server's reason (10 characters) is asked for.
+    sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [{ code: 'unpaid_receipts', count: 6, message: 'Receipts are still unpaid' }, { code: 'new_server_check', count: 2, message: 'A check this screen does not know' }] });
+    await sandbox.closeControlCenterMonth();
+    dialog = dialogHtml();
+    assert.ok(dialog.includes('<span>Receipts are still unpaid</span><strong>6</strong>') && dialog.includes('<span>A check this screen does not know</span><strong>2</strong>'));
+    assert.ok(dialog.includes('Reason for closing with open items') && dialog.includes('At least 10 characters. Recorded in the audit log.') && / disabled>Close August 2026</.test(dialog), 'the confirming button waits for the reason');
+    const confirm = { disabled: true }, problem = { textContent: '', hidden: true };
+    Object.assign(fields, { 'control-center-dialog-confirm': confirm, 'control-center-dialog-error': problem, 'control-center-dialog-reason': { value: 'too short' } });
+    sandbox.controlCenterDialogTyped();
+    assert.equal(confirm.disabled, true);
+    await sandbox.confirmControlCenterDialog();
+    assert.equal(sent.length, 0, 'nothing is sent with a short reason');
+    assert.ok(problem.textContent.includes('at least 10 characters') && problem.hidden === false);
+    fields['control-center-dialog-reason'].value = '  Leftover test receipts, checked by hand  ';
+    sandbox.controlCenterDialogTyped();
+    assert.equal(confirm.disabled, false);
+    // The server refuses: the dialog stays, with the reason still typed and the refusal shown.
+    sandbox.apiCloseFinancialPeriod = async () => { throw Object.assign(new Error('Month already closed'), { status: 409 }); };
+    await sandbox.confirmControlCenterDialog();
+    assert.ok(run('_controlCenter.dialog') && problem.textContent === 'Month already closed' && confirm.disabled === false);
+    sandbox.apiCloseFinancialPeriod = async (period, reason) => { sent.push(['close', period, reason]); return { status: 'closed' }; };
+    await sandbox.confirmControlCenterDialog();
+    assert.deepEqual(sent.pop(), ['close', '2026-08', 'Leftover test receipts, checked by hand']);
+    // Escape closes it without sending anything; Tab from the last stop goes back to the first.
+    await sandbox.closeControlCenterMonth();
+    let removed = 0, focused = '';
+    const stops = [{ focus() { focused = 'first'; } }, { focus() { focused = 'last'; } }];
+    fields['control-center-dialog'] = { remove() { removed += 1; }, querySelectorAll: () => stops };
+    sandbox.document.activeElement = stops[1];
+    sandbox.controlCenterDialogKeydown({ key: 'Tab', shiftKey: false, preventDefault() {} });
+    assert.equal(focused, 'first', 'the keyboard stays inside the dialog');
+    sandbox.controlCenterDialogKeydown({ key: 'Escape', preventDefault() {} });
+    assert.ok(run('_controlCenter.dialog') === null && removed === 1 && sent.length === 0);
+    delete fields['control-center-dialog'];
+    // 3. Unlock: always asks for the reason.
+    sandbox.unlockControlCenterMonth('2026-07');
+    dialog = dialogHtml();
+    assert.ok(dialog.includes('Unlock July 2026?') && dialog.includes('Reason for unlocking') && / disabled>Unlock July 2026</.test(dialog), words(dialog));
+    fields['control-center-dialog-reason'].value = 'short';
+    await sandbox.confirmControlCenterDialog();
+    assert.equal(sent.length, 0);
+    fields['control-center-dialog-reason'].value = 'Correct a receipt entered twice';
+    await sandbox.confirmControlCenterDialog();
+    assert.deepEqual(sent.pop(), ['unlock', '2026-07', 'Correct a receipt entered twice']);
+    assert.equal(notes[notes.length - 1].title, 'Month unlocked');
+    // The month check is drawn on the screen for the month it read, and hides when another month is chosen.
+    await sandbox.previewControlCenterMonth();
+    run("_controlCenter.period = '2026-08'; _controlCenter.operations = { backup: {}, monitoring: {}, financialPeriods: [] };");
+    assert.ok(String(sandbox.renderControlCenterView()).includes('data-month-check="2026-08"'));
+    sandbox.controlCenterSetPeriod('2026-07');
+    assert.ok(!String(sandbox.renderControlCenterView()).includes('data-month-check'));
   });
   await test('audit export pages by the last row cursor and a failed page downloads nothing (n=7)', async () => {
     const { sandbox } = loadBrowserSource();
@@ -2056,64 +2336,73 @@ async function main() {
     const text = sandbox.metaAdsFormatMoney(125000, 'USD');
     assert.ok(text.includes('1,250.00') && !text.includes('1.250,00'), text);
   });
-  await test('r5 MGR n=18: the month-close prompt, the month check and the Control Center panels speak Arabic', async () => {
-    const { sandbox, state, run } = controlCenterFixture();
+  await test('r5 MGR n=18: the month-close dialog, the month check and the Control Center panels speak Arabic', async () => {
+    const { sandbox, state, run, dialogHtml, words } = controlCenterFixture();
     state.language = 'ar';
+    state.serverMode = true;
     sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
       { code: 'unpaid_receipts', count: 12, message: 'Receipts are still unpaid' },
       { code: 'ads_need_setup', count: 3, message: 'Ads still need customer, amount, or payment setup' },
       { code: 'ads_still_running', count: 1, message: 'Ads from this month are still running (not stopped or completed)' }] });
-    let prompted = '';
-    let alerted = '';
-    sandbox.window.prompt = text => { prompted = text; return ''; };
-    sandbox.window.alert = text => { alerted = text; };
     sandbox.document.getElementById = id => (id === 'control-center-period' ? { value: '2026-08' } : null);
+    // Redesign M4: the app's own dialog and on-screen lines replace the browser's prompt and alert boxes.
+    sandbox.window.prompt = () => { throw new Error('the browser prompt box is gone'); };
+    sandbox.window.alert = () => { throw new Error('the browser alert box is gone'); };
+    sandbox.window.confirm = () => { throw new Error('the browser confirm box is gone'); };
     await sandbox.closeControlCenterMonth();
-    assert.ok(prompted.includes('(12)') && !/[A-Za-z]{3,}/.test(prompted), prompted);
+    const dialog = dialogHtml();
+    assert.ok(dialog.includes('<strong>12</strong>') && dialog.includes('وصولات لا تزال غير مدفوعة') && !/[A-Za-z]{3,}/.test(words(dialog)), words(dialog));
     await sandbox.previewControlCenterMonth();
-    assert.ok(alerted.includes('(3)') && !/[A-Za-z]{3,}/.test(alerted), alerted);
+    const check = String(sandbox.renderControlCenterCheck(run('_controlCenter.check')));
+    assert.ok(check.includes('<bdi>3</bdi>') && check.includes('إعلانات تحتاج استكمال العميل أو المبلغ أو الدفع') && !/[A-Za-z]{3,}/.test(words(check)), words(check));
     assert.equal(sandbox.controlCenterTimestamp(0), 'أبداً');
-    state.serverMode = true;
-    run(`_controlCenter.error = ''; _controlCenter.operations = { backup: {}, monitoring: { recent_error_rate: 0.3, recent_sample_size: 100, response_ms_p95: 5000, total_requests: 100 },
+    run(`_controlCenter.error = ''; _controlCenter.tab = 'system'; _controlCenter.operations = { backup: {}, monitoring: { recent_error_rate: 0.3, recent_sample_size: 100, response_ms_p95: 5000, total_requests: 100 },
       setupTasks: ['Enable encrypted daily backups', 'Connect an operations alert webhook'] }; _controlCenter.meta = { webhookConfigured: false };
       _planManager.loadedAt = Date.now(); _planManager.plans = [{ id: 'p1', name: 'P', nameAr: 'خ', serviceIds: ['ad_maker'], priceMinor: 100, durationDays: 30 }];`);
     const html = String(sandbox.renderControlCenterView());
-    for (const english of ['Meta instant notifications need setup', 'Server errors need attention', 'Server responses are slow', 'Enable encrypted daily backups',
-      'Connect an operations alert webhook', 'This protection needs one server setting', '>Never<', 'Save all plans', '>Reload<', 'Subscription plans &', '>Days<', 'Add a bundle']) {
+    for (const english of ['Instant Meta notifications are not set up yet', 'The server is reporting errors', 'The server is answering slowly', 'Automatic encrypted backups are off',
+      'Operations alerts are not connected', 'Enable encrypted daily backups', 'Connect an operations alert webhook', 'This protection needs one server setting', 'Show technical steps',
+      'Live connections', 'Setup tasks', 'Encrypted backup', 'Needs setup', '>Never<', 'Save all plans', '>Reload<', 'Subscription plans &', '>Days<', 'Add a bundle', 'System and plans', '>Today<', '>Refresh<']) {
       assert.ok(!html.includes(english), english);
     }
-    assert.ok(html.includes('فعّل النسخ الاحتياطي اليومي المشفّر'));
+    assert.ok(html.includes('فعّل النسخ الاحتياطي اليومي المشفّر') && html.includes('النسخ الاحتياطي المشفّر التلقائي متوقف.'), 'plain Arabic first, the server sentence in Arabic behind the technical steps');
+    // The Today tab in Arabic: no English sentence on the screen (addresses and codes aside).
+    run("_controlCenter.tab = 'today'; _controlCenter.check = null;");
+    const today = words(sandbox.renderControlCenterView());
+    for (const english of ['Needs you', 'Money at a glance', 'Month close', 'Check month', 'Close month', 'Nothing needs you', 'Collected this month', 'Owed by customers', 'Known gross profit', 'To collect on deliveries', 'Figures are live', 'Albayan Manager', 'Deliveries', 'Services', 'is still open', 'Team desk']) {
+      assert.ok(!today.includes(english), english);
+    }
     state.language = 'en';
   });
   await test('R2 clothes-operations-1: the month check names open deliveries and cash still with drivers, in Arabic too', async () => {
-    const { sandbox, state } = controlCenterFixture();
+    const { sandbox, state, run, words } = controlCenterFixture();
     sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
       { code: 'deliveries_open', count: 2, message: 'Delivery jobs from this month are still open' },
       { code: 'driver_cash_not_handed_over', count: 1, message: "Drivers still hold cash collected for this month's deliveries" }] });
-    let alerted = '';
-    sandbox.window.alert = text => { alerted = text; };
     sandbox.document.getElementById = id => (id === 'control-center-period' ? { value: '2026-08' } : null);
+    const checked = async () => { await sandbox.previewControlCenterMonth(); return String(sandbox.renderControlCenterCheck(run('_controlCenter.check'))); };
     state.language = 'ar';
-    await sandbox.previewControlCenterMonth();
-    assert.ok(alerted.includes('مهام توصيل من هذا الشهر لا تزال مفتوحة (2)') && alerted.includes('(1)') && !/[A-Za-z]{3,}/.test(alerted),
-      `before: the server's English - ${alerted}`);
+    let check = await checked();
+    assert.ok(/<bdi>2<\/bdi><\/span><span class="management-attention-text"><strong>مهام توصيل من هذا الشهر لا تزال مفتوحة</.test(check) && check.includes('<bdi>1</bdi>') && !/[A-Za-z]{3,}/.test(words(check)),
+      `before: the server's English - ${words(check)}`);
     state.language = 'en';
-    await sandbox.previewControlCenterMonth();
-    assert.ok(alerted.includes('Delivery jobs from this month are still open (2)')
-      && alerted.includes("Drivers still hold cash collected for this month's deliveries (1)"), alerted);
+    check = await checked();
+    assert.ok(/<bdi>2<\/bdi><\/span><span class="management-attention-text"><strong>Delivery jobs from this month are still open</.test(check)
+      && /<bdi>1<\/bdi><\/span><span class="management-attention-text"><strong>Drivers still hold cash collected for this month's deliveries</.test(check), words(check));
+    // Each check is a line with a button that opens its list; a check that found nothing reads as clear.
+    assert.ok((check.match(/onclick="controlCenterOpenDeliveries\(\)"/g) || []).length === 2 && check.includes('No receipts are unpaid') && check.includes('No ads need setup'), words(check));
   });
   await test('R6 ads-lifecycle-1: the month check names every ad still running, not only Meta ads, in English and Arabic', async () => {
-    const { sandbox, state } = controlCenterFixture();
+    const { sandbox, state, run, words } = controlCenterFixture();
     sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
       { code: 'ads_still_running', count: 2, message: 'Ads from this month are still running (not stopped or completed)' }] });
-    let alerted = '';
-    sandbox.window.alert = text => { alerted = text; };
     sandbox.document.getElementById = id => (id === 'control-center-period' ? { value: '2026-08' } : null);
-    await sandbox.previewControlCenterMonth();
-    assert.ok(alerted.includes('Ads from this month are still running (not stopped or completed) (2)') && !alerted.includes('Meta ads'), `before: "Meta ads ..." - ${alerted}`);
+    const checked = async () => { await sandbox.previewControlCenterMonth(); return String(sandbox.renderControlCenterCheck(run('_controlCenter.check'))); };
+    let check = await checked();
+    assert.ok(/<bdi>2<\/bdi><\/span><span class="management-attention-text"><strong>Ads from this month are still running \(not stopped or completed\)</.test(check) && !check.includes('Meta ads'), `before: "Meta ads ..." - ${words(check)}`);
     state.language = 'ar';
-    await sandbox.previewControlCenterMonth();
-    assert.ok(alerted.includes('إعلانات من هذا الشهر لا تزال تعمل (لم تُوقف ولم تكتمل) (2)') && !alerted.includes('ميتا') && !/[A-Za-z]{3,}/.test(alerted), alerted);
+    check = await checked();
+    assert.ok(/<bdi>2<\/bdi><\/span><span class="management-attention-text"><strong>إعلانات من هذا الشهر لا تزال تعمل \(لم تُوقف ولم تكتمل\)</.test(check) && !check.includes('ميتا') && !/[A-Za-z]{3,}/.test(words(check)), words(check));
     state.language = 'en';
   });
   await test('r5 MGR n=11 follow-up: the driver job list and the collected-payment chips show 107.25 LYD, not a rounded 107', async () => {

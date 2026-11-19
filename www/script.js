@@ -596,7 +596,6 @@ function closeTopMobileSurface() {
 
 function getMobileLandingView() {
   if (typeof state === 'undefined' || !state.currentUser) return '';
-  if (typeof isAdminRole === 'function' && isAdminRole(state.currentUser.role)) return 'services-hub';
   if (typeof getPostLoginLandingViewForUser === 'function') {
     return getPostLoginLandingViewForUser(state.currentUser);
   }
@@ -8532,8 +8531,7 @@ function getAlbayanManagerLandingViewForUser(user) {
 function getPostLoginLandingViewForUser(user) {
   // The studio door leads only into the studio — admins included.
   if (IS_STUDIO_SHELL) return 'ads-studio';
-  const roleLower = String(user?.role || '').toLowerCase();
-  if (roleLower === 'admin') return 'services-hub';
+  // Everyone lands on the first Manager screen they may open; for an Admin that is the owner dashboard (control-center).
   return getAlbayanManagerLandingViewForUser(user);
 }
 
@@ -13993,7 +13991,8 @@ const AUTHENTICATED_DIALOG_IDS = Object.freeze([
   'customer-ad-coverage-modal', 'company-coverage-receipt-picker', 'collect-receipt-modal',
   'new-receipt-chooser', 'destroyed-receipt-dialog', 'edit-history-modal', 'meta-history-modal',
   'meta-ad-preview-modal', 'meta-insights-modal', 'meta-ads-modal', 'stop-ad-modal',
-  'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning'
+  'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning',
+  'control-center-dialog'
 ]);
 
 // Typed searches and record filters must not greet the next person on this device.
@@ -16554,7 +16553,8 @@ function getWorkspaceViewTitle(view = state.currentView) {
     audit: 'auditLogs',
     settings: 'settings',
     'delivery-dashboard': 'dashboard',
-    'clothes-system': 'clothesSystem'
+    'clothes-system': 'clothesSystem',
+    'control-center': 'controlCenter'
   };
   const custom = {
     more: state.language === 'ar' ? 'المزيد' : 'More',
@@ -16631,7 +16631,7 @@ function renderWorkspaceTopbar() {
           <div class="text-[11px] font-bold uppercase tracking-[0.16em] text-indigo-500">${isAr ? 'مساحة العمل' : 'Workspace'}</div>
           <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
         </div>
-        <button type="button" onclick="toggleCommandPalette()" class="workspace-global-search ml-auto" aria-haspopup="dialog" aria-label="${isAr ? 'البحث الذكي في كل النظام' : 'Smart search across the system'}">
+        <button type="button" onclick="toggleCommandPalette()" class="workspace-global-search ml-auto" aria-haspopup="dialog">
           <i data-lucide="search" class="h-4 w-4 text-indigo-500"></i>
           <span class="truncate">${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}</span>
           <kbd>Ctrl K</kbd>
@@ -19408,19 +19408,12 @@ function _getCollectionTargetCached(item) {
   return target;
 }
 
-// logOnly=true (search keystrokes): updateDeliveriesViewFiltered swaps only #delivery-log-results,
-// so the stats tiles and driver panel (the heavy, search-independent part) are skipped.
-function renderDeliveriesView(logOnly) {
-  const logOnlyPass = logOnly === true;
+// The delivery jobs and their totals. The Deliveries screen and the owner dashboard read these same sums.
+function getDeliveryRows() {
   _deliveryCollectionTargetCache.clear();
   _deliveryUsageIndex = null;
-  const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
-  const allReceipts = getVisibleRecords(state.receipts);
-  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
-  const deliveryCustomersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
-
-  const deliveryReceipts = allReceipts
+  return getVisibleRecords(state.receipts)
     .filter(r => {
       if (!r) return false;
       const ds = String(r.deliveryStatus || '').trim();
@@ -19436,15 +19429,13 @@ function renderDeliveriesView(logOnly) {
       amountLocal: Number(r.amountLocal || 0) || 0,
       amountUSD: Number(r.amountUSD || 0) || 0
     }));
+}
 
-  // Skipped on log-only passes (see above); their markup below is guarded the same way.
-  let stats = null;
-  let driverPerformance = [];
-  if (!logOnlyPass) {
+function getDeliveryStats(deliveryReceipts) {
   const deliveredRows = deliveryReceipts.filter(d => d.deliveryStatus === 'Delivered');
   const heldRows = deliveredRows.filter(d => !_isReceivedInOffice(d) && _getCollectedCashLocal(d) > 0);
 
-  stats = {
+  return {
     pendingDelivery: deliveryReceipts.filter(d => d.deliveryStatus === 'Needs Delivery').length,
     pendingAssignment: deliveryReceipts.filter(d => !d.deliveryPersonId && d.deliveryStatus !== 'Canceled' && d.deliveryStatus !== 'Delivered').length,
     inProgress: deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress').length,
@@ -19466,6 +19457,22 @@ function renderDeliveriesView(logOnly) {
     }, 0),
     feeVarianceLYD: deliveredRows.reduce((sum, d) => sum + (d.feeDifferenceStatus ? (Number(d.feeDiff) || 0) : 0), 0),
   };
+}
+
+// logOnly=true (search keystrokes): updateDeliveriesViewFiltered swaps only #delivery-log-results,
+// so the stats tiles and driver panel (the heavy, search-independent part) are skipped.
+function renderDeliveriesView(logOnly) {
+  const logOnlyPass = logOnly === true;
+  const isAr = state.language === 'ar';
+  const deliveryReceipts = getDeliveryRows();
+  const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
+  const deliveryCustomersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
+
+  // Skipped on log-only passes (see above); their markup below is guarded the same way.
+  let stats = null;
+  let driverPerformance = [];
+  if (!logOnlyPass) {
+  stats = getDeliveryStats(deliveryReceipts);
 
   driverPerformance = deliveryUsers.map(driver => {
     const driverDeliveries = deliveryReceipts.filter(d => String(d.deliveryPersonId || '') === String(driver.id || ''));
@@ -20800,6 +20807,11 @@ function getAdReconciliationDisplayState(ad) {
   };
 }
 
+function isAdReconciliationDone(ad) {
+  const st = getAdReconciliationDisplayState(ad);
+  return st.informedApplies || ((st.finalSpendFrozen || st.hasSavedSpend) && st.remainingUSD <= 0.005);
+}
+
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
   // Maps instead of a find() per card (3,000 finished ads x 2,000 customers was
@@ -20812,8 +20824,7 @@ function renderReconciliationView() {
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
     .map(ad => {
-      const st = getAdReconciliationDisplayState(ad);
-      done.set(ad, st.informedApplies || ((st.finalSpendFrozen || st.hasSavedSpend) && st.remainingUSD <= 0.005));
+      done.set(ad, isAdReconciliationDone(ad));
       return ad;
     })
     .sort((a, b) => (done.get(a) - done.get(b))
@@ -22670,7 +22681,7 @@ function renderPlansView() {
       ${body}
       ${isCurrentUserAdmin() && isServerModeEnabled() ? `
         <p class="mt-5 text-center text-xs text-slate-500 dark:text-slate-400">
-          ${hubText('Prices are set in Control Center → Plan manager.', 'تُضبط الأسعار من مركز التحكم ← إدارة الباقات.')}
+          ${hubText('Prices are set in Control Center → System and plans.', 'تُضبط الأسعار من مركز التحكم ← النظام والباقات.')}
         </p>` : ''}
     </div>
   `;
@@ -23425,7 +23436,7 @@ function renderManagerTabBar() {
   const delivery = isDeliveryRole(state.currentUser?.role);
   const lead = delivery
     ? [{ id: 'delivery-dashboard', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'deliveries', icon: 'truck', label: isAr ? 'التوصيل' : 'Delivery' }]
-    : [{ id: 'analytics', icon: 'house', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' }];
+    : [isCurrentUserAdmin() ? { id: 'control-center', icon: 'gauge', label: isAr ? 'اللوحة' : 'Dashboard' } : { id: 'analytics', icon: 'house', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' }];
   const trail = delivery ? [] : [{ id: 'customers', icon: 'users', label: isAr ? 'العملاء' : 'Customers' }];
   const canAddReceipt = !delivery && currentUserHasPermission('receipts', 'add');
   const item = (entry) => `
@@ -23511,8 +23522,8 @@ function renderMoreView() {
 
 // ---------- Home hero (top of the analytics view) ----------
 
-function renderManagerHomeHero(receipts, ads, canViewFinancials) {
-  const isAr = state.language === 'ar';
+// The Home card's "Collected this month" sums; the owner dashboard shows the same figure from here.
+function shellMonthCollected(receipts) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
   const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
@@ -23528,6 +23539,12 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
+  return { now, monthStart, inWindow, revenueReceipts, collectedLyd, collectedUsd, pct };
+}
+
+function renderManagerHomeHero(receipts, ads, canViewFinancials) {
+  const isAr = state.language === 'ar';
+  const { now, monthStart, inWindow, revenueReceipts, collectedLyd, collectedUsd, pct } = shellMonthCollected(receipts);
   // Live receipts only, like the analytics Receipts card.
   const receiptsThisMonth = revenueReceipts.filter(r => !['canceled', 'lost'].includes(getReceiptPaymentState(r)) && inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
   // Same month rule as the analytics breakdown (start date first) and the
@@ -24068,23 +24085,6 @@ function shellAdSummaryRow(ad, meta = {}) {
     media,
     extra: shellAdBudgetPreview(ad, isAr)
   }, 10);
-}
-
-function shellDeliverySummaryRow(item, meta = {}) {
-  const isAr = state.language === 'ar';
-  const id = String(item?.id || '');
-  const name = meta.customer?.name || (isAr ? 'غير معروف' : 'Unknown');
-  const status = String(item?.deliveryStatus || 'Needs Delivery');
-  const tones = { 'Needs Delivery': 'amber', 'In Progress': 'blue', 'Delivered': 'emerald', 'Canceled': 'rose' };
-  const subParts = [];
-  subParts.push(meta.deliveryPerson?.name ? shellEsc(meta.deliveryPerson.name) : (isAr ? 'غير مُعيَّن' : 'Unassigned'));
-  if (item?.createdAt || item?.date) subParts.push(shellEsc(formatDateShort(item.createdAt || item.date)));
-  return shellTableSummaryRow('deliveries', id, {
-    avatar: shellAvatar(shellInitial(name), tones[status] || 'slate'),
-    title: shellEsc(name),
-    sub: subParts.join(' · '),
-    trailing: `<span class="text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(Number(meta.debtLocal) || 0))}</span>${shellPill(shellEsc(trStatus(status)), tones[status] || 'slate')}`
-  }, 7);
 }
 
 function shellReceiptRow(receipt, customer, card, meta = {}) {
@@ -45377,7 +45377,7 @@ async function init() {
       upsertCurrentUserIntoUsers();
       // Restore last page for Admin. Non-admins always land inside Albayan Manager (secret ideas hidden).
       if (String(me.role || '').toLowerCase() === 'admin') {
-        state.currentView = String(state.currentView || '').trim() || 'services-hub';
+        state.currentView = String(state.currentView || '').trim() || 'control-center';
       } else {
         state.currentView = getPostLoginLandingViewForUser(me);
       }
@@ -45481,7 +45481,7 @@ async function init() {
     // If a non-admin session exists, always land inside Albayan Manager (hide platform hub for now).
     if (state.currentUser) {
       if (String(state.currentUser.role || '').toLowerCase() === 'admin') {
-        state.currentView = String(state.currentView || '').trim() || 'services-hub';
+        state.currentView = String(state.currentView || '').trim() || 'control-center';
       } else {
         state.currentView = getPostLoginLandingViewForUser(state.currentUser);
       }

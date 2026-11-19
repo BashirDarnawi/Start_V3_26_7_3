@@ -217,3 +217,97 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
   .management-page-buttons button { min-width: 38px; padding-inline: 7px; }
   .management-page-buttons > span { padding-inline: 4px; font-size: 10px; }
 }
+
+/* Owner dashboard (the Control Center): "Needs you today", money at a glance, month close, doors,
+   and the "System and plans" tab. Presentation only; every number and button comes from
+   src/12b-control-center.js. */
+.control-workspace .management-hero-side { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 100%; }
+.management-tabs { display: inline-flex; gap: 4px; max-width: 100%; padding: 4px; border: 1px solid var(--ui-line); border-radius: 15px; background: var(--ui-surface); }
+.management-tab { padding: 8px 14px; border-radius: 11px; color: var(--ui-muted); font-size: 12px; font-weight: 650; line-height: 1.4; }
+.management-tab:hover { color: var(--ui-ink); }
+.management-tab.is-active { color: var(--ui-surface); background: var(--ui-ink); }
+.management-button:disabled { opacity: .5; cursor: not-allowed; }
+.management-chip { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 5px 10px; border-radius: 30px; color: var(--ui-muted); background: var(--ui-surface-soft); font-size: 11px; font-weight: 650; line-height: 1.5; }
+.management-chip > span:first-child { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.management-chip.is-ok, .management-attention-count.is-ok { color: var(--ui-success-text); background: #dcf5ea; }
+.management-chip.is-warning, .management-attention-count.is-warning { color: var(--ui-warning-text); background: #fdf1d7; }
+.management-chip.is-danger, .management-attention-count.is-danger { color: var(--ui-danger-text); background: #ffe9ec; }
+.management-attention-count.is-info { color: var(--ui-accent); background: var(--ui-accent-soft); }
+html.dark :is(.management-chip, .management-attention-count).is-ok { background: #17382d; }
+html.dark :is(.management-chip, .management-attention-count).is-warning { background: #443516; }
+html.dark :is(.management-chip, .management-attention-count).is-danger { background: #43202b; }
+.management-note { margin: 10px 0 0; color: var(--ui-muted); font-size: 12px; line-height: 1.7; }
+.management-note.is-urgent { color: var(--ui-danger-text); font-weight: 650; }
+.management-alert { padding: 12px 14px; border: 1px solid #f5b5c0; border-radius: 14px; background: #fff1f3; color: var(--ui-danger-text); font-size: 13px; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+html.dark .management-alert { border-color: #6b2a3a; background: #3a1b25; }
+.management-card > .management-alert { margin-block: 12px; }
+.management-alert details, .management-setup-task details { margin-block-start: 6px; }
+.management-alert summary, .management-setup-task summary { display: inline-flex; align-items: center; color: var(--ui-accent); font-size: 12px; font-weight: 650; cursor: pointer; }
+.management-alert details p, .management-setup-task details p { margin: 6px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--ui-surface-soft); color: var(--ui-muted); font-size: 12px; font-weight: 500; line-height: 1.7; overflow-wrap: anywhere; }
+.management-priority-panel > h3.management-eyebrow { margin-block: 20px 0; }
+.management-priority-panel > .management-section-heading + h3.management-eyebrow { margin-block-start: 0; }
+.management-attention-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.management-attention-list > li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px 14px; padding-block: 14px; border-block-end: 1px solid var(--ui-line); }
+.management-attention-list:last-of-type > li:last-child { border-block-end: 0; padding-block-end: 0; }
+.management-attention-count { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-width: 34px; height: 34px; padding-inline: 7px; border-radius: 11px; font-size: 13px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.management-attention-text { display: grid; gap: 3px; min-width: 0; }
+.management-attention-text strong { color: var(--ui-ink); font-size: 13px; font-weight: 700; line-height: 1.5; }
+.management-attention-text span { color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
+.management-attention-list .management-button { max-width: 42vw; }
+.management-attention-note { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-block-start: 16px; padding: 12px 14px; border-radius: 14px; background: var(--ui-surface-soft); color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
+.management-figures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.management-figure { display: grid; align-content: start; gap: 6px; padding: 15px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface); color: var(--ui-ink); text-align: start; }
+.management-figure:hover, .management-door:hover { border-color: var(--ui-accent); background: var(--ui-accent-soft); }
+.management-figure > span { color: var(--ui-muted); font-size: 12px; font-weight: 650; line-height: 1.5; }
+.management-figure > strong { font-size: clamp(16px, 1.3vw, 19px); line-height: 1.3; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.management-figure > small { color: var(--ui-muted); font-size: 11px; line-height: 1.55; }
+.management-month.is-due { border-inline-start: 4px solid #d97706; }
+.management-month > .management-chip { margin-block-end: 14px; }
+.management-check { margin-block-start: 16px; padding-block-start: 16px; border-block-start: 1px solid var(--ui-line); }
+.management-check h3 { color: var(--ui-ink); font-size: 13px; font-weight: 700; line-height: 1.5; }
+.management-check-totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-block: 12px 4px; }
+.management-check-totals > div { padding: 10px; border-radius: 12px; background: var(--ui-surface-soft); }
+.management-check-totals dt { color: var(--ui-muted); font-size: 11px; line-height: 1.5; }
+.management-check-totals dd { margin: 4px 0 0; color: var(--ui-ink); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.management-closed-periods > div > span strong { color: var(--ui-ink); }
+.management-doors { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 12px; }
+.management-door { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface); color: var(--ui-ink); text-align: start; }
+.management-door > svg:first-child { color: var(--ui-accent); }
+.management-door > span { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.management-door strong { font-size: 13px; font-weight: 700; line-height: 1.5; }
+.management-door small { color: var(--ui-muted); font-size: 11px; line-height: 1.5; }
+.management-door > svg:last-child { color: var(--ui-muted); }
+.management-system-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.management-system-layout > .management-setup { grid-column: 1 / -1; }
+.management-connection-list, .management-setup-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.management-connection-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding-block: 13px; border-block-start: 1px solid var(--ui-line); }
+.management-connection-list > li:first-child, .management-setup-task:first-child { border-block-start: 0; padding-block-start: 0; }
+.management-connection-list strong { flex: 1 1 140px; color: var(--ui-ink); font-size: 13px; }
+.management-connection-list small { color: var(--ui-muted); font-size: 11px; }
+.management-setup-task { padding-block: 14px; border-block-start: 1px solid var(--ui-line); }
+.management-setup-task > p { margin: 0; color: var(--ui-muted); font-size: 13px; line-height: 1.7; }
+.management-setup-task > p strong { color: var(--ui-ink); }
+.management-setup-task.is-urgent > p strong { color: var(--ui-danger-text); }
+/* The dashboard's confirmation dialog (month close, unlock) is mounted on <body>, outside the workspace. */
+.management-dialog-lead { margin: 0 0 14px; color: var(--ui-muted); font-size: 14px; line-height: 1.7; }
+.management-dialog-note { margin: 8px 0; color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
+.management-dialog-list { margin: 0 0 16px; padding: 4px 14px; border: 1px solid var(--ui-line); border-radius: 14px; background: var(--ui-surface-soft); list-style: none; }
+.management-dialog-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-block: 10px; border-block-start: 1px solid var(--ui-line); color: var(--ui-ink); font-size: 13px; line-height: 1.6; }
+.management-dialog-list li:first-child { border-block-start: 0; }
+.management-dialog-list strong { font-variant-numeric: tabular-nums; }
+.management-dialog-error { margin: 10px 0 0; color: var(--ui-danger-text); font-size: 13px; font-weight: 650; line-height: 1.6; }
+#control-center-dialog textarea { display: block; min-height: 88px; resize: vertical; }
+#control-center-dialog .management-button-row > button { min-height: 44px; }
+@media (max-width: 899px) {
+  .management-system-layout { grid-template-columns: minmax(0, 1fr); }
+  .control-workspace .management-hero-side { justify-content: flex-start; }
+}
+@media (max-width: 599px) {
+  .management-tabs { width: 100%; }
+  .management-tab { flex: 1; }
+  .management-figures, .management-check-totals { grid-template-columns: minmax(0, 1fr); }
+  .management-attention-list > li { gap: 10px; }
+  .management-attention-list .management-button { padding-inline: 11px; }
+  .management-doors { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .management-door { padding: 12px; gap: 9px; }
+}

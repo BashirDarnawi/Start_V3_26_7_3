@@ -102,7 +102,7 @@ function renderManagerTabBar() {
   const delivery = isDeliveryRole(state.currentUser?.role);
   const lead = delivery
     ? [{ id: 'delivery-dashboard', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'deliveries', icon: 'truck', label: isAr ? 'التوصيل' : 'Delivery' }]
-    : [{ id: 'analytics', icon: 'house', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' }];
+    : [isCurrentUserAdmin() ? { id: 'control-center', icon: 'gauge', label: isAr ? 'اللوحة' : 'Dashboard' } : { id: 'analytics', icon: 'house', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' }];
   const trail = delivery ? [] : [{ id: 'customers', icon: 'users', label: isAr ? 'العملاء' : 'Customers' }];
   const canAddReceipt = !delivery && currentUserHasPermission('receipts', 'add');
   const item = (entry) => `
@@ -188,8 +188,8 @@ function renderMoreView() {
 
 // ---------- Home hero (top of the analytics view) ----------
 
-function renderManagerHomeHero(receipts, ads, canViewFinancials) {
-  const isAr = state.language === 'ar';
+// The Home card's "Collected this month" sums; the owner dashboard shows the same figure from here.
+function shellMonthCollected(receipts) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
   const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
@@ -205,6 +205,12 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
+  return { now, monthStart, inWindow, revenueReceipts, collectedLyd, collectedUsd, pct };
+}
+
+function renderManagerHomeHero(receipts, ads, canViewFinancials) {
+  const isAr = state.language === 'ar';
+  const { now, monthStart, inWindow, revenueReceipts, collectedLyd, collectedUsd, pct } = shellMonthCollected(receipts);
   // Live receipts only, like the analytics Receipts card.
   const receiptsThisMonth = revenueReceipts.filter(r => !['canceled', 'lost'].includes(getReceiptPaymentState(r)) && inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
   // Same month rule as the analytics breakdown (start date first) and the
@@ -745,23 +751,6 @@ function shellAdSummaryRow(ad, meta = {}) {
     media,
     extra: shellAdBudgetPreview(ad, isAr)
   }, 10);
-}
-
-function shellDeliverySummaryRow(item, meta = {}) {
-  const isAr = state.language === 'ar';
-  const id = String(item?.id || '');
-  const name = meta.customer?.name || (isAr ? 'غير معروف' : 'Unknown');
-  const status = String(item?.deliveryStatus || 'Needs Delivery');
-  const tones = { 'Needs Delivery': 'amber', 'In Progress': 'blue', 'Delivered': 'emerald', 'Canceled': 'rose' };
-  const subParts = [];
-  subParts.push(meta.deliveryPerson?.name ? shellEsc(meta.deliveryPerson.name) : (isAr ? 'غير مُعيَّن' : 'Unassigned'));
-  if (item?.createdAt || item?.date) subParts.push(shellEsc(formatDateShort(item.createdAt || item.date)));
-  return shellTableSummaryRow('deliveries', id, {
-    avatar: shellAvatar(shellInitial(name), tones[status] || 'slate'),
-    title: shellEsc(name),
-    sub: subParts.join(' · '),
-    trailing: `<span class="text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(Number(meta.debtLocal) || 0))}</span>${shellPill(shellEsc(trStatus(status)), tones[status] || 'slate')}`
-  }, 7);
 }
 
 function shellReceiptRow(receipt, customer, card, meta = {}) {

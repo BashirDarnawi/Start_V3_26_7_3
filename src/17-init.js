@@ -248,7 +248,7 @@ async function init() {
       upsertCurrentUserIntoUsers();
       // Restore last page for Admin. Non-admins always land inside Albayan Manager (secret ideas hidden).
       if (String(me.role || '').toLowerCase() === 'admin') {
-        state.currentView = String(state.currentView || '').trim() || 'services-hub';
+        state.currentView = String(state.currentView || '').trim() || 'control-center';
       } else {
         state.currentView = getPostLoginLandingViewForUser(me);
       }
@@ -352,7 +352,7 @@ async function init() {
     // If a non-admin session exists, always land inside Albayan Manager (hide platform hub for now).
     if (state.currentUser) {
       if (String(state.currentUser.role || '').toLowerCase() === 'admin') {
-        state.currentView = String(state.currentView || '').trim() || 'services-hub';
+        state.currentView = String(state.currentView || '').trim() || 'control-center';
       } else {
         state.currentView = getPostLoginLandingViewForUser(state.currentUser);
       }
