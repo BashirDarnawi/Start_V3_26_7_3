@@ -276,8 +276,10 @@ function openMetaAdsConnectionModalNow(adId = '') {
   // A new opening: an ads reply still running for an earlier one is dropped.
   metaAdsUi.adsSeq = (Number(metaAdsUi.adsSeq) || 0) + 1;
   metaAdsUi.open = true;
+  metaFbReset();
   metaAdsRenderModal();
   metaAdsLoadConnection();
+  metaFbLoad();
 }
 
 function metaAdsRenderModal() {
@@ -339,10 +341,11 @@ function metaAdsRenderModal() {
     ${metaAdsUi.error ? `<div role="alert" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${Security.escapeHtml(metaAdsUi.error)}</div>` : ''}
 
     ${!metaAdsUi.loading && status ? `<div class="mt-4 grid gap-3 sm:grid-cols-3">
-      <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">${isAr ? 'الاتصال' : 'Connection'}</div><div class="mt-1 font-bold ${configured ? 'text-emerald-600' : 'text-amber-600'}">${configured ? (isAr ? 'جاهز' : 'Ready') : (isAr ? 'يحتاج إعداد' : 'Setup needed')}</div></div>
+      <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">${isAr ? 'الاتصال' : 'Connection'}</div><div class="mt-1 font-bold ${configured ? 'text-emerald-600' : 'text-amber-600'}">${configured ? (isAr ? 'جاهز' : 'Ready') : (isAr ? 'يحتاج إعداد' : 'Setup needed')}</div>${metaFbSourceLabel(status.tokenSource, isAr) ? `<div class="mt-1 text-xs text-slate-500">${metaFbSourceLabel(status.tokenSource, isAr)}</div>` : ''}</div>
       <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><div class="text-xs text-slate-500">Meta Graph API</div><div class="mt-1 font-bold">${Security.escapeHtml(status.graphApiVersion || '—')}</div></div>
       <div class="rounded-xl border ${providerPaused ? 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/20' : 'border-slate-200 dark:border-slate-700'} p-3"><div class="text-xs text-slate-500">${isAr ? 'المزامنة التلقائية' : 'Automatic sync'}</div><div class="mt-1 font-bold ${providerPaused ? 'text-amber-700 dark:text-amber-300' : ''}">${providerPaused ? (isAr ? `متوقفة بأمان · إعادة المحاولة خلال ${retryMinutes} دقيقة` : `Paused safely · retry in ${retryMinutes} min`) : (status.backgroundSync ? `${Number(status.syncIntervalMinutes) || 15} ${isAr ? 'دقيقة' : 'minutes'}` : (isAr ? 'متوقفة' : 'Off'))}</div></div>
     </div>` : ''}
+    ${!metaAdsUi.loading && status ? metaFbConnectionCard(isAr, status) : ''}
 
     ${!metaAdsUi.loading && configured && providerPaused ? `<div role="status" class="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"><div class="flex items-start gap-2"><i data-lucide="shield-check" class="mt-0.5 h-5 w-5 shrink-0"></i><div><div class="font-black">${isAr ? 'Albayan يحمي اتصال Meta' : 'Albayan is protecting the Meta connection'}</div><div class="mt-1">${isAr ? `وصل الاستخدام إلى ${Number(providerState.usagePercent) || 0}٪، لذلك توقفت الطلبات مؤقتاً وستستأنف تلقائياً خلال حوالي ${retryMinutes} دقيقة. لا تحتاج إلى فعل شيء.` : `Usage reached ${Number(providerState.usagePercent) || 0}%, so requests are paused temporarily and will resume automatically in about ${retryMinutes} minute(s). You do not need to do anything.`}</div></div></div></div>` : ''}
 
@@ -358,7 +361,7 @@ function metaAdsRenderModal() {
       </div>
     </div>` : ''}
 
-    ${!metaAdsUi.loading && status && !configured ? `<div class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100"><div class="font-black">${isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'}</div><code class="mt-2 block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789</code><p class="mt-2">${isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'}</p></div>` : ''}
+    ${!metaAdsUi.loading && status && !configured ? `<div class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100"><div class="font-black">${isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'}</div><code class="mt-2 block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789</code><p class="mt-2">${isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'}${metaFbUi.status?.appReady && !metaFbIsPhoneApp() ? (isAr ? ' أو استخدم «الربط مع فيسبوك» في الأعلى.' : ' Or use Connect with Facebook above.') : ''}</p></div>` : ''}
 
     ${target ? `<div class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-800 dark:bg-indigo-950/20"><div class="text-xs font-bold text-indigo-600">${isAr ? 'إعلان Albayan المحدد' : 'Selected Albayan ad'}</div><div class="mt-1 font-black text-slate-800 dark:text-white">#${Security.escapeHtml(String(target.id))} · ${Security.escapeHtml(target.customerName || target.pageName || (isAr ? 'إعلان' : 'Ad'))}</div>${target.metaAdId ? `<div class="mt-2 text-sm text-slate-600 dark:text-slate-300">${isAr ? 'مرتبط بـ' : 'Linked to'}: <strong>${Security.escapeHtml(currentName)}</strong> (#${Security.escapeHtml(String(target.metaAdId))})</div><div class="mt-3 flex flex-wrap gap-2"><button type="button" onclick="metaAdsSyncCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white disabled:opacity-60"><i data-lucide="refresh-cw" class="h-4 w-4 ${metaAdsUi.busyAction === 'sync' ? 'animate-spin' : ''}"></i>${isAr ? 'مزامنة الآن' : 'Sync now'}</button><button type="button" onclick="metaAdsUnlinkCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl border border-rose-200 px-4 py-2 font-bold text-rose-600 disabled:opacity-60"><i data-lucide="unlink" class="h-4 w-4"></i>${isAr ? 'إلغاء الربط' : 'Unlink'}</button></div>` : `<div class="mt-2 text-sm text-slate-500">${isAr ? 'غير مرتبط حتى الآن.' : 'Not linked yet.'}</div>`}</div>` : `<div class="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200">${isAr ? 'لفتح الربط: أغلق هذه النافذة واضغط زر «ربط» الصغير بجانب إعلان Albayan.' : 'To link an ad: close this window and press the small Link button beside an Albayan ad.'}</div>`}
 
@@ -570,4 +573,295 @@ async function metaAdsSyncAllDue() {
     metaAdsUi.busyAction = '';
     metaAdsRenderModal();
   }
+}
+
+// ---------- Connect with Facebook (lazy card inside Meta Sync) ----------
+// The server signs in with Facebook Login for Business, makes a system-user key and keeps it encrypted.
+// The browser only ever sees facts (names, dates, permission names, ad-account ids), never a key.
+// Its own state, reset on every opening, so a second admin never sees the first one's choice or ticks.
+const metaFbUi = { status: null, loading: false, loadError: '', busy: '', error: '', ticks: null, pick: '', configDraft: '', editConfig: false, seq: 0 };
+
+const metaFbResultTexts = Object.freeze({
+  connected: ['Facebook is connected. Albayan now uses the new key.', 'تم ربط فيسبوك. يستخدم Albayan المفتاح الجديد الآن.'],
+  choose_system_user: ['Almost done: choose which robot account (system user) Albayan should use.', 'اقتربنا: اختر حساب الروبوت (مستخدم النظام) الذي يستخدمه Albayan.'],
+  cancelled: ['The Facebook sign-in was cancelled. Nothing changed.', 'تم إلغاء تسجيل الدخول إلى فيسبوك. لم يتغير شيء.'],
+  no_system_user: ['No system user was found in your Meta business. Create one in Meta Business Settings, give it the ad accounts and Pages, then press Connect again.', 'لم يُعثر على مستخدم نظام في نشاطك التجاري على Meta. أنشئ واحداً في إعدادات الأعمال على Meta وامنحه الحسابات الإعلانية والصفحات، ثم اضغط ربط مرة أخرى.'],
+  state_invalid: ['This sign-in is not valid any more. Press Connect with Facebook again.', 'تسجيل الدخول هذا لم يعد صالحاً. اضغط الربط مع فيسبوك مرة أخرى.'],
+  state_expired: ['The sign-in took too long and expired. Press Connect with Facebook again.', 'استغرق تسجيل الدخول وقتاً طويلاً وانتهت صلاحيته. اضغط الربط مع فيسبوك مرة أخرى.'],
+  not_admin: ['Only an Albayan admin can connect Facebook.', 'يمكن لمدير Albayan فقط ربط فيسبوك.'],
+  exchange_failed: ['Facebook did not accept the sign-in. Press Connect with Facebook again.', 'لم يقبل فيسبوك تسجيل الدخول. اضغط الربط مع فيسبوك مرة أخرى.'],
+  meta_error: ['Meta did not answer as expected. Try again in a few minutes.', 'لم تستجب Meta كما هو متوقع. حاول مرة أخرى بعد بضع دقائق.'],
+  missing_permissions: ['Some required permissions were not granted. Press Connect again and allow every permission.', 'لم تُمنح بعض الصلاحيات المطلوبة. اضغط الربط مرة أخرى واسمح بكل الصلاحيات.'],
+  not_system_user: ['Meta returned a key that is not a system-user key. Nothing was saved.', 'أعادت Meta مفتاحاً ليس مفتاح مستخدم نظام. لم يُحفظ شيء.'],
+  app_mismatch: ['The key belongs to a different Meta app. Check ALBAYAN_META_APP_ID. Nothing was saved.', 'المفتاح يخص تطبيق Meta آخر. تحقق من ALBAYAN_META_APP_ID. لم يُحفظ شيء.'],
+  token_invalid: ['Meta says the key is not valid. Press Connect with Facebook again.', 'تقول Meta إن المفتاح غير صالح. اضغط الربط مع فيسبوك مرة أخرى.'],
+  disconnected: ['Facebook was disconnected. Albayan uses the hosting key again, if one is set.', 'تم فصل فيسبوك. يعود Albayan إلى مفتاح الاستضافة إن وُجد.'],
+  app_not_ready: ['Connect is not set up on the server yet (Meta app id and app secret).', 'الربط غير مُعدّ على السيرفر بعد (معرّف تطبيق Meta والسر).'],
+  config_missing: ['The Facebook Login configuration id is missing or not valid (5 to 25 digits).', 'معرّف إعداد تسجيل الدخول إلى فيسبوك غير موجود أو غير صالح (من 5 إلى 25 رقماً).'],
+  base_url_invalid: ['The public address of Albayan (ALBAYAN_PUBLIC_BASE_URL) must start with https://.', 'يجب أن يبدأ العنوان العام لـ Albayan (ALBAYAN_PUBLIC_BASE_URL) بـ https://.']
+});
+
+function metaFbText(code, isAr) {
+  const pair = metaFbResultTexts[code];
+  return pair ? pair[isAr ? 1 : 0] : '';
+}
+
+function metaFbIsPhoneApp() {
+  return typeof isPackagedMobileApp === 'function' && isPackagedMobileApp();
+}
+
+// The key Albayan uses now, in words: the Connection tile and the card say the same thing.
+function metaFbSourceLabel(source, isAr) {
+  if (source === 'connection') return isAr ? 'المفتاح المستخدم: الربط مع فيسبوك' : 'Key in use: Connect with Facebook';
+  if (source === 'environment') return isAr ? 'المفتاح المستخدم: إعدادات الاستضافة' : 'Key in use: hosting settings';
+  if (source === 'none') return isAr ? 'لا يوجد مفتاح بعد' : 'No key yet';
+  return '';
+}
+
+function metaFbReset() {
+  Object.assign(metaFbUi, { status: null, loading: false, loadError: '', busy: '', error: '', ticks: null, pick: '', configDraft: '', editConfig: false, seq: (Number(metaFbUi.seq) || 0) + 1 });
+}
+
+function metaFbErrorText(error, isAr) {
+  const code = String(error?.payload?.code || '');
+  let text = metaFbText(code, isAr) || metaAdsErrorMessage(error);
+  const missing = Array.isArray(error?.payload?.missingScopes) ? error.payload.missingScopes.map(String).join(', ') : '';
+  if (missing) text += ` (${missing})`;
+  return text;
+}
+
+async function metaFbLoad() {
+  const seq = metaFbUi.seq;
+  metaFbUi.loading = true;
+  try {
+    const status = await apiJson('/api/meta-ads/connection', { method: 'GET' }, { timeoutMs: 15000 });
+    if (seq !== metaFbUi.seq) return;
+    metaFbUi.status = status && typeof status === 'object' ? status : null;
+    metaFbUi.loadError = '';
+  } catch (error) {
+    if (seq !== metaFbUi.seq) return;
+    // An older server without the Connect routes: say nothing, the rest of Meta Sync works as before.
+    metaFbUi.loadError = Number(error?.status) === 404 ? '' : metaFbErrorText(error, metaAdsIsArabic());
+  }
+  metaFbUi.loading = false;
+  metaAdsRenderModal();
+}
+
+// One POST at a time; the answer (the fresh status) replaces the card's status.
+async function metaFbPost(action, path, body, after) {
+  if (metaFbUi.busy) return null;
+  const seq = metaFbUi.seq;
+  const isAr = metaAdsIsArabic();
+  metaFbUi.busy = action;
+  metaFbUi.error = '';
+  metaAdsRenderModal();
+  let result = null;
+  try {
+    result = await apiJson(`/api/meta-ads/connection${path}`, { method: 'POST', body }, { timeoutMs: 60000 });
+    if (seq !== metaFbUi.seq) return null;
+    const status = result?.status && typeof result.status === 'object' ? result.status : (result && 'appReady' in result ? result : null);
+    if (status) metaFbUi.status = status;
+    if (after) after(result);
+  } catch (error) {
+    if (seq !== metaFbUi.seq) return null;
+    metaFbUi.error = metaFbErrorText(error, isAr);
+    result = null;
+  }
+  metaFbUi.busy = '';
+  metaAdsRenderModal();
+  return result;
+}
+
+function metaFbDraft(value) {
+  metaFbUi.configDraft = String(value || '');
+}
+
+function metaFbEditConfig() {
+  metaFbUi.editConfig = true;
+  metaAdsRenderModal();
+}
+
+function metaFbSaveConfig() {
+  const isAr = metaAdsIsArabic();
+  const value = String(metaFbUi.configDraft || '').trim();
+  if (value && !/^[0-9]{5,25}$/.test(value)) {
+    metaFbUi.error = metaFbText('config_missing', isAr);
+    metaAdsRenderModal();
+    return null;
+  }
+  return metaFbPost('settings', '/settings', { loginConfigId: value }, () => { metaFbUi.editConfig = false; metaFbUi.configDraft = ''; });
+}
+
+function metaFbCopyRedirect() {
+  const isAr = metaAdsIsArabic();
+  const uri = String(metaFbUi.status?.redirectUri || '');
+  if (!uri) return;
+  const done = () => showNotification(isAr ? 'تم النسخ' : 'Copied', isAr ? 'تم نسخ عنوان إعادة التوجيه.' : 'The redirect URI was copied.', 'success');
+  try {
+    const copying = navigator.clipboard?.writeText(uri);
+    if (copying && typeof copying.then === 'function') copying.then(done, () => {});
+  } catch (_) { /* the address stays selectable on screen */ }
+}
+
+async function metaFbConnect() {
+  const isAr = metaAdsIsArabic();
+  if (metaFbIsPhoneApp()) return;
+  const result = await metaFbPost('connect', '/start', {});
+  const url = String(result?.authorizeUrl || '');
+  if (!result) return;
+  // Only ever leave for Facebook's own sign-in page.
+  if (!url.startsWith('https://www.facebook.com/')) {
+    metaFbUi.error = isAr ? 'وصل عنوان تسجيل دخول غير متوقع، لذلك لم يُفتح شيء.' : 'Albayan received an unexpected sign-in address, so nothing was opened.';
+    metaAdsRenderModal();
+    return;
+  }
+  metaFbUi.busy = 'connect';
+  metaAdsRenderModal();
+  window.location.assign(url);
+}
+
+function metaFbPick(systemUserId) {
+  metaFbUi.pick = String(systemUserId || '');
+}
+
+function metaFbFinish() {
+  const isAr = metaAdsIsArabic();
+  if (!metaFbUi.pick) {
+    metaFbUi.error = metaFbText('choose_system_user', isAr);
+    metaAdsRenderModal();
+    return null;
+  }
+  return metaFbPost('finish', '/finish', { systemUserId: metaFbUi.pick }, () => {
+    metaFbUi.pick = '';
+    showNotification(isAr ? 'تم الربط' : 'Connected', metaFbText('connected', isAr), 'success');
+    metaAdsLoadConnection();
+  });
+}
+
+// Ticks live here, so a reload of the dialog (a list finishing) never drops an unsaved choice.
+function metaFbToggleAccount(accountId, checked) {
+  const id = String(accountId || '');
+  const ticks = new Set(metaFbUi.ticks || metaFbUi.status?.accounts?.selected || []);
+  if (checked) ticks.add(id); else ticks.delete(id);
+  metaFbUi.ticks = [...ticks];
+}
+
+function metaFbSaveAccounts() {
+  const isAr = metaAdsIsArabic();
+  const accountIds = (metaFbUi.ticks || metaFbUi.status?.accounts?.selected || []).map(String);
+  return metaFbPost('accounts', '/accounts', { accountIds }, () => {
+    metaFbUi.ticks = null;
+    showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم حفظ الحسابات الإعلانية التي يقرأها Albayan.' : 'The ad accounts Albayan reads were saved.', 'success');
+    metaAdsLoadConnection();
+  });
+}
+
+function metaFbRefresh() {
+  return metaFbPost('refresh', '/refresh', {}, () => {
+    if (metaFbUi.ticks) {
+      const seen = new Set((metaFbUi.status?.accounts?.available || []).map(row => String(row.id)));
+      metaFbUi.ticks = metaFbUi.ticks.filter(id => seen.has(id));
+    }
+    metaAdsLoadConnection();
+  });
+}
+
+function metaFbDisconnect() {
+  const isAr = metaAdsIsArabic();
+  const question = isAr
+    ? 'فصل فيسبوك؟ سيُحذف المفتاح المحفوظ، ويعود Albayan إلى مفتاح إعدادات الاستضافة إن وُجد.'
+    : 'Disconnect Facebook? The stored key is removed and Albayan goes back to the hosting-settings key, if one is set.';
+  if (!window.confirm(question)) return null;
+  return metaFbPost('disconnect', '/disconnect', {}, () => {
+    metaFbUi.ticks = null;
+    metaFbUi.pick = '';
+    showNotification(isAr ? 'تم الفصل' : 'Disconnected', metaFbText('disconnected', isAr), 'success');
+    metaAdsLoadConnection();
+  });
+}
+
+function metaFbButton(action, onclick, icon, label, tone) {
+  const busy = metaFbUi.busy === action;
+  const tones = {
+    primary: 'bg-blue-600 text-white',
+    plain: 'border border-slate-200 dark:border-slate-700',
+    danger: 'border border-rose-200 text-rose-600'
+  };
+  return `<button type="button" onclick="${onclick}" ${metaFbUi.busy ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl px-4 py-2 font-bold disabled:opacity-60 ${tones[tone] || tones.plain}"><i data-lucide="${busy ? 'loader-circle' : icon}" class="h-4 w-4 ${busy ? 'animate-spin' : ''}"></i>${label}</button>`;
+}
+
+function metaFbConnectArea(isAr, label) {
+  if (metaFbIsPhoneApp()) {
+    return `<div role="status" class="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200">${isAr ? 'افتح Albayan في متصفح الويب لربط فيسبوك.' : 'Open Albayan in a web browser to connect Facebook.'}</div>`;
+  }
+  return metaFbButton('connect', 'metaFbConnect()', 'facebook', label, 'primary');
+}
+
+function metaFbConnectionCard(isAr, status) {
+  const esc = value => Security.escapeHtml(String(value ?? ''));
+  const s = metaFbUi.status;
+  if (!s) {
+    if (metaFbUi.loading) return `<div class="mt-3 flex items-center gap-2 rounded-xl border border-slate-200 p-3 text-sm text-slate-500 dark:border-slate-700"><i data-lucide="loader-circle" class="h-4 w-4 animate-spin"></i>${isAr ? 'جارٍ فحص الربط مع فيسبوك...' : 'Checking Connect with Facebook...'}</div>`;
+    return metaFbUi.loadError ? `<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${esc(metaFbUi.loadError)}</div>` : '';
+  }
+  const source = String(s.tokenSource || status?.tokenSource || '');
+  const parts = [];
+  const last = s.lastResult && typeof s.lastResult === 'object' ? s.lastResult : null;
+  const lastText = last ? metaFbText(String(last.code || ''), isAr) : '';
+  if (lastText) {
+    const when = metaAdsFormatDate(last.at, true);
+    const missing = Array.isArray(last.missingScopes) && last.missingScopes.length ? ` (${last.missingScopes.map(String).join(', ')})` : '';
+    const metaCode = last.metaCode ? ` · ${isAr ? 'رمز Meta' : 'Meta code'} ${String(last.metaCode).replace(/\D/g, '')}` : '';
+    const tone = last.ok ? 'border-emerald-200 bg-emerald-50/70 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-200' : 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100';
+    parts.push(`<div ${last.ok ? 'role="status"' : 'role="alert"'} data-meta-fb-result="${esc(last.code)}" class="mt-3 rounded-xl border p-3 text-sm ${tone}">${esc(lastText + missing + metaCode)}${when ? `<div class="mt-1 text-xs text-slate-500">${isAr ? 'آخر نتيجة' : 'Last result'}: ${esc(when)}</div>` : ''}</div>`);
+  }
+  if (metaFbUi.error) parts.push(`<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${esc(metaFbUi.error)}</div>`);
+
+  if (!s.appReady) {
+    parts.push(`<p class="mt-3 text-sm text-slate-500" data-meta-fb-state="app-not-ready">${isAr ? 'لتفعيل هذا الزر مرة واحدة: أضف ALBAYAN_META_APP_ID و ALBAYAN_META_APP_SECRET في إعدادات الاستضافة ثم أعد التشغيل.' : 'One-time setup to turn this on: add ALBAYAN_META_APP_ID and ALBAYAN_META_APP_SECRET in the hosting settings, then restart.'}</p>`);
+  } else if (s.reconnectNeeded) {
+    parts.push(`<div role="alert" data-meta-fb-state="reconnect" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100">${isAr ? 'تعذّرت قراءة المفتاح المحفوظ (تغيّر مفتاح التشفير أو التطبيق). يستخدم Albayan مفتاح الاستضافة الآن. أعد الربط أو افصل.' : 'The stored key cannot be read (the encryption key or the app changed). Albayan uses the hosting key for now. Reconnect, or disconnect.'}</div>
+      <div class="mt-3 flex flex-wrap gap-2">${metaFbConnectArea(isAr, isAr ? 'إعادة الربط' : 'Reconnect')}${metaFbButton('disconnect', 'metaFbDisconnect()', 'unlink', isAr ? 'فصل' : 'Disconnect', 'danger')}</div>`);
+  } else if (!s.loginConfigId || metaFbUi.editConfig) {
+    const uri = String(s.redirectUri || '');
+    parts.push(`<div data-meta-fb-state="config" class="mt-3 space-y-3 text-sm">
+      <p class="text-slate-500">${isAr ? 'في Meta for Developers: Facebook Login for Business ← الإعدادات، أنشئ إعداداً نوع رمزه «User access token»، وأضف عنوان إعادة التوجيه أدناه إلى Valid OAuth Redirect URIs، ثم الصق رقم الإعداد هنا.' : 'In Meta for Developers: Facebook Login for Business → Configurations, create one with the token type "User access token", add the redirect URI below to Valid OAuth Redirect URIs, then paste the configuration id here.'}</p>
+      ${uri ? `<div><div class="text-xs font-bold text-slate-500">${isAr ? 'عنوان إعادة التوجيه' : 'Redirect URI'}</div><div class="mt-1 grid gap-2 sm:grid-cols-[1fr_auto]"><code class="block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">${esc(uri)}</code><button type="button" onclick="metaFbCopyRedirect()" class="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 font-bold dark:border-slate-700"><i data-lucide="copy" class="h-4 w-4"></i>${isAr ? 'نسخ' : 'Copy'}</button></div></div>` : `<p class="text-amber-600">${esc(metaFbText('base_url_invalid', isAr))}</p>`}
+      <div><label for="meta-fb-config-id" class="block text-xs font-bold text-slate-500">${isAr ? 'رقم إعداد تسجيل الدخول (config_id)' : 'Login configuration id (config_id)'}</label><div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]"><input id="meta-fb-config-id" inputmode="numeric" pattern="[0-9]*" maxlength="25" value="${esc(metaFbUi.configDraft)}" oninput="metaFbDraft(this.value)" placeholder="123456789012345" class="glass-input min-h-11 w-full rounded-xl px-3" dir="ltr">${metaFbButton('settings', 'metaFbSaveConfig()', 'save', isAr ? 'حفظ' : 'Save', 'primary')}</div></div>
+    </div>`);
+  } else if (s.choice && Array.isArray(s.choice.candidates) && s.choice.candidates.length) {
+    const rows = s.choice.candidates.map(c => {
+      const id = String(c.systemUserId || '');
+      return `<label class="flex items-start gap-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700"><input type="radio" name="meta-fb-candidate" data-meta-fb-id="${esc(id)}" ${metaFbUi.pick === id ? 'checked' : ''} onchange="metaFbPick(this.dataset.metaFbId)" class="h-5 w-5 accent-indigo-600"><span><span class="font-bold text-slate-800 dark:text-white">${esc(c.businessName || c.businessId)}</span> · ${esc(c.systemUserName || id)}${c.role ? ` · <span class="text-xs text-slate-500">${esc(c.role)}</span>` : ''}</span></label>`;
+    }).join('');
+    parts.push(`<div data-meta-fb-state="choice" class="mt-3 space-y-2 text-sm"><p class="font-bold">${isAr ? 'اختر النشاط التجاري وحساب الروبوت (مستخدم النظام):' : 'Choose the business and robot account (system user):'}</p>${rows}
+      <div class="flex flex-wrap gap-2">${metaFbButton('finish', 'metaFbFinish()', 'check', isAr ? 'استخدم هذا الحساب' : 'Use this account', 'primary')}</div></div>`);
+  } else if (s.connected && typeof s.connected === 'object') {
+    const c = s.connected;
+    const when = metaAdsFormatDate(c.connectedAt, true);
+    const expiry = c.expiresNever ? (isAr ? 'لا ينتهي' : 'never expires') : (metaAdsFormatDate(c.expiresAt) ? `${isAr ? 'ينتهي' : 'expires'} ${metaAdsFormatDate(c.expiresAt)}` : '');
+    const facts = [c.businessName, c.systemUserName].filter(Boolean).map(esc).join(' · ');
+    const missing = Array.isArray(c.missingScopes) ? c.missingScopes.map(String) : [];
+    const available = Array.isArray(s.accounts?.available) ? s.accounts.available : [];
+    const ticks = new Set((metaFbUi.ticks || s.accounts?.selected || []).map(String));
+    const checklist = available.map(row => {
+      const id = String(row.id || '');
+      return `<label class="flex items-start gap-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700"><input type="checkbox" data-meta-fb-id="${esc(id)}" ${ticks.has(id) ? 'checked' : ''} onchange="metaFbToggleAccount(this.dataset.metaFbId, this.checked)" class="h-5 w-5 accent-indigo-600"><span><span class="font-bold text-slate-800 dark:text-white">${esc(row.name || id)}</span> <span class="text-xs text-slate-500" dir="ltr">#${esc(id)}</span></span></label>`;
+    }).join('');
+    parts.push(`<div data-meta-fb-state="connected" class="mt-3 space-y-3 text-sm">
+      <p>${facts}${when ? ` · ${isAr ? 'رُبط في' : 'connected'} ${esc(when)}` : ''}${c.connectedByName ? ` · ${isAr ? 'بواسطة' : 'by'} ${esc(c.connectedByName)}` : ''}${expiry ? ` · ${esc(expiry)}` : ''}${Number.isInteger(c.pagesCount) ? ` · ${isAr ? 'الصفحات' : 'Pages'}: ${Number(c.pagesCount)}` : ''}</p>
+      ${missing.length ? `<div role="alert" class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100">${isAr ? 'صلاحيات ناقصة' : 'Missing permissions'}: <span dir="ltr">${esc(missing.join(', '))}</span>. ${isAr ? 'أعد الربط واسمح بها.' : 'Reconnect and allow them.'}</div>` : ''}
+      <div><p class="font-bold">${isAr ? 'الحسابات الإعلانية التي يقرأها Albayan' : 'Ad accounts Albayan reads'}</p><p class="mt-1 text-xs text-slate-500">${isAr ? 'بلا اختيار = لا يقرأ Albayan أي حساب. يضيف المالك الحسابات لمستخدم النظام في إعدادات الأعمال على Meta.' : 'Nothing ticked = Albayan reads no account. The owner gives accounts to the system user in Meta Business Settings.'}</p>
+        <div class="mt-2 max-h-72 space-y-2 overflow-y-auto pr-1 custom-scrollbar">${checklist || `<div class="rounded-xl bg-slate-50 p-3 text-center text-slate-500 dark:bg-slate-800/50">${isAr ? 'لا يرى المفتاح أي حساب إعلاني بعد.' : 'The key cannot see any ad account yet.'}</div>`}</div></div>
+      <div class="flex flex-wrap gap-2">${metaFbButton('accounts', 'metaFbSaveAccounts()', 'save', isAr ? 'حفظ الحسابات' : 'Save accounts', 'primary')}${metaFbButton('refresh', 'metaFbRefresh()', 'refresh-cw', isAr ? 'تحديث القائمة' : 'Refresh list', 'plain')}${metaFbIsPhoneApp() ? '' : metaFbButton('connect', 'metaFbConnect()', 'facebook', isAr ? 'إعادة الربط' : 'Reconnect', 'plain')}${metaFbButton('disconnect', 'metaFbDisconnect()', 'unlink', isAr ? 'فصل' : 'Disconnect', 'danger')}</div>
+      ${metaFbIsPhoneApp() ? metaFbConnectArea(isAr, '') : ''}
+    </div>`);
+  } else {
+    parts.push(`<div data-meta-fb-state="not-connected" class="mt-3 space-y-3 text-sm"><p class="text-slate-500">${isAr ? 'سجّل الدخول بفيسبوك بدلاً من لصق مفتاح. يُنشئ Albayan مفتاح مستخدم نظام ويحفظه مشفّراً. لا يُنشئ Albayan مستخدم نظام ولا يمنح أي حساب؛ افعل ذلك في إعدادات الأعمال على Meta.' : 'Sign in with Facebook instead of pasting a key. Albayan makes a system-user key and keeps it encrypted. Albayan never creates a system user or gives it assets; do that in Meta Business Settings.'}</p>
+      <div class="flex flex-wrap items-center gap-2">${metaFbConnectArea(isAr, isAr ? 'الربط مع فيسبوك' : 'Connect with Facebook')}${s.loginConfigSource === 'saved' ? `<button type="button" onclick="metaFbEditConfig()" class="min-h-11 rounded-xl px-3 text-xs font-bold text-slate-500">${isAr ? 'تغيير رقم الإعداد' : 'Change configuration id'}</button>` : ''}</div></div>`);
+  }
+  return `<section data-meta-fb-card class="mt-3 rounded-xl border border-blue-200 p-4 dark:border-blue-800" aria-label="${isAr ? 'الربط مع فيسبوك' : 'Connect with Facebook'}">
+    <div class="flex flex-wrap items-center justify-between gap-2"><h3 class="flex items-center gap-2 font-black text-slate-800 dark:text-white"><i data-lucide="facebook" class="h-4 w-4 text-blue-600"></i>${isAr ? 'الربط مع فيسبوك' : 'Connect with Facebook'}</h3><span class="text-xs font-bold text-slate-500">${esc(metaFbSourceLabel(source, isAr))}</span></div>
+    ${parts.join('')}
+  </section>`;
 }

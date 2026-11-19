@@ -549,11 +549,19 @@ function studioHealthYesNo(value) {
   return studioHealthText('unknown', 'غير معروف');
 }
 
+// Which key the server uses now (token_health_report.tokenSource), in words.
+function studioHealthTokenSource(source) {
+  if (source === 'connection') return studioHealthText('Connect with Facebook', 'الربط مع فيسبوك');
+  if (source === 'environment') return studioHealthText('hosting settings', 'إعدادات الاستضافة');
+  if (source === 'none') return studioHealthText('no key yet', 'لا يوجد مفتاح بعد');
+  return '';
+}
+
 // The token's "what to do" (runbook 3.1 expiring, 3.2 invalid) and the webhook counters' (3.10).
 function studioHealthTokenFix() {
   return studioHealthFix('token', 'diagnostics', '3.1 / 3.2',
-    'Few days left, or not valid: make a new system-user token in Meta Business Settings, put it in the Meta key variable in Jelastic (runbook 3.1) and restart; then confirm "valid" in',
-    'أيام قليلة متبقية أو الرمز غير صالح: أنشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا، وضعه في متغيّر مفتاح ميتا في Jelastic (دليل التشغيل 3.1) ثم أعد التشغيل؛ ثم تأكد من «صالح» في');
+    'Few days left, or not valid: an admin presses Reconnect in Meta Sync (Connect with Facebook), or makes a new system-user token in Meta Business Settings, puts it in the Meta key variable in Jelastic (runbook 3.1) and restarts; then confirm "valid" in',
+    'أيام قليلة متبقية أو الرمز غير صالح: يضغط المدير «إعادة الربط» في مزامنة ميتا (الربط مع فيسبوك)، أو ينشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا ويضعه في متغيّر مفتاح ميتا في Jelastic (دليل التشغيل 3.1) ثم يعيد التشغيل؛ ثم تأكد من «صالح» في');
 }
 
 function studioHealthWebhooksFix() {
@@ -566,10 +574,11 @@ function renderStudioHealthToken() {
   const t = _studioHealth.token;
   if (!t) return studioHealthCard('key-round', studioHealthText('Meta token', 'رمز ميتا'), studioHealthEsc(_studioHealth.tokenError || studioHealthText('Loading…', 'جارٍ التحميل…')) + studioHealthTokenFix());
   const webhooks = Object.values(t.webhookCounts?.countsByObjectField || {}).reduce((sum, n) => sum + (Number(n) || 0), 0);
-  let body;
-  if (t.configured === false) body = `<p>${studioHealthText('The token check is not set up (ALBAYAN_META_APP_ID).', 'فحص الرمز غير مُعدّ (ALBAYAN_META_APP_ID).')}</p>`;
-  else if (!t.checked) body = `<p>${studioHealthText('Not checked yet for the current token.', 'لم يُفحص الرمز الحالي بعد.')}</p>`;
-  else body = [
+  const source = studioHealthTokenSource(t.tokenSource);
+  let body = source ? studioHealthLine(studioHealthText('Key in use', 'المفتاح المستخدم'), source) : '';
+  if (t.configured === false) body += `<p>${studioHealthText('The token check is not set up (ALBAYAN_META_APP_ID).', 'فحص الرمز غير مُعدّ (ALBAYAN_META_APP_ID).')}</p>`;
+  else if (!t.checked) body += `<p>${studioHealthText('Not checked yet for the current token.', 'لم يُفحص الرمز الحالي بعد.')}</p>`;
+  else body += [
     studioHealthLine(studioHealthText('Valid', 'صالح'), studioHealthYesNo(t.isValid === true)),
     studioHealthLine(studioHealthText('Days left', 'الأيام المتبقية'), t.expiresNever ? studioHealthText('never expires', 'لا ينتهي') : studioHealthEsc(t.daysLeft ?? '—')),
     studioHealthLine(studioHealthText('Missing permissions', 'صلاحيات ناقصة'), studioHealthEsc((t.missingScopes || []).length))
