@@ -22059,20 +22059,22 @@ function renderSettingsView() {
             <i data-lucide="download" class="w-5 h-5"></i>
             <span>${isServerModeEnabled() ? (isAr ? 'تصدير تقرير جزئي' : 'Export Partial Report') : (isAr ? 'تصدير نسخة احتياطية' : 'Export Backup')}</span>
           </button>
-          <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
-            <i data-lucide="upload" class="w-5 h-5"></i>
-            <span>${isServerModeEnabled() ? (isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled') : (isAr ? 'استيراد نسخة احتياطية' : 'Import Backup')}</span>
-          </button>
-          <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
-            <i data-lucide="trash-2" class="w-5 h-5"></i>
-            <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
-          </button>
           ${isServerModeEnabled() ? `
           <button onclick="runDataIntegrityAudit()" class="btn-shine bg-violet-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-violet-700">
             <i data-lucide="shield-check" class="w-5 h-5"></i>
             <span>${isAr ? 'فحص سلامة البيانات' : 'Check Data Integrity'}</span>
           </button>
-          ` : ''}
+          <p class="settings-local-only md:col-span-2 self-center text-sm text-slate-600 dark:text-slate-300">${isAr ? '«استيراد نسخة احتياطية» و«مسح كل البيانات» يعملان بدون خادم فقط.' : '"Import Backup" and "Clear All Data" work only without a server.'}</p>
+          ` : `
+          <button onclick="importData()" class="btn-shine bg-green-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-green-700">
+            <i data-lucide="upload" class="w-5 h-5"></i>
+            <span>${isAr ? 'استيراد نسخة احتياطية' : 'Import Backup'}</span>
+          </button>
+          <button onclick="clearAllData()" class="btn-shine bg-rose-600 text-white px-4 py-3 rounded-xl font-bold flex items-center justify-center space-x-2 hover:bg-rose-700">
+            <i data-lucide="trash-2" class="w-5 h-5"></i>
+            <span>${isAr ? 'مسح كل البيانات' : 'Clear All Data'}</span>
+          </button>
+          `}
           ` : ''}
         </div>
         ${isServerModeEnabled() && isCurrentUserAdmin() && !isPackagedMobileApp() ? `

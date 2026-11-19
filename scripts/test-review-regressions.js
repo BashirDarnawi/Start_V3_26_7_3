@@ -1276,6 +1276,30 @@ async function main() {
     assert.ok(/<aside id="app-sidebar" class="app-sidebar frame-rail /.test(two) && two.includes('md:ml-72'), 'two areas: the rail');
     assert.ok(two.includes(`onclick="navigateTo('clothes-system')"`), 'the switcher offers the other area');
   });
+  await test('redesign B-09: with a server, Settings offers no Import or Clear All Data button (they only answered "not allowed") and says so in one sentence; without a server both buttons are there', async () => {
+    const f = frameFixture(frameAdmin, 'settings');
+    const draw = () => String(f.run('renderSettingsView()'));
+    const data = html => (html.split('id="settings-data"')[1] || '').split('</div>\n      </div>')[0];
+    for (const [language, sentence] of [['en', '"Import Backup" and "Clear All Data" work only without a server.'], ['ar', '«استيراد نسخة احتياطية» و«مسح كل البيانات» يعملان بدون خادم فقط.']]) {
+      f.state.language = language;
+      f.sandbox.isServerModeEnabled = () => true;
+      const server = draw();
+      assert.ok(!server.includes('onclick="importData()"') && !server.includes('onclick="clearAllData()"'), `${language}: no button that can only refuse`);
+      assert.equal(server.split(`<p class="settings-local-only md:col-span-2 self-center text-sm text-slate-600 dark:text-slate-300">${sentence}</p>`).length - 1, 1, `${language}: the sentence, once`);
+      // What does work with a server stays: the report, the integrity check and the full backup.
+      for (const kept of ['onclick="exportData()"', 'onclick="runDataIntegrityAudit()"']) assert.ok(server.includes(kept), `${language}: ${kept}`);
+      f.sandbox.isServerModeEnabled = () => false;
+      const local = draw();
+      for (const kept of ['onclick="exportData()"', 'onclick="importData()"', 'onclick="clearAllData()"']) assert.equal(local.split(kept).length - 1, 1, `${language} local: ${kept}`);
+      assert.ok(!local.includes('settings-local-only') && !local.includes('onclick="runDataIntegrityAudit()"'), `${language} local: no sentence, and the server-only check is not offered`);
+    }
+    // The two functions still refuse by themselves with a server, whatever calls them.
+    f.sandbox.isServerModeEnabled = () => true;
+    const notes = []; f.sandbox.showNotification = (title, _message, kind) => notes.push(`${kind}:${title}`);
+    f.state.language = 'en';
+    await f.sandbox.clearAllData(); f.sandbox.importData();
+    assert.deepEqual(notes, ['error:Not Allowed', 'warning:Server Import Disabled']);
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {
