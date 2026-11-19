@@ -333,6 +333,9 @@ check('tablets get centred dialogs with their own width; the top position while 
   }
   // The phone sheet rule this sits on top of is still there, for widths under 600 px.
   assert(styleCss.includes('@media (max-width: 900px) and (min-height: 501px) {\n  .app-dialog-overlay > .app-dialog-panel {\n    margin-top: auto !important;\n    margin-bottom: 0 !important;'));
+  // Card lists: two columns from 700 px (one stretched column up to 1100 px before).
+  assert(layoutCss.includes('@media (min-width: 700px) and (max-width: 1099.98px) {\n  .workspace-directory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }'));
+  assert(layoutCss.includes('@media (min-width: 1100px) {\n  .workspace-directory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }'));
 });
 check('wide screens: messages sit at the bottom beside the sidebar, and keep the top position while a dialog is open', () => {
   const rule = layoutCss.slice(layoutCss.indexOf('/* Wide screens: messages sit at the bottom'));

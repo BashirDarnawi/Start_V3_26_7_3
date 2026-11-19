@@ -123,11 +123,13 @@ test('from 901 to 1279 px the sidebar is a rail of icons that keeps every name a
   expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 });
 
-test('on a tablet a dialog is a centred window as wide as it needs, and takes the top position while a field is in use', async ({ page }) => {
+test('on a tablet card lists use two columns, a dialog is a centred window as wide as it needs, and it takes the top position while a field is in use', async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 1180 });
   await signIn(page);
   await page.evaluate(() => navigateTo('customers'));
   await expect.poll(() => new URL(page.url()).pathname).toBe('/customers');
+  const grid = await page.evaluate(() => ({ columns: getComputedStyle(document.getElementById('customers-grid')).gridTemplateColumns.split(' ').length, overflow: document.documentElement.scrollWidth - innerWidth }));
+  expect(grid).toEqual({ columns: 2, overflow: 0 });
   await page.evaluate(() => showCustomerModal());
   const panel = page.locator('#app-modal .app-dialog-panel');
   await expect(panel).toBeVisible();
