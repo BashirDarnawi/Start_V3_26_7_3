@@ -25,8 +25,13 @@ DELIBERATELY EXCLUDED, and it must stay that way:
     credential material; restoring them would resurrect logins or replay a
     reset/PKCE handoff.
   * Meta access tokens, the backup key and S3 secrets are environment-only and
-    are never persisted to the database. If anyone ever caches a token on a
-    row, this exclusion list must grow with it.
+    are never persisted to the database in the clear. If anyone ever caches a
+    token on a row, this exclusion list must grow with it.
+  * ``metaHealthState`` rows whose id starts with ``connection`` (Connect with
+    Facebook, meta_connection.py): the encrypted system-user key, the one-time
+    sign-in state and the short-lived encrypted user token. A forwarded file
+    must not carry them even encrypted; after a restore the admin presses
+    Connect again.
 
 The file DOES contain customer names, phone numbers, addresses and receipt
 photos in the clear. The UI says so before the download starts.
@@ -387,13 +392,15 @@ def create_full_backup_router(
                 "excluded": [
                     "password_hash", "password_salt", "password_algo",
                     "password_iterations", "sessions", "password_resets", "app_logins",
+                    "metaHealthState/connection*",
                 ],
             })
             # One index-ordered cursor, one row fetched at a time. Never
             # materialize a list of photo-bearing records with .all().
             for row in stream_rows(
                 "SELECT type, id, data_json, deleted, created_at, created_by, last_modified "
-                "FROM entities ORDER BY type, id"
+                "FROM entities WHERE NOT (type = 'metaHealthState' AND id LIKE 'connection%') "
+                "ORDER BY type, id"
             ):
                 if timed_out():
                     return

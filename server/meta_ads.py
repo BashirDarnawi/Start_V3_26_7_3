@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from . import meta_connection
 from .db import db_conn, get_engine, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from .entity_projection import _without_inline_media
 from .operations import assert_financial_period_open
@@ -343,8 +344,45 @@ def _evict_page_token(token: str) -> None:
 
 
 def _server_token_matches(config: "MetaAdsConfig") -> bool:
-    configured = (os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip()
-    return bool(configured and hmac.compare_digest(configured, config.access_token))
+    """True when ``config`` carries the server's ACTIVE key (a stored Connect key, else the hosting
+    key): it gates request pacing, the shared Meta pause and provider-state refresh."""
+    active = meta_connection.active_token((os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip())
+    given = str(config.access_token or "")
+    return bool(active and given and hmac.compare_digest(active.encode("utf-8"), given.encode("utf-8")))
+
+
+def meta_token_present() -> bool:
+    """Cheap (cached): a stored Connect key or ALBAYAN_META_ACCESS_TOKEN exists. For the studio
+    jobs loop, which asks every tick and must not build the Meta config for it."""
+    try:
+        return meta_connection.meta_token_present()
+    except Exception:
+        return bool((os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip())
+
+
+def meta_token_source() -> str:
+    """'connection' | 'environment' | 'none' (never the key itself)."""
+    try:
+        return meta_connection.token_source()
+    except Exception:
+        return "environment" if (os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip() else "none"
+
+
+def meta_connection_changed() -> None:
+    """The one hook after Connect, Disconnect or an account-selection change: forget the cached
+    view, every Page token and funds reading taken with the old key, and (re)start the worker,
+    which returns early at boot when no key existed then. Never raises."""
+    try:
+        meta_connection.invalidate()
+        with _PAGE_TOKEN_LOCK:
+            _PAGE_TOKEN_CACHE.clear()
+        _META_FUNDS_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        start_meta_ads_worker()
+    except Exception:
+        print("[albayan] Meta worker could not be started after a connection change; it starts on the next boot.")
 
 
 def _backoff_delay_seconds(seconds: Any) -> int:
@@ -1441,6 +1479,9 @@ class MetaAdsConfig:
     discovery_baseline_pages: int = 25
     worker_sync_interval_seconds: int = 20
     webhook_verify_token: str = field(default="", repr=False)
+    # True while a stored Connect key is active: allowed_account_ids is then the admin's selection,
+    # and an EMPTY selection means no account at all (never "every account the key can see").
+    allowlist_required: bool = False
 
     @property
     def configured(self) -> bool:
@@ -1462,12 +1503,24 @@ def load_meta_ads_config() -> MetaAdsConfig:
             continue
         if normalized not in allowed:
             allowed.append(normalized)
+    access_token = (os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip()
+    allowlist_required = False
+    stored = meta_connection.active_connection()  # never raises; None = environment, as before
+    if stored is not None:
+        access_token, allowlist_required, allowed = stored.token, True, []
+        for value in stored.selected_account_ids:
+            try:
+                normalized = _account_id(value)
+            except MetaAdsError:
+                continue
+            if normalized not in allowed:
+                allowed.append(normalized)
     background_raw = os.getenv("ALBAYAN_META_BACKGROUND_SYNC")
     background_sync = True if background_raw is None else background_raw.strip().lower() in _TRUE_VALUES
     auto_import_raw = os.getenv("ALBAYAN_META_AUTO_IMPORT")
     auto_import = True if auto_import_raw is None else auto_import_raw.strip().lower() in _TRUE_VALUES
     return MetaAdsConfig(
-        access_token=(os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip(),
+        access_token=access_token,
         app_secret=(os.getenv("ALBAYAN_META_APP_SECRET") or "").strip(),
         graph_version=version,
         allowed_account_ids=tuple(allowed),
@@ -1500,6 +1553,7 @@ def load_meta_ads_config() -> MetaAdsConfig:
         webhook_verify_token=(
             os.getenv("ALBAYAN_META_WEBHOOK_VERIFY_TOKEN") or ""
         ).strip(),
+        allowlist_required=allowlist_required,
     )
 
 
@@ -1540,7 +1594,7 @@ class MetaAdsClient:
     def _ensure_allowed_account(self, account_id: Any) -> str:
         normalized = _account_id(account_id)
         allowed = set(self.config.allowed_account_ids)
-        if allowed and normalized not in allowed:
+        if (allowed or self.config.allowlist_required) and normalized not in allowed:
             raise MetaAdsError("account_not_allowed", "This Meta ad account is not allowed")
         return normalized
 
@@ -4818,7 +4872,7 @@ def studio_funds_flags() -> dict[str, Any]:
     accounts: list[dict[str, Any]] = []
     for row in stored.get("accounts") or []:
         account_id = re.sub(r"\D", "", str(row.get("id") or "")) if isinstance(row, dict) else ""
-        if not account_id or (allowed and account_id not in allowed):
+        if not account_id or ((allowed or config.allowlist_required) and account_id not in allowed):
             continue
         accounts.append({
             "account": account_tail(account_id),
@@ -7346,6 +7400,8 @@ def create_meta_ads_router(
         )
         return {
             "configured": config.configured,
+            "tokenSource": meta_token_source(),
+            "reconnectNeeded": meta_connection.reconnect_needed(),
             "readOnly": True,
             "graphApiVersion": config.graph_version,
             "allowedAccountCount": len(config.allowed_account_ids),

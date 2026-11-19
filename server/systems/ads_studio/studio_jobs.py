@@ -3,8 +3,8 @@
 ONE daemon thread per process, started by the /api/studio router's startup event
 (``create_studio_jobs_router``, included by studio_api.create_studio_router: 0 main.py lines),
 whether or not Meta is configured: the money jobs never call Meta or need a Meta token. Three Meta
-jobs run only while a Meta token is set (ALBAYAN_META_ACCESS_TOKEN, read without loading the Meta
-client): the results sync (``results``, studio_results_sync.py, P3-03), one budgeted pass per tick
+jobs run only while a Meta token is set (a stored Connect key or ALBAYAN_META_ACCESS_TOKEN, read
+without loading the Meta client): the results sync (``results``, studio_results_sync.py, P3-03), one budgeted pass per tick
 (at most 5 reads within 10 seconds), the Meta watch (token health and funds, P3-18), and the
 Instagram polling source (``ig_poll``, studio_ig_source.py, P4-09), one budgeted pass per tick (at
 most 20 reads within 10 seconds) claimed only while ``capabilities.igPublicReply`` is ``poll``. The env switch
@@ -305,9 +305,12 @@ def jobs_enabled() -> bool:
 
 
 def results_sync_configured() -> bool:
-    """True while a Meta token is set: the only condition for claiming the results job (the pass
-    itself checks the full Meta configuration and Albayan's Meta pause)."""
-    return bool(str(os.environ.get(META_TOKEN_ENV) or "").strip())
+    """True while a Meta token is set (a stored Connect key or META_TOKEN_ENV, meta_ads.meta_token_present):
+    the only condition for claiming the results job (the pass itself checks the full Meta
+    configuration and Albayan's Meta pause)."""
+    from ... import meta_ads  # late and cheap: the check is cached and never builds the Meta config
+
+    return meta_ads.meta_token_present()
 
 
 def _run_results_sync(now: datetime) -> dict[str, Any]:

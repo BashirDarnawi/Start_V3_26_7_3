@@ -48,7 +48,6 @@ here reads Meta.
   most recently polled) are kept. The jobs heartbeat shows ``lastIgPollAt`` (studio_jobs.py).
 """
 
-import os
 import re
 import statistics
 import time
@@ -101,9 +100,10 @@ def _iso(moment: datetime) -> str:
 
 
 def token_set() -> bool:
-    """True while Albayan's Meta token is set, read from the environment only (the jobs loop asks on
-    every tick and must not build the Meta config for it; studio_alerts_meta.meta_watch_configured's rule)."""
-    return bool(str(os.environ.get(META_TOKEN_ENV) or "").strip())
+    """True while Albayan's Meta token is set: a stored Connect key or META_TOKEN_ENV, through the cheap
+    cached meta_ads.meta_token_present (the jobs loop asks on every tick and must not build the Meta
+    config for it; studio_alerts_meta.meta_watch_configured's rule)."""
+    return _meta.meta_token_present()
 
 
 def poll_capability(settings: dict[str, Any] | None = None) -> str:

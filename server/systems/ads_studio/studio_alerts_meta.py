@@ -44,7 +44,6 @@ Three things the team must hear about before a customer does:
   linked yet cannot be placed on an account, so their total is only reported (``notLinkedMinorUSD``).
 """
 
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -95,9 +94,10 @@ def _iso(value: Any) -> str | None:
 
 
 def meta_watch_configured() -> bool:
-    """True while Albayan's Meta token is set (MetaAdsConfig.configured's rule), read from the
-    environment only: the jobs loop asks on every tick and must not build the Meta config for it."""
-    return bool((os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip())
+    """True while Albayan's Meta token is set (MetaAdsConfig.configured's rule): a stored Connect key or
+    ALBAYAN_META_ACCESS_TOKEN, through the cheap cached meta_ads.meta_token_present, because the jobs
+    loop asks on every tick and must not build the Meta config for it."""
+    return _meta.meta_token_present()
 
 
 # ------------------------------------------------------------------ the connection state (P3-18a)

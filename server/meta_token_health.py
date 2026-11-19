@@ -58,7 +58,7 @@ from typing import Any
 
 import httpx
 
-from . import meta_ads
+from . import meta_ads, meta_connection
 from .meta_ads import MetaAdsError
 
 _STATE_ID = "token"
@@ -93,37 +93,17 @@ EXPECTED_SCOPES = (
     "instagram_manage_messages",  # Instagram private replies
 )
 
-_SECRET_QUERY_RE = re.compile(
-    r"((?:input_token|access_token|client_secret|appsecret_proof)=)[^&\s\"'#]*", re.IGNORECASE
-)
-
-
-def _redact_text(value: str) -> str:
-    return _SECRET_QUERY_RE.sub(r"\1[redacted]", value)
-
-
-class _SecretQueryRedactor(logging.Filter):
-    """Keeps httpx's request log line, but never the token values in its URL."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            if isinstance(record.args, tuple) and record.args:
-                record.args = tuple(
-                    _redact_text(str(arg)) if isinstance(arg, (str, httpx.URL)) and _SECRET_QUERY_RE.search(str(arg)) else arg
-                    for arg in record.args
-                )
-            elif not record.args and isinstance(record.msg, str):
-                record.msg = _redact_text(record.msg)
-        except Exception:
-            pass
-        return True
+# The redaction lives in meta_connection (installed on import, before any Connect exchange): it hides
+# input_token, access_token, client_secret, appsecret_proof, fb_exchange_token, revoke_token, code and
+# state in httpx request lines, and the Connect callback's query string in uvicorn's access log.
+_SECRET_QUERY_RE = meta_connection.SECRET_QUERY_RE
+_redact_text = meta_connection.redact_text
+_SecretQueryRedactor = meta_connection._SecretQueryRedactor
 
 
 def install_log_guard() -> None:
-    """Idempotent: one redacting filter on the "httpx" logger."""
-    logger = logging.getLogger("httpx")
-    if not any(type(item).__name__ == _SecretQueryRedactor.__name__ for item in logger.filters):
-        logger.addFilter(_SecretQueryRedactor())
+    """Idempotent: one redacting filter on the "httpx" logger (and one on "uvicorn.access")."""
+    meta_connection.install_log_guards()
 
 
 install_log_guard()
@@ -153,7 +133,7 @@ def _configuration() -> tuple[meta_ads.MetaAdsConfig, str, dict[str, Any] | None
     app_id = (os.getenv("ALBAYAN_META_APP_ID") or "").strip()
     problem: tuple[str, str] | None = None
     if not config.access_token:
-        problem = ("no_access_token", "ALBAYAN_META_ACCESS_TOKEN is not set, so there is no token to check.")
+        problem = ("no_access_token", "There is no Meta key to check yet: press Connect with Facebook in Meta Sync, or set ALBAYAN_META_ACCESS_TOKEN in the hosting settings.")
     elif not app_id:
         problem = ("no_app_id", "Add ALBAYAN_META_APP_ID (the Meta app's numeric id) in Jelastic to read the token's health.")
     elif not meta_ads._META_ID_RE.fullmatch(app_id):
@@ -475,6 +455,10 @@ def token_health_report() -> dict[str, Any]:
     """
     config, _app_id, unconfigured = _configuration()
     report: dict[str, Any] = {
+        # Which key is in use: "connection" (Connect with Facebook), "environment" (the hosting
+        # setting) or "none"; never the key itself.
+        "tokenSource": meta_ads.meta_token_source(),
+        "reconnectNeeded": meta_connection.reconnect_needed(),
         "expectedScopes": list(EXPECTED_SCOPES),
         "webhookCounts": meta_ads.webhook_counts_report(),
     }
@@ -488,7 +472,7 @@ def token_health_report() -> dict[str, Any]:
             "configured": True,
             "checked": False,
             "stale": True,
-            "message": "The saved reading is for an earlier token. Re-check to read the current one.",
+            "message": "The saved reading is for an earlier key (it was reconnected or replaced). Re-check to read the current one.",
         })
         return _scrub(report, _secrets(config))
     now = time.time()
