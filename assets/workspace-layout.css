@@ -296,6 +296,37 @@ pre.font-sans { font-family: inherit; }
   }
 }
 
+/* In the Ads Studio the frame stays this narrow rail on every wide screen. The Studio draws its own
+   list of sections beside it, and two full columns of navigation would crowd the page. The rules
+   are the ones above, for the sidebar that carries .frame-rail. */
+@media (min-width: 1280px) {
+  .app-shell > .app-sidebar.frame-rail { width: 72px; transition: width .12s ease; }
+  .app-shell > .app-sidebar.frame-rail ~ .app-main { margin-inline-start: 72px; }
+  .app-shell > .app-sidebar.frame-rail { --frame-shadow: 24px 0 48px -28px rgb(15 23 42 / 45%); }
+  [dir="rtl"] .app-shell > .app-sidebar.frame-rail { --frame-shadow: -24px 0 48px -28px rgb(15 23 42 / 45%); }
+  .app-shell > .app-sidebar.frame-rail:focus-within { width: 264px; box-shadow: var(--frame-shadow) !important; }
+  @media (hover: hover) {
+    .app-shell > .app-sidebar.frame-rail:hover { width: 264px; box-shadow: var(--frame-shadow) !important; }
+    /* Closed rail under a resting pointer elsewhere: names are kept for screen readers, not drawn. */
+    .app-sidebar.frame-rail:not(:hover):not(:focus-within) :is(.frame-link > span, .frame-menu > summary > span:not(.frame-mark), .frame-one > b, .workspace-nav-group > h2) {
+      position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
+    .app-sidebar.frame-rail:not(:hover):not(:focus-within) .frame-menu > summary > :is(i, svg) { display: none; }
+    .app-sidebar.frame-rail:not(:hover):not(:focus-within) :is(.frame-menu > summary, .frame-one) { justify-content: center; padding-inline: 5px; border-color: transparent; }
+    .app-sidebar.frame-rail:not(:hover):not(:focus-within) .frame-link { justify-content: center; padding-inline: 0; }
+    .app-sidebar.frame-rail:not(:hover):not(:focus-within) .workspace-nav-group { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--ui-line); }
+  }
+  @media (hover: none) {
+    .app-sidebar.frame-rail:not(:focus-within) :is(.frame-link > span, .frame-menu > summary > span:not(.frame-mark), .frame-one > b, .workspace-nav-group > h2) {
+      position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
+    .app-sidebar.frame-rail:not(:focus-within) .frame-menu > summary > :is(i, svg) { display: none; }
+    .app-sidebar.frame-rail:not(:focus-within) :is(.frame-menu > summary, .frame-one) { justify-content: center; padding-inline: 5px; border-color: transparent; }
+    .app-sidebar.frame-rail:not(:focus-within) .frame-link { justify-content: center; padding-inline: 0; }
+    .app-sidebar.frame-rail:not(:focus-within) .workspace-nav-group { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--ui-line); }
+  }
+}
+
 /* Wide screens: theme, language and sign-out live in the frame's account menu, so the copies inside a
    page (Services Hub header, More) are not drawn twice. Phones keep them: those pages have no frame there. */
 @media (min-width: 901px) {
@@ -346,6 +377,10 @@ pre.font-sans { font-family: inherit; }
 @media (min-width: 901px) and (max-width: 1279.98px) {
   :root { --frame-w: 72px; }
 }
+/* The Studio's rail is narrow at every width; a page with no sidebar at all (the Studio's own door,
+   the sign-in page) has nothing to stand beside. */
+:root:has(.app-sidebar.frame-rail) { --frame-w: 72px; }
+:root:not(:has(.app-sidebar)) { --frame-w: 0px; }
 
 /* Tablets and small laptops: two columns of cards from 700 px. (It was one stretched column up to
    1100 px, which made sense only while a 288 px sidebar took the space the rail now leaves free.) */

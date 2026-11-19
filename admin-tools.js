@@ -931,11 +931,7 @@ function controlCenterOpenOverdue() {
 // Opens a screen at its own address, the way a bookmark would: the screen (or its system, once its
 // bundle has loaded) reads its tab from the address. The dashboard never reaches into a system.
 function controlCenterOpenAddress(view, query) {
-  const path = VIEW_TO_PATH[view];
-  if (!path) return navigateTo(view);
-  try { window.history.pushState({ view }, '', `${path}${query ? `?${query}` : ''}`); } catch (_) {}
-  restoreViewStateFromUrl(view);
-  navigateToInternal(view, false);
+  openAddress(view, query);
 }
 
 // The Ads Studio team desk, at one of its own sections (requests, tickets, health, more).

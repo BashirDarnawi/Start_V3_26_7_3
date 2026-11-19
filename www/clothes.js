@@ -322,7 +322,7 @@ async function saveClothesExchangeRate() {
 function renderClothesTabBar() {
   const isAr = clothesIsAr();
   return `
-    <div class="clothes-tab-bar grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-8">
+    <div class="clothes-tab-bar clothes-own-nav grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-8">
       ${CLOTHES_TABS.map(tab => {
         const active = _clothesActiveTab === tab.id;
         return `
@@ -407,6 +407,14 @@ function clothesDashboardSums() {
   collectedLYD = Math.round(collectedLYD * 100) / 100;
   owedLYD = Math.round(owedLYD * 100) / 100;
   return { products, shipments, orders, totalPieces, stockValueUSD, lowStock, inTransitUSD, receivedUSD, outCount, outValueLYD, collectedLYD, owedLYD };
+}
+
+// The Clothes System's door for the shared frame (docs/SMART_SYSTEMS.md, D36): its sections, for the
+// platform's sidebar to list and to open by address (/clothes-system?tab=orders). Each one is
+// [tab, icon, name, is it on screen]. None while the subscription gate is up.
+function clothesFrameSections() {
+  if (!isCurrentUserAdmin() && !hasSubscription('clothes_system')) return [];
+  return CLOTHES_TABS.map(tab => [tab.id, tab.icon, clothesIsAr() ? tab.labelAr : tab.label, tab.id === _clothesActiveTab]);
 }
 
 // The Clothes System's door for the owner dashboard (docs/SMART_SYSTEMS.md, D36): how many items are
@@ -665,7 +673,7 @@ function renderClothesSystemView() {
     if (typeof inAppPurchasingHidden === 'function' && inAppPurchasingHidden()) {
       return `
       <div class="max-w-2xl mx-auto" data-testid="clothes-no-purchase">
-        ${showBack ? `<button onclick="navigateTo('${backView}')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
+        ${showBack ? `<button onclick="navigateTo('${backView}')" class="clothes-own-nav mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
           <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
           <span>${isAr ? 'العودة' : 'Back'}</span>
         </button>` : accountStrip}
@@ -710,7 +718,7 @@ function renderClothesSystemView() {
     <div class="max-w-6xl mx-auto">
       ${showBack ? `
       <!-- Back Button -->
-      <button onclick="navigateTo('${backView}')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
+      <button onclick="navigateTo('${backView}')" class="clothes-own-nav mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
         <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
         <span>${backLabel}</span>
       </button>` : accountStrip}
@@ -742,7 +750,7 @@ function renderClothesSystemView() {
 // Language, Sign out, Privacy and Delete account for a subscriber whose whole app is this view.
 function renderClothesAccountStrip(isAr) {
   return `
-      <div data-testid="clothes-account-strip" class="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div data-testid="clothes-account-strip" class="clothes-own-nav mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex gap-2">
           <button type="button" onclick="toggleLanguage()" class="min-h-11 glass-panel rounded-xl px-4 font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="languages" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
           <button type="button" onclick="handleLogout()" class="min-h-11 rounded-xl px-4 font-bold text-rose-600 bg-rose-50 dark:bg-rose-900/20 hover:bg-rose-100 flex items-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${isAr ? 'تسجيل الخروج' : 'Sign out'}</button>

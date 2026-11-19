@@ -106,6 +106,16 @@ function adsStudioUrlParams() {
   return keep ? { tab: hereTab, section: here.get('section'), id: here.get('id'), step: here.get('step') } : { tab };
 }
 
+// Open a screen at an address of its own, the way a bookmark would. The frame's sidebar and the owner
+// dashboard open a system's sections like this; the system reads its own tab from the address.
+function openAddress(view, query) {
+  const path = VIEW_TO_PATH[view];
+  if (!path) return navigateTo(view);
+  try { window.history.pushState({ view }, '', `${path}${query ? `?${query}` : ''}`); } catch (_) {}
+  restoreViewStateFromUrl(view);
+  navigateToInternal(view, false);
+}
+
 // Re-apply the sub-state carried in the URL when a view is opened by link.
 function restoreViewStateFromUrl(view) {
   const params = getUrlParams();

@@ -212,14 +212,19 @@ async function createUserViaUi(page, { name, email, password, role }) {
 }
 
 // Open one Clothes System tab: deep link first (/clothes-system?tab=...),
-// then the real tab-bar button so the tab is active even if the URL restore
-// ever changes. Tab labels come from CLOTHES_TABS in clothes.js.
+// then the real button so the tab is active even if the URL restore ever
+// changes. On a wide screen the sections are lines of the shared frame's
+// sidebar; on a phone or tablet they are the system's own tab bar. Tab labels
+// come from CLOTHES_TABS in clothes.js.
 async function openClothesTab(page, tab) {
   const labels = { products: /^products$/i, shipments: /^shipments$/i, orders: /^orders$/i };
   await page.goto(`/clothes-system?tab=${tab}`);
-  const tabBar = page.locator('.clothes-tab-bar');
-  await expect(tabBar).toBeVisible();
-  await tabBar.getByRole('button', { name: labels[tab] }).click();
+  const wide = page.viewportSize().width > 900;
+  const sections = wide ? page.locator('#app-sidebar .workspace-sidebar-nav') : page.locator('.clothes-tab-bar');
+  const button = sections.getByRole('button', { name: labels[tab] });
+  await expect(button).toBeVisible();
+  await button.click();
+  await expect(page.locator('.clothes-tab-bar'))[wide ? 'toBeHidden' : 'toBeVisible']();
 }
 
 // openClothesTab reloads the page, and the Clothes collections arrive after

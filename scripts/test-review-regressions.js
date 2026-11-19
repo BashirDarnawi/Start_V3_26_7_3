@@ -1207,7 +1207,7 @@ async function main() {
       if (user.id === 'none') assert.ok(!html.includes('workspace-sidebar-nav') && html.includes('Contact admin for permissions'));
     }
   });
-  await test('redesign M4 frame: the platform\'s own screens join the frame (sidebar, top bar with search, and on a phone the header and tab bar); the two systems keep their own navigation', async () => {
+  await test('redesign frame: the platform\'s own screens join the frame (sidebar, top bar with search, and on a phone the header and tab bar); the two systems get the sidebar and keep their own header and phone navigation', async () => {
     const f = frameFixture(frameAdmin);
     f.sandbox.hasSubscription = () => true;
     const draw = view => { f.state.currentView = view; f.sandbox.renderView = () => '<p>view</p>'; return String(f.run('renderMainApp()')); };
@@ -1217,9 +1217,15 @@ async function main() {
       // On a phone: the same header and tab bar everywhere, so the Admin is never left on a screen with no way to the dashboard.
       assert.ok(html.includes('mobile-app-header') && html.includes('mobile-bottom-nav') && html.includes(`onclick="navigateTo('control-center')" class="mobile-bottom-nav-item`), view);
     }
+    // Round 2: the two systems sit in the frame too. They keep their own header, and on a phone their own
+    // navigation, so the platform's top bar, phone header and tab bar are not drawn over them.
     for (const view of ['clothes-system', 'ads-studio']) {
       const html = draw(view);
-      assert.ok(!html.includes('id="app-sidebar"') && !html.includes('workspace-topbar') && !html.includes('mobile-bottom-nav'), `${view} draws its own navigation`);
+      assert.ok(html.includes('id="app-sidebar"'), `${view}: before, no sidebar: the only way out was the system's own Back link`);
+      assert.ok(!html.includes('workspace-topbar') && !html.includes('mobile-app-header') && !html.includes('mobile-bottom-nav'), `${view} keeps its own header and phone navigation`);
+      // The Studio draws its own list of sections, so the frame stays a narrow rail beside it; Clothes gets the full sidebar.
+      assert.equal(/<aside id="app-sidebar" class="app-sidebar frame-rail /.test(html), view === 'ads-studio', view);
+      for (const control of [`onclick="navigateTo('control-center')"`, 'class="frame-menu"', 'class="frame-menu frame-account"', 'onclick="handleLogout()"']) assert.ok(html.includes(control), `${view}: ${control}`);
     }
     // The top bar names the screen it is on (it said "Albayan Manager" for every platform screen).
     const titles = { 'services-hub': 'Services Hub', 'service-placeholder': 'Services Hub', 'smart-systems': 'Smart Systems', wallet: 'Wallet', 'charge-wallet': 'Charge wallet', plans: 'Plans & bundles', 'control-center': 'Control Center', receipts: 'Receipts' };
@@ -1272,6 +1278,69 @@ async function main() {
     const empty = modals.slice(modals.indexOf('if (visiblePages.length === 0) {'), modals.indexOf('// NEW DESIGN: Full-height scrollable modal'));
     assert.ok(empty.includes('AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin()') && empty.includes('An Admin creates ads on the pages that arrive through Meta Sync on the Ads screen.'));
     assert.ok(empty.includes('Please add a Facebook Page first before creating an ad.') && empty.includes("'Open Pages'") && !empty.includes("'Add Page'"));
+  });
+  await test('redesign round 2: the Clothes System sits in the frame: the sidebar lists the sections the system hands over and opens each by its address; its own back link, tab bar and account strip are for phones', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    run('Security').escapeHtml = plainEscape;
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.hasSubscription = () => true;
+    state.currentUser = { id: 'admin', name: 'Owner', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser];
+    state.currentView = 'clothes-system';
+    const nav = html => (html.split('workspace-sidebar-nav">')[1] || '').split('</nav>')[0];
+    const sections = html => Array.from(nav(html).matchAll(/<button type="button" onclick="([^"]+)"( aria-current="page")? class="frame-link( alb-nav-active)?"><i data-lucide="([^"]+)"><\/i><span>([^<]+)<\/span>/g), m => [m[1], m[5], !!m[2] && !!m[3]]);
+    // The door: the system's own four sections, and which one is on the screen.
+    assert.deepEqual(JSON.parse(JSON.stringify(sandbox.clothesFrameSections())), [['dashboard', 'layout-dashboard', 'Dashboard', true], ['products', 'shirt', 'Products', false], ['shipments', 'plane', 'Shipments', false], ['orders', 'shopping-bag', 'Orders', false]]);
+    let admin = String(run('renderMainApp()'));
+    assert.deepEqual(sections(admin), [
+      ["navigateTo('control-center')", 'Owner dashboard', false],
+      ["openAddress('clothes-system', 'tab=dashboard')", 'Dashboard', true],
+      ["openAddress('clothes-system', 'tab=products')", 'Products', false],
+      ["openAddress('clothes-system', 'tab=shipments')", 'Shipments', false],
+      ["openAddress('clothes-system', 'tab=orders')", 'Orders', false]]);
+    assert.ok(/<summary><span class="alb-mark frame-mark">A<\/span><span><b>Clothes System<\/b><small>Switch area<\/small>/.test(admin), 'the switcher names the area');
+    assert.ok(/<button type="button" onclick="navigateTo\('clothes-system'\)" aria-current="true">/.test(admin), 'and ticks it in its list');
+    // Opening a section by its address: the system reads its tab from the address and the sidebar follows.
+    const pushed = [];
+    sandbox.window.history.pushState = (stateObject, title, url) => { pushed.push(url); sandbox.window.location.pathname = url.split('?')[0]; sandbox.window.location.search = url.includes('?') ? `?${url.split('?')[1]}` : ''; };
+    sandbox.cancelPendingRequests = () => {}; sandbox.debouncedSaveState = () => {}; sandbox.requestViewScrollReset = () => {};
+    sandbox.URLSearchParams = URLSearchParams;
+    sandbox.openAddress('clothes-system', 'tab=orders');
+    assert.deepEqual(pushed, ['/clothes-system?tab=orders']);
+    assert.equal(run('_clothesActiveTab'), 'orders');
+    admin = String(run('renderMainApp()'));
+    assert.deepEqual(sections(admin).filter(line => line[2]).map(line => line[1]), ['Orders'], 'one current line: the section on the screen');
+    // The system's own navigation stays in the page for phones and tablets, marked so wide screens leave it out.
+    assert.ok(/<button onclick="navigateTo\('smart-systems'\)" class="clothes-own-nav /.test(admin) && /<div class="clothes-tab-bar clothes-own-nav /.test(admin), 'the back link and the tab bar are marked as the system\'s own navigation');
+    assert.ok(/@media \(min-width: 901px\) \{\s*\.app-sidebar ~ \.app-main \.clothes-own-nav \{ display: none; \}\s*\}/.test(fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8')), 'and left out from 901 px, where the sidebar is on the screen');
+    // Arabic names come from the system too.
+    state.language = 'ar';
+    assert.deepEqual(sections(String(run('renderMainApp()'))).map(line => line[1]), ['لوحة المالك', 'نظرة عامة', 'البضاعة', 'الشحنات القادمة', 'طلبات الزبائن']);
+    state.language = 'en';
+    // A subscriber whose whole app is the Clothes System: one area (no switcher, no owner dashboard), the four
+    // sections, and the account menu. The strip stays in the page for the phone.
+    const subscriberPermissions = JSON.parse(JSON.stringify(run('PERMISSION_TEMPLATES.clothesSubscriber.permissions')));
+    state.currentUser = { id: 'sub1', name: 'Sub', role: 'Employee', permissions: subscriberPermissions };
+    state.users = [state.currentUser];
+    let subscriber = String(run('renderMainApp()'));
+    assert.ok(subscriber.includes('<div class="frame-one"><span class="alb-mark frame-mark">A</span><b>Clothes System</b></div>') && !subscriber.includes('class="frame-menu">'), 'one area: its name, no switcher');
+    assert.deepEqual(sections(subscriber).map(line => line[0]), ['dashboard', 'products', 'shipments', 'orders'].map(tab => `openAddress('clothes-system', 'tab=${tab}')`));
+    assert.ok(subscriber.includes('class="frame-menu frame-account"') && /<div data-testid="clothes-account-strip" class="clothes-own-nav /.test(subscriber));
+    // While the subscription gate is up the system hands over no sections; the sidebar shows none, and never "No access granted".
+    sandbox.hasSubscription = () => false;
+    assert.deepEqual(Array.from(sandbox.clothesFrameSections()), []);
+    subscriber = String(run('renderMainApp()'));
+    assert.ok(subscriber.includes('Subscription required') && sections(subscriber).length === 0 && subscriber.includes('<nav class="workspace-sidebar-nav"></nav>') && !subscriber.includes('frame-locked'), nav(subscriber));
+    // Before the system's bundle is there (or if it never loads), the frame still stands: the area name and the account menu.
+    const bare = loadBrowserSource();
+    bare.run('Security').escapeHtml = plainEscape;
+    bare.sandbox.hasSubscription = () => true;
+    bare.sandbox.renderView = () => '<p>loading</p>';
+    bare.state.currentUser = { id: 'sub1', name: 'Sub', role: 'Employee', permissions: subscriberPermissions };
+    bare.state.users = [bare.state.currentUser];
+    bare.state.currentView = 'clothes-system';
+    const loading = String(bare.run('renderMainApp()'));
+    assert.ok(loading.includes('<b>Clothes System</b>') && loading.includes('<nav class="workspace-sidebar-nav"></nav>') && loading.includes('class="frame-menu frame-account"') && !loading.includes('frame-locked'));
   });
   // Redesign round 2: the browser's confirm and prompt boxes are gone everywhere. The app asks in its own
   // box (appConfirm, appPrompt): same question, same answer, in the app's look and language.
@@ -6850,17 +6919,20 @@ async function main() {
       sandbox.hasSubscription = id => subscribed && id === 'clothes_system';
       const html = String(run('renderMainApp()'));
       assert.equal(html.includes('Subscribe now'), !subscribed);
+      // On the phone only the system's own strip is on the screen (the frame's sidebar is for wide screens), so the
+      // four controls must be inside the strip itself.
+      const strip = (html.split('data-testid="clothes-account-strip"')[1] || '').split(/<!-- Header -->|<div class="glass-panel rounded-2xl p-12/)[0];
       for (const control of ['onclick="toggleLanguage()"', 'onclick="handleLogout()"', 'href="https://albayanhub.com/privacy"', 'href="https://albayanhub.com/delete-account"']) {
-        assert.ok(html.includes(control), `${subscribed ? 'main view' : 'paywall'}: before, no ${control}`);
+        assert.ok(strip.includes(control), `${subscribed ? 'main view' : 'paywall'}: before, no ${control}`);
       }
     }
     sandbox.hasSubscription = () => true;
     state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
     const admin = String(run('renderMainApp()'));
-    assert.ok(admin.includes("navigateTo('smart-systems')") && !admin.includes('handleLogout()'), 'an admin keeps the back button and gets no strip');
+    assert.ok(admin.includes("navigateTo('smart-systems')") && !admin.includes('data-testid="clothes-account-strip"'), 'an admin keeps the back button and gets no strip');
     state.currentUser = { id: 'emp', role: 'Employee', permissions: { ...subscriberPermissions, customers: ['view'] } };
     const staff = String(run('renderMainApp()'));
-    assert.ok(staff.includes("navigateTo('customers')") && !staff.includes('handleLogout()'), 'staff with other pages keep the back button');
+    assert.ok(staff.includes("navigateTo('customers')") && !staff.includes('data-testid="clothes-account-strip"'), 'staff with other pages keep the back button');
     const studio = studioFixture();
     studio.replies['/api/studio/profile'] = { whatsappNumber: '' };
     studio.state.serverBaseUrl = 'https://albayanhub.com';

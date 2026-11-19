@@ -1253,8 +1253,11 @@ check('hub, plans and charge-wallet screens exist and stay admin-only platform v
   servicesWallet.includes('function renderChargeWalletView()') &&
   views.includes("case 'plans': return renderPlansView();") &&
   views.includes("case 'charge-wallet': return renderChargeWalletView();") &&
-  // Redesign M4: the platform's own screens sit in the shared frame; only the two systems draw their own navigation.
-  views.includes("const showSidebar = !['clothes-system', 'ads-studio'].includes(state.currentView);") &&
+  // Redesign: every screen sits in the shared frame; only the Studio's own door (/studio) has none. The two
+  // systems keep their own header and, on phones, their own navigation (no phone header or tab bar there).
+  views.includes("const showSidebar = !IS_STUDIO_SHELL;") &&
+  views.includes("const phoneNav = showSidebar && !['clothes-system', 'ads-studio'].includes(state.currentView);") &&
+  views.includes("${phoneNav ? renderMobileBottomNavigation() : ''}") &&
   dataAudit.includes("'service-placeholder', 'wallet', 'plans', 'charge-wallet']") &&
   routing.includes("'plans': '/plans'") && routing.includes("'charge-wallet': '/charge-wallet'"));
 

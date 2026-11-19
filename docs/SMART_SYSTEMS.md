@@ -37,6 +37,23 @@ numbers from each system and follows the same separation:
   `/clothes-system?tab=products`), the way a bookmark would. The system reads its own tab from the address.
 - A new system that wants a line on the dashboard adds its own door in the same way.
 
+## The shared frame and the systems
+
+The frame (the sidebar with the area switcher, the sections and the account menu) is a platform part.
+A system sits inside it and keeps its own screens:
+
+- **A system hands the frame its list of sections through its own door.** The Clothes System's door is
+  `clothesFrameSections()` in its own bundle: `[tab, icon, name, is it on screen]` for each section, and
+  none while its subscription gate is up. The sidebar draws those lines and opens each by its address
+  (`openAddress('clothes-system', 'tab=orders')`); it never sets a system's tab itself.
+- **A system keeps its own header, and on phones and tablets its own navigation.** The frame's phone
+  header and tab bar are not drawn over a system. The Clothes System marks its own back link, tab bar
+  and account strip with `clothes-own-nav`; `style.css` leaves them out from 901 px, where the sidebar
+  is on the screen.
+- **The Ads Studio keeps its own list of sections in the page.** Beside it the frame stays a narrow
+  rail (`.frame-rail`: the area switcher, the owner dashboard, the account menu) at every wide size.
+  The Studio's own door (`/studio`) has no frame at all: there is only one area there.
+
 ## Adding a new system (template)
 
 1. `server/systems/<name>/__init__.py` with a docstring and `OWNED_TYPES = frozenset({...})` (new, unique record type names).

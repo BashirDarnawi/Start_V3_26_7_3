@@ -14342,6 +14342,16 @@ function adsStudioUrlParams() {
   return keep ? { tab: hereTab, section: here.get('section'), id: here.get('id'), step: here.get('step') } : { tab };
 }
 
+// Open a screen at an address of its own, the way a bookmark would. The frame's sidebar and the owner
+// dashboard open a system's sections like this; the system reads its own tab from the address.
+function openAddress(view, query) {
+  const path = VIEW_TO_PATH[view];
+  if (!path) return navigateTo(view);
+  try { window.history.pushState({ view }, '', `${path}${query ? `?${query}` : ''}`); } catch (_) {}
+  restoreViewStateFromUrl(view);
+  navigateToInternal(view, false);
+}
+
 // Re-apply the sub-state carried in the URL when a view is opened by link.
 function restoreViewStateFromUrl(view) {
   const params = getUrlParams();
@@ -16655,15 +16665,17 @@ function renderMobileBottomNavigation() {
 
 function renderMainApp(viewHTML = null) {
   const dir = getDir();
-  // The two systems draw their own navigation. Every other screen sits in the shared frame.
-  const showSidebar = !['clothes-system', 'ads-studio'].includes(state.currentView);
+  // Every screen sits in the shared frame; only the Studio's own door (/studio) has none. A system
+  // keeps its own header, and on phones its own navigation: no phone header or tab bar there.
+  const showSidebar = !IS_STUDIO_SHELL;
+  const phoneNav = showSidebar && !['clothes-system', 'ads-studio'].includes(state.currentView);
   
   return `
     <div class="app-shell ui-workspace flex min-h-screen" dir="${dir}" data-ui-design="studio-2026">
       ${showSidebar ? renderSidebar() : ''}
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
       <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
-        ${showSidebar ? `
+        ${phoneNav ? `
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
           <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
           <div class="min-w-0 flex-1">
@@ -16679,7 +16691,7 @@ function renderMainApp(viewHTML = null) {
         ` : ''}
         <div id="workspace-view-content" data-view="${Security.escapeHtml(String(state.currentView || ''))}" class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${viewHTML === null ? renderView() : viewHTML}</div>
       </main>
-      ${showSidebar ? renderMobileBottomNavigation() : ''}
+      ${phoneNav ? renderMobileBottomNavigation() : ''}
     </div>
     ${typeof shellShouldShowOnboarding === 'function' && shellShouldShowOnboarding() ? renderMobileOnboarding() : ''}
   `;
@@ -16708,7 +16720,7 @@ function renderSidebar() {
   const view = state.currentView;
   const may = id => admin || (!PLATFORM_ADMIN_ONLY_VIEWS.has(id) && shellCanOpen(id));
   const collect = shellCanCollect();
-  const line = (id, icon, label, allowed = may(id)) => allowed ? `<button type="button" onclick="navigateTo('${id}')"${view === id ? ' aria-current="page"' : ''} class="frame-link${view === id ? ' alb-nav-active' : ''}"><i data-lucide="${icon}"></i><span>${label}</span></button>` : '';
+  const line = (id, icon, label, allowed = may(id), open = `navigateTo('${id}')`, on = view === id) => allowed ? `<button type="button" onclick="${open}"${on ? ' aria-current="page"' : ''} class="frame-link${on ? ' alb-nav-active' : ''}"><i data-lucide="${icon}"></i><span>${label}</span></button>` : '';
   const group = (label, lines) => lines ? `<section class="workspace-nav-group"><h2>${label}</h2>${lines}</section>` : '';
   const manager =
     group(isAr ? 'مساحة العمل' : 'Workspace', line('analytics', 'layout-dashboard', t('analytics')) + line('customers', 'smile', t('customers')) + line('receipts', 'receipt', t('receipts')) + line('pages', 'file-text', t('pages')) + line('ads', 'megaphone', t('ads'))) +
@@ -16722,7 +16734,13 @@ function renderSidebar() {
     may('clothes-system') && ['clothes-system', 'shirt', t('clothesSystem')],
     admin && ['services-hub', 'grid-3x3', isAr ? 'الخدمات' : 'Services']
   ].filter(Boolean);
-  const here = view === 'control-center' ? areas[0] : areas.find(a => a[0] === (PLATFORM_ADMIN_ONLY_VIEWS.has(view) ? 'services-hub' : manager && areas[admin ? 1 : 0][0]));
+  const here = areas.find(a => a[0] === view) || areas.find(a => a[0] === (PLATFORM_ADMIN_ONLY_VIEWS.has(view) ? 'services-hub' : manager && areas[admin ? 1 : 0][0]));
+  // A system hands the frame its sections through its own door ([tab, icon, name, on screen]); the frame
+  // draws them and opens each by its address. No list yet (bundle loading, or its gate is up): no lines.
+  // The Ads Studio keeps its own list of sections beside the frame, which stays a narrow rail there.
+  const rail = view === 'ads-studio';
+  const system = rail || view === 'clothes-system';
+  const door = !rail && system && typeof clothesFrameSections === 'function' ? clothesFrameSections() : [];
   const name = here ? here[2] : t('adManager');
   const dashboard = admin ? line('control-center', 'gauge', areas[0][2]) : '';
   const noBuy = inAppPurchasingHidden();
@@ -16730,12 +16748,14 @@ function renderSidebar() {
     ? dashboard + group(isAr ? 'الأقسام' : 'Areas', areas.slice(1).map(a => line(a[0], a[1], a[2], true)).join(''))
     : here && here[0] === 'services-hub'
       ? dashboard + group(here[2], [['services-hub', 'grid-3x3'], ['smart-systems', 'cpu'], ['wallet', 'wallet'], ['charge-wallet', 'circle-plus', !noBuy], ['plans', 'layers', !noBuy]].map(([id, icon, shown]) => line(id, icon, platformViewName(id), shown)).join(''))
-      : dashboard + manager;
+      : system
+        ? dashboard + group(name, door.map(([tab, icon, label, on]) => line(tab, icon, label, true, `openAddress('${view}', 'tab=${tab}')`, on)).join(''))
+        : dashboard + manager;
   const mark = '<span class="alb-mark frame-mark">A</span>';
   const fold = '<i data-lucide="chevrons-up-down"></i>';
   return `
     ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
-    <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 border-r transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${isAr ? 'التنقل الرئيسي' : 'Main navigation'}">
+    <aside id="app-sidebar" class="app-sidebar${rail ? ' frame-rail' : ''} fixed inset-y-0 left-0 z-50 w-72 border-r transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${isAr ? 'التنقل الرئيسي' : 'Main navigation'}">
       <div class="frame-head">
         ${areas.length > 1 ? `<details class="frame-menu">
           <summary>${mark}<span><b>${name}</b><small>${isAr ? 'تبديل القسم' : 'Switch area'}</small></span>${fold}</summary>
@@ -16743,7 +16763,7 @@ function renderSidebar() {
         </details>` : `<div class="frame-one">${mark}<b>${name}</b></div>`}
         <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden" aria-label="${isAr ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x"></i></button>
       </div>
-      ${sections ? `<nav class="workspace-sidebar-nav">${sections}</nav>` : `
+      ${sections || system ? `<nav class="workspace-sidebar-nav">${sections}</nav>` : `
       <div class="frame-locked">
         <i data-lucide="lock"></i>
         <p>${isAr ? 'لا توجد صلاحية' : 'No access granted'}</p>

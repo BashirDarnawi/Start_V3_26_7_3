@@ -2310,6 +2310,13 @@ body.is-mobile * {
   -webkit-user-drag: none;
 }
 
+/* On wide screens the Clothes System sits in the shared frame: the sidebar lists its sections, the
+   area switcher leads out and the account menu holds language, privacy and sign-out. Its own back
+   link, tab bar and account strip are for phones and tablets, where it draws its own navigation. */
+@media (min-width: 901px) {
+  .app-sidebar ~ .app-main .clothes-own-nav { display: none; }
+}
+
 /* Clothes forms use named grids instead of fixed inline widths so inputs stay
    readable on a 320-390px phone while retaining the compact desktop layout. */
 .clothes-variant-row {

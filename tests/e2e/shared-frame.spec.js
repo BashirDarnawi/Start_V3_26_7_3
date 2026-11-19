@@ -1,13 +1,14 @@
-// The shared frame (redesign M4): the area switcher, the sections of each area, the account menu,
-// the rail between 901 and 1279 px, and centred dialogs on tablets. The test sets its own window
-// sizes, so it runs in the desktop project only. It was written and run on Chromium; the phone
-// drawer and the phone sheet are covered by the existing phone specs on every engine.
+// The shared frame (redesign M4 and round 2): the area switcher, the sections of each area, the
+// account menu, the rail between 901 and 1279 px, centred dialogs on tablets, and the two systems
+// inside the frame (the Clothes System with its sections in the sidebar, the Ads Studio beside a
+// narrow rail). The tests set their own window sizes, so they run in desktop projects only; the
+// phone drawer and the phone sheet are covered by the existing phone specs on every engine.
 const { test, expect } = require('@playwright/test');
 
 const ADMIN_EMAIL = 'e2e.admin@albayan.example.com';
 const ADMIN_PASSWORD = 'E2eAdminPassword123!';
 
-test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, 'sets desktop and tablet window sizes itself');
+test.skip(({ isMobile }) => isMobile, 'sets desktop and tablet window sizes itself');
 
 async function signIn(page) {
   await page.goto('/');
@@ -141,4 +142,95 @@ test('on a tablet card lists use two columns, a dialog is a centred window as wi
   await panel.locator('input').first().click();
   await expect.poll(async () => (await box()).top).toBeLessThanOrEqual(16);  // the phone rule's top position, kept
   expect((await box()).width).toBe(resting.width);
+});
+
+test('the Clothes System sits in the frame on a wide screen: its sections are lines of the sidebar that open by address, and its own tab bar comes back on a tablet', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  await page.locator('#app-sidebar .frame-head summary').click();
+  await page.locator('#app-sidebar .frame-head .frame-menu-list button', { hasText: 'Clothes System' }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/clothes-system');
+  await expect(page.getByRole('heading', { name: 'Clothes System', exact: true })).toBeVisible();
+  // The system hands its four sections to the frame once its bundle is there.
+  await expect.poll(() => sections(page)).toEqual(['Owner dashboard', 'Dashboard', 'Products', 'Shipments', 'Orders']);
+  await expect(page.locator('#app-sidebar .frame-head summary')).toContainText('Clothes System');
+  await expect(page.locator('#app-sidebar .frame-link[aria-current="page"]')).toHaveText('Dashboard');
+  expect(await sidebarWidth(page)).toBe(264);
+  // Its own back link and tab bar step aside: the sidebar has them.
+  await expect(page.locator('.clothes-tab-bar')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Back to Smart Systems' })).toBeHidden();
+  // No platform top bar over the system's own header, and nothing scrolls sideways.
+  await expect(page.locator('.workspace-topbar')).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+
+  // A section opens at its own address, and the browser's Back returns to the one before.
+  await page.locator('#app-sidebar .frame-link', { hasText: 'Orders' }).click();
+  await expect.poll(() => page.url().replace(/^https?:\/\/[^/]+/, '')).toBe('/clothes-system?tab=orders');
+  await expect(page.locator('#app-sidebar .frame-link[aria-current="page"]')).toHaveText('Orders');
+  await expect(page.getByRole('button', { name: /new order/i })).toBeVisible();
+  await page.locator('#app-sidebar .frame-link', { hasText: 'Products' }).click();
+  await expect.poll(() => page.url().replace(/^https?:\/\/[^/]+/, '')).toBe('/clothes-system?tab=products');
+  await expect(page.getByRole('button', { name: /add product/i })).toBeVisible();
+  await page.goBack();
+  await expect.poll(() => page.url().replace(/^https?:\/\/[^/]+/, '')).toBe('/clothes-system?tab=orders');
+  await expect(page.locator('#app-sidebar .frame-link[aria-current="page"]')).toHaveText('Orders');
+  // The owner dashboard is one click away, without the Smart Systems screen in between.
+  await page.locator('#app-sidebar .frame-link', { hasText: 'Owner dashboard' }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/control-center');
+
+  // On a tablet the system draws its own navigation, as on a phone: the tab bar and the back link are back.
+  await page.setViewportSize({ width: 820, height: 1180 });
+  await page.goto('/clothes-system?tab=shipments');
+  await expect(page.locator('.clothes-tab-bar')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Back to Smart Systems' })).toBeVisible();
+  await expect(page.locator('#app-sidebar')).not.toBeInViewport();
+  await expect(page.locator('.mobile-bottom-nav')).toHaveCount(0);
+  expect(await page.evaluate(() => ({ start: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - innerWidth }))).toEqual({ start: 0, overflow: 0 });
+  expect(errors).toEqual([]);
+});
+
+test('the Ads Studio sits beside a narrow rail of the frame at every wide size, keeps its own list of sections, and its own door has no frame', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  await page.locator('#app-sidebar .frame-head summary').click();
+  await page.locator('#app-sidebar .frame-head .frame-menu-list button', { hasText: 'Ads Studio' }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/ads-studio');
+  await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+  await awayFromSidebar(page);
+  // A rail even at 1440 px: the Studio's own navigation is beside it, in the page.
+  await expect(page.locator('#app-sidebar')).toHaveClass(/frame-rail/);
+  await expect.poll(() => sidebarWidth(page)).toBe(72);
+  expect(await page.evaluate(() => ({ start: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - innerWidth }))).toEqual({ start: 72, overflow: 0 });
+  expect(await sections(page)).toEqual(['Owner dashboard']);
+  await expect(page.locator('.workspace-topbar')).toHaveCount(0);
+  // The keyboard opens the rail; the switcher lists the areas with the Studio ticked; Escape closes it.
+  await page.locator('#app-sidebar .frame-head summary').focus();
+  await expect.poll(() => sidebarWidth(page)).toBe(264);
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#app-sidebar .frame-head .frame-menu-list [aria-current="true"]')).toHaveText('Ads Studio');
+  await page.keyboard.press('Escape');
+  // The account menu is in the rail too.
+  await page.locator('#app-sidebar .frame-account summary').click();
+  await expect(page.locator('#app-sidebar .frame-account .frame-menu-list')).toBeInViewport({ ratio: 1 });
+  await expect(page.locator('#app-sidebar .frame-account .frame-menu-list button').last()).toHaveText('Logout');
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => document.activeElement.blur());
+  await awayFromSidebar(page);
+  await expect.poll(() => sidebarWidth(page)).toBe(72);
+  // One click on the rail's first line leads to the owner dashboard, where the sidebar is full width again.
+  await page.locator('#app-sidebar .frame-link').first().click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/control-center');
+  await awayFromSidebar(page);
+  await expect.poll(() => sidebarWidth(page)).toBe(264);
+
+  // The Studio's own door is unchanged: only the Studio, with no frame around it.
+  await page.goto('/studio');
+  await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+  await expect(page.locator('#app-sidebar')).toHaveCount(0);
+  expect(await page.evaluate(() => Math.round(document.querySelector('.app-main').getBoundingClientRect().left))).toBe(0);
+  expect(errors).toEqual([]);
 });

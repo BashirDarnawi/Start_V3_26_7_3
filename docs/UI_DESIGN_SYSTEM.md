@@ -96,8 +96,14 @@ migration. Existing records use the new views automatically.
   `<details class="frame-menu">`: Escape and a click elsewhere close them, one
   open at a time. Styles: the "shared frame" block at the end of
   `assets/workspace-layout.css` (classes `frame-*`), written with logical
-  properties so Arabic mirrors without extra rules. The Clothes System and the
-  Ads Studio still draw their own navigation; the switcher leads into them.
+  properties so Arabic mirrors without extra rules.
+  The two systems sit in the frame as well and keep their own screens
+  (`docs/SMART_SYSTEMS.md`, "The shared frame and the systems"). On wide
+  screens the Clothes System's sections are lines of the sidebar, handed over
+  by the system and opened by address, and its own back link and tab bar step
+  aside; the Ads Studio keeps its own list of sections in the page, beside a
+  frame that stays a narrow rail. On phones and tablets both keep their own
+  navigation, and the Studio's own door (`/studio`) has no frame.
 - **Screen sizes (since November 2026).** Wide screens: the page and the top
   bar use up to 1440 px. From 700 px the card lists (Customers, Receipts,
   Pages, Users) use two columns. From 600 to 900 px a dialog is a centred
