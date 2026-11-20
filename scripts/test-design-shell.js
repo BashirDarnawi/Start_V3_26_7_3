@@ -413,9 +413,14 @@ check('phones: the Filters button sits beside the search, Customers totals share
   assert(rule.includes('.ui-workspace .workspace-filter-toggle > span > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }'));
   // Customers: the three totals share one row while their amounts fit. Three fixed thirds cut an amount that did
   // not fit ("12,350.00 LY" at 360 px), so the row wraps and a tile is never narrower than what it holds (round 3).
-  assert(rule.includes('.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { display: flex; flex-wrap: wrap; gap: 6px; }'));
-  assert(rule.includes('.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > * { flex: 1 1 0; min-width: min-content; }'));
-  assert(!rule.includes('.page-header + .grid-cols-2 { grid-template-columns'));
+  // Round 4: tablets and laptops cut amounts the same way, so the wrapping row now holds at every width. Its rules
+  // stand before this block, outside any media query; the phone keeps its compact tiles here.
+  const totals = '.ui-workspace [data-view="customers"] .page-header + .grid-cols-2';
+  const everyWidth = layoutCss.indexOf(`\n${totals} { display: flex; flex-wrap: wrap; }\n`);
+  assert(everyWidth > 0 && everyWidth < start);
+  assert(layoutCss.includes(`\n${totals} .workspace-stat-card { flex: 1 1 72px; min-width: min-content; }\n`));
+  assert(rule.includes(`  ${totals} { gap: 6px; }`) && !rule.includes(`${totals} { display:`) && !/\.grid-cols-2 [^{]*\{ flex:/.test(rule));
+  assert(!layoutCss.includes('.page-header + .grid-cols-2 { grid-template-columns'));
   // Deliveries: heading, the four stage counters, the log, then the money summary. Nothing is hidden but the step numbers.
   const order = name => Number((rule.match(new RegExp(`\\.ops-workspace\\.ops-deliveries > ${name} \\{ order: (\\d)`)) || [])[1]);
   assert.deepEqual([order('\\.ops-hero'), order('\\.ops-pipeline'), order('\\.ops-board'), order(':is\\(\\.ops-kpi-rail, \\.ops-fee-strip\\)')], [1, 2, 3, 4]);

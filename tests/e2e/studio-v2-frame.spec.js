@@ -115,6 +115,20 @@ test('staff with the v2 desk get the Team desk frame with no wallet items', asyn
   const navItems = await desk.locator('[data-testid^="studio-staffnav-"]').evaluateAll(items => items.map(item => `${item.getAttribute('data-testid')} ${item.textContent}`));
   expect(navItems.length).toBeGreaterThanOrEqual(6);
   expect(navItems.join(' ')).not.toMatch(/wallet|payment/i);
+  // The desk's six names: 10.5 px in a phone's bar (9.5 px under 360 px), the main bar's 12 px in a tablet's
+  // (redesign round 4), and whole on one line in both.
+  const size = page.viewportSize();
+  for (const [width, px] of [[320, 9.5], [390, 10.5], [600, 12], [820, 12]]) {
+    await page.setViewportSize({ width, height: 800 });
+    const names = await desk.locator('[data-testid^="studio-staffnav-"] > span:not(.studio-desk-badge)').evaluateAll(words => words.map(word => {
+      const range = document.createRange();
+      range.selectNodeContents(word);
+      return { name: word.textContent.trim(), size: parseFloat(getComputedStyle(word).fontSize), lines: new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size, cut: word.scrollWidth > word.clientWidth + 1 };
+    }));
+    expect(names.length, `${width}px`).toBeGreaterThanOrEqual(6);
+    for (const item of names) expect([item.size, item.lines, item.cut], `${width}px: "${item.name}"`).toEqual([px, 1, false]);
+  }
+  await page.setViewportSize(size);
   await page.getByTestId('studio-back').click();
   await expect.poll(() => param(page, 'section')).toBe('requests');
   await page.getByTestId('studio-staffnav-more').click();
@@ -249,13 +263,16 @@ for (const [language, theme] of [['en', 'light'], ['ar', 'dark']]) {
               const box = element.getBoundingClientRect();
               return box.width > 0 && (box.width < 43.5 || box.height < 43.5);
             }).map(element => element.getAttribute('data-testid') || element.textContent.trim().slice(0, 30)),
-            navAtBottom: navBox ? Math.abs(navBox.bottom - innerHeight) <= 1 : null
+            navAtBottom: navBox ? Math.abs(navBox.bottom - innerHeight) <= 1 : null,
+            navSizes: navBox ? [...new Set([...nav.querySelectorAll('.studio-v2-nav-item > span')].map(word => parseFloat(getComputedStyle(word).fontSize)))] : null
           };
         });
         expect(layout.overflow, `${screen} overflows at ${width}px`).toBeLessThanOrEqual(1);
         expect(layout.outside, `${screen} at ${width}px`).toEqual([]);
         expect(layout.small, `${screen} touch targets at ${width}px`).toEqual([]);
         if (screen !== 'builder') expect(layout.navAtBottom, `${screen} section bar at ${width}px`).toBe(true);
+        // The names in the bar: 10 px under 360 px, 11 px on a phone, and the main bar's 12 px on a tablet (round 4).
+        if (screen !== 'builder') expect(layout.navSizes, `${screen} section bar names at ${width}px`).toEqual([width >= 600 ? 12 : width < 360 ? 10 : 11]);
       }
     }
     await page.evaluate(() => studioV2Open('wallet'));

@@ -1046,6 +1046,11 @@ html.dark .studio-classic { --studio-slate-fg: #cbd5e1; --studio-amber-fg: #fcd3
 body.keyboard-open .sc-nav { display: none !important; }
 /* Six sections (staff with Help on) on the narrowest phones: the longest name, «المنشورات», needs smaller letters. */
 @media (max-width: 359px) { .ui-workspace .studio-classic .sc-tab:first-child:nth-last-child(n+6), .ui-workspace .studio-classic .sc-tab:first-child:nth-last-child(n+6) ~ .sc-tab { font-size: 9.5px; } }
+/* Tablets (600 to 900 px): the three bottom bars have room for the same 12 px labels as the main app's bar. On
+   phones the Studio's bars keep 10.5 and 11 px, because up to six sections share the width. */
+@media (min-width: 600px) and (max-width: 900px) {
+  .studio-v2-nav-item, .studio-v2-nav.is-staff .studio-v2-nav-item, .ui-workspace .studio-classic .sc-tab { font-size: 12px; }
+}
 @media (min-width: 901px) {
   .sc-body { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; align-items: start; }
   .sc-body.is-focus { grid-template-columns: minmax(0, 1fr); }

@@ -146,6 +146,20 @@ pre.font-sans { font-family: inherit; }
   .workspace-directory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ui-workspace .workspace-home-overview { max-width: none; margin-inline: 0; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
 }
+/* The three Customers totals share a row while they fit, at every width. A tile is never narrower than its amount
+   (one line, by the project's rule), than the longest word of its label, or than 72 px, so nothing is cut and the
+   icon never lies over the amount: with longer amounts or on a narrower screen the row becomes two rows, then three.
+   (Three fixed thirds cut "12,350.00 LYD" at 360 px and at 768 px, and slid "2,240.00 LYD" under the icon from 900
+   to 1,024 px; a seven-digit total went under the icon on every computer.) */
+.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { display: flex; flex-wrap: wrap; }
+.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > :not(.workspace-stat-card) { display: contents; }  /* the third tile's wrapper: the three tiles share the row as equals */
+.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { flex: 1 1 72px; min-width: min-content; }
+.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-label { overflow-wrap: normal; }
+/* Tablets and small laptops: a computer's 30 px amounts leave no room for three totals in a row, so the size
+   grows with the screen (19 px at 768, 30 px from 1,277) instead of jumping from 18 to 30 px at 768. */
+@media (min-width: 768px) and (max-width: 1279px) {
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-value { font-size: clamp(19px, 2.35vw, 30px); }
+}
 @media (max-width: 600px) {
   .workspace-stat-layout { flex-direction: column-reverse; gap: 12px; align-items: flex-start; }
   .workspace-stat-layout > .min-w-0 { width: 100%; }
@@ -171,6 +185,11 @@ pre.font-sans { font-family: inherit; }
 @media (max-width: 900px) {
   .text-\[9px\], .text-\[10px\] { font-size: 11px; }
   .mobile-bottom-nav-item, .studio-v2-nav-item { font-size: 12px; }
+}
+/* Under 360 px five 12 px labels do not fit the bar: "Dashboard" and "Customers" were cut short with "…" at 320 px.
+   There the labels are 11 px (the floor) and the items give up their side padding. */
+@media (max-width: 359px) {
+  .mobile-bottom-nav-item { font-size: 11px; padding-inline: 0; }
 }
 
 /* ==========================================================================
@@ -456,14 +475,11 @@ pre.font-sans { font-family: inherit; }
   .ui-workspace .workspace-filter-toggle > :is(i, svg):last-child { display: none; }
   .ui-workspace .smart-filter-chip > :is(i, svg) { display: none; }
 
-  /* The three Customers totals share a row while they fit. A tile is never narrower than its amount (one line, by
-     the project's rule) or than the longest word of its label, so nothing is cut: with longer amounts or on a
-     narrower phone the row becomes two rows, then three. (Three fixed thirds cut "12,350.00 LYD" at 360 px.) */
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { display: flex; flex-wrap: wrap; gap: 6px; }
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > * { flex: 1 1 0; min-width: min-content; }
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { height: 100%; padding: 10px 8px; }
+  /* The three Customers totals on a phone: compact tiles without the icon (their layout is above, for every width). */
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { gap: 6px; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { padding: 10px 8px; }
   .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-layout > :last-child { display: none; }
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-label { font-size: 10px; line-height: 1.35; overflow-wrap: normal; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-label { font-size: 10px; line-height: 1.35; }
   .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-value { margin-top: 4px; font-size: 15px; line-height: 1.35; }
 
   /* (.ops-workspace.ops-deliveries: one class more than the rules in operations-workspace.css, which load later.) */

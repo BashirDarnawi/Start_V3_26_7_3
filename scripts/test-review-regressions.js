@@ -2742,9 +2742,13 @@ async function main() {
     const row = '.ui-workspace [data-view="customers"] .page-header + .grid-cols-2';
     // A wrapping row whose tiles are at least as wide as what they hold: the amount (one line, by the project's own
     // rule) and the longest word of the label (which therefore may not be told to break anywhere).
-    assert.equal(within(layout, `  ${row} { display: flex; flex-wrap: wrap; gap: 6px; }`), '@media (max-width: 600px) {');
-    assert.equal(within(layout, `  ${row} > * { flex: 1 1 0; min-width: min-content; }`), '@media (max-width: 600px) {');
-    assert.equal(within(layout, `  ${row} .workspace-stat-label { font-size: 10px; line-height: 1.35; overflow-wrap: normal; }`), '@media (max-width: 600px) {');
+    // (Round 4: the same layout now holds at every width, so these rules stand outside the phone block, at the
+    // start of a line; the check "round 4 tablets" holds the rest. The phone keeps its own gap and label size.)
+    for (const rule of [`${row} { display: flex; flex-wrap: wrap; }`, `${row} .workspace-stat-card { flex: 1 1 72px; min-width: min-content; }`, `${row} .workspace-stat-label { overflow-wrap: normal; }`]) {
+      assert.equal(layout.split(`\n${rule}\n`).length - 1, 1, `once, for every width: ${rule}`);
+    }
+    assert.equal(within(layout, `  ${row} { gap: 6px; }`), '@media (max-width: 600px) {');
+    assert.equal(within(layout, `  ${row} .workspace-stat-label { font-size: 10px; line-height: 1.35; }`), '@media (max-width: 600px) {');
     assert.ok(!layout.includes(`${row} { grid-template-columns`), 'no fixed thirds: they cut the amount that did not fit');
     assert.ok(read('style.css').includes('.workspace-stat-value, .workspace-stat-value bdi { white-space: nowrap; overflow-wrap: normal; }'), 'the amount stays on one line');
     // 360 and 375 px phones: a little less padding and a 14px amount keep five-digit totals in one row.
@@ -5635,6 +5639,68 @@ async function main() {
     notes.length = 0;
     sandbox.remindAllOverdue();
     assert.ok(notes.length === 1 && notes[0].type === 'success' && notes[0].title === 'All reminded', JSON.stringify(notes));
+  });
+
+  // Redesign round 4 (ROUND3.md section 4, item 7): tablets. The approved design keeps the phone's bottom bar on a
+  // tablet (DESIGN.md section 9), so no new navigation was built. Measuring every screen at tablet and laptop
+  // widths found amounts of money cut off, under an icon or split in two, and a bar label cut short at 320 px.
+  // tests/e2e/screen-widths.spec.js measures the result in a browser; this check holds the rules and the markup
+  // they rely on.
+  await test('round 4 tablets: the Customers totals and the dashboard\'s money tiles are never narrower than their amounts at any width, the bars keep whole names, and a tablet\'s bars share one label size', async () => {
+    const root = path.join(__dirname, '..');
+    const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+    const layout = read('assets/workspace-layout.css');
+    const management = read('assets/management-workspace.css');
+    const studio = read('assets/ads-workspace.css');
+    for (const file of ['assets/workspace-layout.css', 'assets/management-workspace.css', 'assets/ads-workspace.css']) assert.equal(read(`www/${file}`), read(file), `the phone apps carry the same ${file}`);
+    const totals = '.ui-workspace [data-view="customers"] .page-header + .grid-cols-2';
+    const has = (css, rule, why) => assert.ok(css.includes(rule), why || rule);
+    // Outside any @media: the row wraps, a tile is never narrower than its content or than 72 px, and the third
+    // tile's wrapper steps aside so the three share the row as equals.
+    const general = layout.slice(layout.indexOf('/* The three Customers totals share a row while they fit, at every width.'), layout.indexOf('/* Tablets and small laptops: a computer\'s 30 px amounts'));
+    assert.ok(general.length > 400 && !general.includes('@media'), 'the layout of the totals holds at every width');
+    for (const rule of [
+      `${totals} { display: flex; flex-wrap: wrap; }`,
+      `${totals} > :not(.workspace-stat-card) { display: contents; }`,
+      `${totals} .workspace-stat-card { flex: 1 1 72px; min-width: min-content; }`,
+      `${totals} .workspace-stat-label { overflow-wrap: normal; }`
+    ]) has(general, rule);
+    // Tablets and small laptops: the amount grows with the screen instead of jumping from 18 to 30 px.
+    has(layout, `@media (min-width: 768px) and (max-width: 1279px) {\n  ${totals} .workspace-stat-value { font-size: clamp(19px, 2.35vw, 30px); }\n}`);
+    // The phone keeps its compact tiles; the layout rules are no longer repeated (or undone) there.
+    const phone = layout.slice(layout.indexOf('/* The three Customers totals on a phone:'));
+    const phoneRules = phone.slice(0, phone.indexOf('\n\n'));
+    assert.ok(phoneRules.includes(`${totals} .workspace-stat-layout > :last-child { display: none; }`) && !/display: (flex|grid)|flex:|min-width/.test(phoneRules), phoneRules);
+    // The project's own rule that an amount is one line is still there (style.css), and the tile's markup is what the rules address.
+    assert.ok(read('style.css').includes('.workspace-stat-value, .workspace-stat-value bdi { white-space: nowrap; overflow-wrap: normal; }'));
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'en';
+    const card = String(sandbox.renderStatCard('Outstanding Debts', '2,240.00 LYD', 'alert-circle', 'from-rose-500 to-pink-600'));
+    assert.match(card, /<div class="workspace-stat-card [^"]*">\s*<div class="workspace-stat-layout flex items-start justify-between">\s*<div class="min-w-0 flex-1">\s*<p class="workspace-stat-label [^"]*">Outstanding Debts<\/p>\s*<p class="workspace-stat-value [^"]*"><bdi>2,240\.00 LYD<\/bdi><\/p>\s*<\/div>\s*<div class="w-8 h-8 md:w-12 md:h-12 [^"]*flex-shrink-0 ml-2">/);
+
+    // The dashboard: an amount is one line, a tile is never narrower than it, two to a row while they fit.
+    has(management, '.management-figures { display: flex; flex-wrap: wrap; gap: 12px; }');
+    assert.ok(/\.management-figure \{ flex: 1 1 40%; min-width: min-content; display: grid; /.test(management));
+    has(management, '.management-figure > strong { white-space: nowrap; }');
+    assert.ok(!/\.management-figures[^{]*\{[^}]*grid-template-columns/.test(management), 'no fixed columns for the money tiles any more');
+    has(management, '@media (max-width: 767px) {\n  .management-protection-stack { grid-template-columns: minmax(0, 1fr); }\n}', 'below 768 px the three side cards are one column');
+    const narrow = management.slice(management.lastIndexOf('@media (max-width: 599px) {'));
+    assert.ok(narrow.includes('.management-check-totals { grid-template-columns: minmax(0, 1fr); }') && narrow.includes('.management-figure { flex-basis: 100%; }'), 'a phone: one money tile to a row');
+    assert.match(read('src/12b-control-center.js'), /class="management-figure"><span>\$\{label\}<\/span><strong><bdi>\$\{Security\.escapeHtml\(value\)\}<\/bdi><\/strong>/);
+
+    // The main bar: 12 px names (the project's text floor), 11 px and no side padding under 360 px, where
+    // "Dashboard" and "Customers" were cut short with "…".
+    const floor = layout.slice(layout.indexOf('/* Phone text floor:'));
+    assert.match(floor, /^[^@]*@media \(max-width: 900px\) \{\n {2}\.text-\\\[9px\\\], \.text-\\\[10px\\\] \{ font-size: 11px; \}\n {2}\.mobile-bottom-nav-item, \.studio-v2-nav-item \{ font-size: 12px; \}\n\}\n\/\*[^*]*\*\/\n@media \(max-width: 359px\) \{\n {2}\.mobile-bottom-nav-item \{ font-size: 11px; padding-inline: 0; \}\n\}/);
+    // A tablet's three bottom bars use the same 12 px; the rule comes after the phone sizes it replaces.
+    const tablet = '@media (min-width: 600px) and (max-width: 900px) {\n  .studio-v2-nav-item, .studio-v2-nav.is-staff .studio-v2-nav-item, .ui-workspace .studio-classic .sc-tab { font-size: 12px; }\n}';
+    has(studio, tablet);
+    for (const earlier of ['.studio-v2-nav.is-staff .studio-v2-nav-item { font-size: 10.5px; }', '.ui-workspace .studio-classic .sc-tab { position: relative;']) {
+      assert.ok(studio.indexOf(earlier) >= 0 && studio.indexOf(earlier) < studio.indexOf(tablet), earlier);
+    }
+    // The bottom bar itself is what it was: one bar up to 900 px, the side list from 901 px (the design's switch).
+    const page = read('style.css');
+    assert.ok(/@media \(max-width: 900px\) \{[\s\S]*?\.mobile-bottom-nav \{\s*position: fixed;/.test(page) && /@media \(min-width: 901px\) \{[\s\S]*?\.mobile-bottom-nav \{\s*display: none !important;/.test(page));
   });
 
   // Redesign round 4 (ROUND3.md section 4, item 8; finding B-14): every English/Arabic text of the app in one list,

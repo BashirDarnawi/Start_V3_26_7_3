@@ -146,6 +146,11 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
   .management-signout { margin-inline-start: 200px; }
   .management-plan-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 }
+/* Below 768 px the three cards beside "Needs you today" are one column: two half-width cards left the money tiles
+   86 px for an amount ("10,150.00 LYD" needs 104). */
+@media (max-width: 767px) {
+  .management-protection-stack { grid-template-columns: minmax(0, 1fr); }
+}
 @media (max-width: 899px) {
   .management-hero { flex-direction: column; gap: 18px; }
   .management-hero-side { width: 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
@@ -169,7 +174,6 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
   .management-metric > strong { font-size: 26px; }
   .management-metric > strong.management-metric-word { font-size: 19px; }
   .management-metric > span:last-child { font-size: 10px; }
-  .management-protection-stack { grid-template-columns: minmax(0, 1fr); }
   .management-priority-item { flex-direction: column; gap: 12px; }
   .management-task-action { align-self: stretch; max-width: none; padding-inline-start: 52px; }
   .management-connection-grid { gap: 9px; }
@@ -232,8 +236,12 @@ html.dark .management-alert { border-color: #6b2a3a; background: #3a1b25; }
 .management-attention-text span { color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
 .management-attention-list .management-button { max-width: 42vw; }
 .management-attention-note { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-block-start: 16px; padding: 12px 14px; border-radius: 14px; background: var(--ui-surface-soft); color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
-.management-figures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.management-figure { display: grid; align-content: start; gap: 6px; padding: 15px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface); color: var(--ui-ink); text-align: start; }
+/* The money tiles sit two to a row while their amounts fit. An amount stays on one line (the project's rule) and a
+   tile is never narrower than its amount, so a longer amount or a narrower card gives that tile a row of its own
+   instead of breaking the number ("10,150.0 / 0 LYD" at 601 px; a seven-digit amount broke on computers too). */
+.management-figures { display: flex; flex-wrap: wrap; gap: 12px; }
+.management-figure { flex: 1 1 40%; min-width: min-content; display: grid; align-content: start; gap: 6px; padding: 15px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface); color: var(--ui-ink); text-align: start; }
+.management-figure > strong { white-space: nowrap; }
 .management-figure:hover, .management-door:hover { border-color: var(--ui-accent); background: var(--ui-accent-soft); }
 .management-figure > span { color: var(--ui-muted); font-size: 12px; font-weight: 650; line-height: 1.5; }
 .management-figure > strong { font-size: clamp(16px, 1.3vw, 19px); line-height: 1.3; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
@@ -282,7 +290,8 @@ html.dark .management-alert { border-color: #6b2a3a; background: #3a1b25; }
 @media (max-width: 599px) {
   .management-tabs { width: 100%; }
   .management-tab { flex: 1; }
-  .management-figures, .management-check-totals { grid-template-columns: minmax(0, 1fr); }
+  .management-check-totals { grid-template-columns: minmax(0, 1fr); }
+  .management-figure { flex-basis: 100%; }
   .management-attention-list > li { gap: 10px; }
   .management-attention-list .management-button { padding-inline: 11px; }
   .management-doors { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }

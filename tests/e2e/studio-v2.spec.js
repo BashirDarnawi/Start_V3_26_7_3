@@ -163,7 +163,7 @@ test.describe('Albayan Studio v2 (pilot)', () => {
       const items = [...bar.querySelectorAll('.sc-tab')].map(item => {
         const r = item.getBoundingClientRect(); const word = item.querySelector('span'); const style = getComputedStyle(word);
         return { name: word.textContent, top: Math.round(r.top), left: Math.round(r.left), right: Math.round(r.right), bottom: Math.round(r.bottom), height: Math.round(r.height),
-          cut: word.scrollWidth > word.clientWidth + 1 || item.scrollWidth > item.clientWidth + 1, wraps: `${style.overflowWrap} ${style.wordBreak}` };
+          cut: word.scrollWidth > word.clientWidth + 1 || item.scrollWidth > item.clientWidth + 1, wraps: `${style.overflowWrap} ${style.wordBreak}`, size: parseFloat(style.fontSize) };
       });
       scrollTo(0, document.documentElement.scrollHeight);
       const end = main.getBoundingClientRect().bottom;
@@ -184,6 +184,8 @@ test.describe('Albayan Studio v2 (pilot)', () => {
         for (const [index, item] of seen.items.entries()) {
           expect(item.height, `${at}: "${item.name}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
           expect([item.cut, item.wraps], `${at}: "${item.name}" is whole and never broken inside a word`).toEqual([false, 'normal normal']);
+          // 11 px on a phone (up to six sections share the width); a tablet has room for the main bar's 12 px.
+          expect(item.size, `${at}: the size of "${item.name}"`).toBe(width >= 600 ? 12 : 11);
           if (index) expect(language === 'ar' ? item.right <= seen.items[index - 1].left + 1 : item.left >= seen.items[index - 1].right - 1, `${at}: "${item.name}" stands beside the one before it`).toBe(true);
         }
         expect(seen.end, `${at}: the end of the page stays above the bar`).toBeLessThanOrEqual(seen.barTop + 1);
@@ -214,11 +216,12 @@ test.describe('Albayan Studio v2 (pilot)', () => {
     for (const language of ['en', 'ar']) {
       await setLanguage(page, language);
       await expect(nav.getByRole('button')).toHaveCount(6);
-      for (const width of [320, 360, 390]) {
+      for (const width of [320, 360, 390, 600, 768]) {
         await page.setViewportSize({ width, height: 800 });
         const seen = await measure();
         for (const item of seen.items) {
           expect([item.cut, item.wraps], `six sections, ${language} ${width}: "${item.name}" is whole`).toEqual([false, 'normal normal']);
+          expect(item.size, `six sections, ${language} ${width}: the size of "${item.name}"`).toBe(width >= 600 ? 12 : width < 360 ? 9.5 : 11);
           expect(item.height, `six sections, ${language} ${width}: "${item.name}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
         }
         const count = await nav.locator('.sc-tab > b').evaluate(el => { const b = el.getBoundingClientRect(); const item = el.parentElement.getBoundingClientRect(); return b.left >= item.left - 1 && b.right <= item.right + 1 && b.top >= item.top - 1; });
