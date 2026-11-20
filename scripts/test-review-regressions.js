@@ -998,14 +998,24 @@ async function main() {
   await test('redesign M4: the Studio lines come from the desk counter (a stop request is counted once), and a counter that did not answer is never shown as zero', async () => {
     const { sandbox, state, run } = dashboardFixture();
     state.serverMode = true;
-    const counts = sandbox.controlCenterStudioCounts({ waitingReview: 2, stopRequests: 3, openTickets: 5, stopTicketsOpen: 2, paymentsWaiting: 1, alerts: 4, updatedAt: '2026-11-19T10:00:00Z' });
-    assert.deepEqual(JSON.parse(JSON.stringify(counts)), { stopRequests: 3, waitingReview: 2, otherTickets: 3, paymentsWaiting: 1, alerts: 4 });
-    // A reviewer's answer has no paymentsWaiting; junk is not a count.
-    assert.deepEqual(JSON.parse(JSON.stringify(sandbox.controlCenterStudioCounts({ waitingReview: '7', stopRequests: -1, openTickets: 1, stopTicketsOpen: 4 }))), { stopRequests: 0, waitingReview: 0, otherTickets: 0, paymentsWaiting: 0, alerts: 0 });
+    const counts = sandbox.controlCenterStudioCounts({ waitingReview: 2, stopRequests: 3, openTickets: 5, stopTicketsOpen: 2, paymentsWaiting: 1, toLaunch: 6, toSettle: 1, alerts: 4, updatedAt: '2026-11-19T10:00:00Z' });
+    assert.deepEqual(JSON.parse(JSON.stringify(counts)), { stopRequests: 3, waitingReview: 2, otherTickets: 3, paymentsWaiting: 1, toLaunch: 6, toSettle: 1, alerts: 4 });
+    // A reviewer's answer has no paymentsWaiting, toLaunch or toSettle; junk is not a count.
+    assert.deepEqual(JSON.parse(JSON.stringify(sandbox.controlCenterStudioCounts({ waitingReview: '7', stopRequests: -1, openTickets: 1, stopTicketsOpen: 4, toLaunch: 2.5, toSettle: '3' }))), { stopRequests: 0, waitingReview: 0, otherTickets: 0, paymentsWaiting: 0, toLaunch: 0, toSettle: 0, alerts: 0 });
     assert.equal(sandbox.controlCenterStudioCounts(null), null);
     const studio = sandbox.getControlCenterAttention(sandbox.getControlCenterToday(), counts).find(group => group.id === 'studio');
-    assert.deepEqual(Array.from(studio.lines, line => [line.id, line.count]), [['studio-stop', 3], ['studio-review', 2], ['studio-payments', 1], ['studio-tickets', 3], ['studio-alerts', 4]], 'a stop request first, and never inside the tickets count');
-    assert.deepEqual(Array.from(studio.lines, line => line.open), ["controlCenterOpenDesk('tickets')", "controlCenterOpenDesk('requests')", "controlCenterOpenDesk('more')", "controlCenterOpenDesk('tickets')", "controlCenterOpenDesk('health')"]);
+    assert.deepEqual(Array.from(studio.lines, line => [line.id, line.count]), [['studio-stop', 3], ['studio-review', 2], ['studio-payments', 1], ['studio-tickets', 3], ['studio-launch', 6], ['studio-settle', 1], ['studio-alerts', 4]], 'a stop request first, and never inside the tickets count');
+    assert.deepEqual(Array.from(studio.lines, line => line.open), ["controlCenterOpenDesk('tickets')", "controlCenterOpenDesk('requests')", "controlCenterOpenDesk('more')", "controlCenterOpenDesk('tickets')", "controlCenterOpenDesk('launch')", "controlCenterOpenDesk('settle')", "controlCenterOpenDesk('health')"]);
+    // Round 3: the two lines the owner asked for. One waiting ad reads in the singular; none draws no line.
+    const words = Object.fromEntries(Array.from(studio.lines, line => [line.id, `${line.title} | ${line.detail} | ${line.label}`]));
+    assert.equal(words['studio-launch'], 'approved requests are waiting to be launched | Not linked to a Meta campaign yet. | Launch');
+    assert.equal(words['studio-settle'], 'ended ad is waiting to be settled | The final amount is not settled yet. | Settle');
+    const none = sandbox.getControlCenterAttention(sandbox.getControlCenterToday(), sandbox.controlCenterStudioCounts({ waitingReview: 1, toLaunch: 0 })).find(group => group.id === 'studio');
+    assert.deepEqual(Array.from(none.lines, line => line.id), ['studio-review'], 'a reviewer-shaped or zero answer draws neither line');
+    state.language = 'ar';
+    const arabic = sandbox.getControlCenterAttention(sandbox.getControlCenterToday(), sandbox.controlCenterStudioCounts({ toLaunch: 1, toSettle: 2 })).find(group => group.id === 'studio');
+    assert.deepEqual(Array.from(arabic.lines, line => `${line.title} | ${line.label}`), ['طلب مقبول بانتظار الإطلاق | الإطلاق', 'إعلانات منتهية بانتظار التسوية | التسوية']);
+    state.language = 'en';
     // The real loader asks the Studio's own server door together with the two checks it already made.
     delete sandbox.loadControlCenterStatus;
     run(fs.readFileSync(path.join(__dirname, '..', 'src', '12b-control-center.js'), 'utf8').match(/async function loadControlCenterStatus[\s\S]*?\n}\n/)[0]);

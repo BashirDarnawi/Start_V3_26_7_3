@@ -570,4 +570,58 @@ test.describe('Team desk (v2 staff frame)', () => {
     // platform noise the helper already ignores on Chromium.
     expect(errors.filter(line => !/^pageerror: .*\/api\/.* due to access control checks\.$/.test(line))).toEqual([]);
   });
+
+  // Redesign round 3: the owner dashboard's two Ads Studio lines. Their numbers come from the desk's own
+  // server counter (toLaunch, toSettle: studio_stop.launch_and_settle_counts), worked out at most once a minute.
+  test('owner dashboard: "waiting to be launched" and "waiting to be settled" show the lengths of the desk\'s own Launch and Settle lists, and each line opens its list', async ({ page, playwright, baseURL }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop-chromium', 'The owner dashboard is checked on the desktop project; a count needs one engine');
+    test.setTimeout(240_000);
+    const seeded = await seedDesk(playwright, baseURL, testInfo, 'dash', { withAdmin: true });
+    const errors = collectPageErrors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await signInStudio(page, seeded.deskAdmin, '/');
+    await expect.poll(() => page.evaluate(() => state.currentView), { timeout: BOOT_TIMEOUT }).toBe('control-center');
+
+    // The desk's own lists first. Settle reads the stored Meta answer of every approved ad: wait for those reads.
+    await page.goto('/ads-studio?tab=review&section=settle');
+    await expect(page.getByTestId('studio-desk')).toHaveAttribute('data-section', 'settle', { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId(`studio-desk-settle-${seeded.ids.ended}`)).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId(`studio-desk-settle-${seeded.ids.never}`)).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect.poll(() => page.evaluate(() => studioDeskApproved()
+      .filter(item => !String(item.settleBasis || '').trim() && studioDeskLinked(item))
+      .every(item => { const entry = _studioDesk.results.get(String(item.id)); return !!entry && entry.state === 'done'; })), { timeout: 60_000 }).toBe(true);
+    const lists = await page.evaluate(() => ({ launch: studioDeskLaunchQueue().length, settle: studioDeskEndedList().length }));
+    expect(lists.launch).toBeGreaterThanOrEqual(1);  // "approved": not linked
+    expect(lists.settle).toBeGreaterThanOrEqual(2);  // "ended" and "never"
+    await expect(page.getByTestId('studio-desk-settle-head')).toContainText(`(${lists.settle})`);
+
+    // The dashboard. Right after the seeding the server may still hand out the numbers it worked out up to a minute ago.
+    await page.goto('/control-center');
+    await expect.poll(() => page.evaluate(() => state.currentView), { timeout: BOOT_TIMEOUT }).toBe('control-center');
+    const shown = () => page.evaluate(() => {
+      const read = id => { const count = document.querySelector(`[data-attention="${id}"] .management-attention-count bdi`); return count ? Number(count.textContent) : 0; };
+      return { launch: read('studio-launch'), settle: read('studio-settle') };
+    });
+    await expect.poll(async () => {
+      await page.evaluate(() => refreshControlCenter());
+      await page.waitForFunction(() => !_controlCenter.loading);
+      return shown();
+    }, { timeout: 120_000, intervals: [1000, 5000, 10_000] }).toEqual(lists);
+    await expect(page.locator('[data-attention="studio-launch"] strong')).toHaveText(lists.launch === 1 ? 'approved request is waiting to be launched' : 'approved requests are waiting to be launched');
+    await expect(page.locator('[data-attention="studio-settle"] strong')).toHaveText('ended ads are waiting to be settled');
+
+    // Each line's button opens the list behind its number.
+    await page.locator('[data-attention="studio-launch"] button').click();
+    await expect(page.getByTestId('studio-desk')).toHaveAttribute('data-section', 'launch', { timeout: BOOT_TIMEOUT });
+    expect(new URL(page.url()).searchParams.get('section')).toBe('launch');
+    await expect(page.getByTestId('studio-desk-launch-head')).toContainText(`(${lists.launch})`);
+    await expect(page.getByTestId(`studio-desk-launch-${seeded.ids.approved}`)).toBeVisible();
+    await page.goto('/control-center');
+    await expect(page.locator('[data-attention="studio-settle"] button')).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.locator('[data-attention="studio-settle"] button').click();
+    await expect(page.getByTestId('studio-desk')).toHaveAttribute('data-section', 'settle', { timeout: BOOT_TIMEOUT });
+    expect(new URL(page.url()).searchParams.get('section')).toBe('settle');
+    await expect(page.getByTestId(`studio-desk-settle-${seeded.ids.ended}`)).toBeVisible({ timeout: BOOT_TIMEOUT });
+    expect(errors).toEqual([]);
+  });
 });

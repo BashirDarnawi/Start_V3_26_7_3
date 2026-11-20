@@ -797,6 +797,9 @@ function controlCenterStudioCounts(raw) {
     // A stop request opens a queue row and a ticket: it is counted once, on its own line.
     otherTickets: Math.max(0, whole(raw.openTickets) - whole(raw.stopTicketsOpen)),
     paymentsWaiting: whole(raw.paymentsWaiting),
+    // The lengths of the desk's own Launch and Settle lists, counted by the server for the Admin.
+    toLaunch: whole(raw.toLaunch),
+    toSettle: whole(raw.toSettle),
     alerts: whole(raw.alerts)
   };
 }
@@ -872,6 +875,14 @@ function getControlCenterAttention(today, studio) {
         ccText(one(studio.otherTickets, 'ticket is waiting for the team', 'tickets are waiting for the team'), one(studio.otherTickets, 'تذكرة بانتظار الفريق', 'تذاكر بانتظار الفريق')),
         ccText('Not counting stop requests.', 'دون طلبات الإيقاف.'),
         ccText('Answer', 'الرد'), "controlCenterOpenDesk('tickets')"),
+      line('studio-launch', studio.toLaunch, 'blue',
+        ccText(one(studio.toLaunch, 'approved request is waiting to be launched', 'approved requests are waiting to be launched'), one(studio.toLaunch, 'طلب مقبول بانتظار الإطلاق', 'طلبات مقبولة بانتظار الإطلاق')),
+        ccText('Not linked to a Meta campaign yet.', 'لم تُربط بحملة في ميتا بعد.'),
+        ccText('Launch', 'الإطلاق'), "controlCenterOpenDesk('launch')"),
+      line('studio-settle', studio.toSettle, 'amber',
+        ccText(one(studio.toSettle, 'ended ad is waiting to be settled', 'ended ads are waiting to be settled'), one(studio.toSettle, 'إعلان منتهٍ بانتظار التسوية', 'إعلانات منتهية بانتظار التسوية')),
+        ccText('The final amount is not settled yet.', 'لم يُسوَّ المبلغ النهائي بعد.'),
+        ccText('Settle', 'التسوية'), "controlCenterOpenDesk('settle')"),
       line('studio-alerts', studio.alerts, 'amber',
         ccText(one(studio.alerts, 'Studio alert', 'Studio alerts'), one(studio.alerts, 'تنبيه في الاستوديو', 'تنبيهات في الاستوديو')),
         ccText('From the last 24 hours, not yet acknowledged.', 'من آخر 24 ساعة، لم يُطّلع عليها بعد.'),
