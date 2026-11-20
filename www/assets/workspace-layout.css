@@ -525,3 +525,8 @@ pre.font-sans { font-family: inherit; }
     .ui-workspace .shell-row-body button[class^="text-"][class*=" hover:text-"]:has(> svg:only-child):hover { background: var(--ui-surface-soft); }
   }
 }
+
+/* Quick filters are tabs with counts (redesign round 3, DESIGN.md 7.5): the number is how many
+   records the tab would list. Same colour as the word (so it stays readable), lighter weight. */
+.smart-filter-chip > b { font-weight: 500; font-variant-numeric: tabular-nums; }
+#page-quick-filters { margin-top: 12px; }

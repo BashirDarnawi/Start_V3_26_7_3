@@ -111,10 +111,10 @@ check('Pages exposes a phone-safe Needs owner filter that composes with search',
   stateServices.includes("pageOwnerFilter: 'all'") &&
   views.includes('function applyPageOwnerFilter(mode)') &&
   views.includes("mode === 'needs-owner' ? 'needs-owner' : 'all'") &&
-  views.includes("pageOwnerFilter === 'needs-owner' && !pageNeedsOwner(page)") &&
+  views.includes("const allFilteredPages = pageOwnerFilter === 'needs-owner' ? ownerlessPages : searchedPages;") &&
   views.includes("applyPageOwnerFilter('needs-owner')") &&
   views.includes("isAr ? 'يحتاج مالك' : 'Needs owner'") &&
-  views.includes('smart-filter-chips mt-3'));
+  views.includes("['needs-owner', \"applyPageOwnerFilter('needs-owner')\", isAr ? 'يحتاج مالك' : 'Needs owner', ownerlessPages.length, 'warning']"));
 check('smart search safely discovers permitted customers, receipts, pages, and ads',
   routing.includes('function getCommandPaletteEntityCommands(searchTerm)') &&
   routing.includes('if (rawTerm.length < 2) return [];') &&
@@ -134,7 +134,7 @@ const currentReceiptLinkHelper = helpers.slice(
   helpers.indexOf('function openCustomerReceipts(customerId)')
 );
 const scopedAdFilter = helpers.slice(
-  helpers.indexOf('function getFilteredAds(customersById = null)'),
+  helpers.indexOf('function getFilteredAds(customersById = null, tabCounts = null)'),
   helpers.indexOf('// Read the search term from state')
 );
 check('customer and receipt cards expose phone-safe permission-scoped relationship navigation',
@@ -406,8 +406,7 @@ check('receipt filters progressively disclose advanced controls without hiding q
   helpers.includes("if (mode === 'unpaid') state.receiptStatusFilter = 'not_paid';") &&
   helpers.includes("if (mode === 'debt') state.receiptDebtFilter = 'any-debt';") &&
   helpers.includes("if (mode === 'not-collected') state.receiptCollectedFilter = 'not-collected';") &&
-  helpers.includes("const newGrid = src.querySelector('#receipts-grid');") &&
-  helpers.includes("const newChips = src.querySelector('#receipt-active-filters');"));
+  helpers.includes("swapViewParts('receipts', renderReceiptsView, ['receipts-grid', 'receipts-count', 'receipt-quick-filters', 'receipt-active-filters', 'receipt-search-clear', 'receipt-clear-filters']);"));
 const deliveryWorkspaceSource = views.slice(
   views.indexOf('function renderDeliveriesView(logOnly)'),
   views.indexOf('function filterDeliveries(type, value)')

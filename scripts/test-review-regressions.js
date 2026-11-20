@@ -1356,6 +1356,84 @@ async function main() {
     html = draw();
     assert.deepEqual(chips(html).map(chip => chip.press), ["updateAdFilter('status', 'all')"], 'Ads: "Unpaid" is a quick filter, the status gets a chip');
   });
+  await test('round 3 tabs: each quick filter says how many records it would list (Receipts, Ads, Customers, Pages, Users), the count follows the search, and the tab on screen says it is pressed', async () => {
+    const f = frameFixture(frameAdmin, 'receipts');
+    f.sandbox.render = () => {};
+    f.state.users = [frameAdmin, { id: 'drv', name: 'Driver One', role: 'Delivery', permissions: {} }, { id: 'emp', name: 'Sara', role: 'Employee', permissions: {} }];
+    f.state.defaultExchangeRate = 7;
+    f.state.customers = [
+      { id: 'c1', name: 'Medina Coffee', phones: ['0911111111'], platform: 'Facebook', createdAt: '2026-11-01T08:00:00Z' },
+      { id: 'c2', name: 'Tripoli Sweets', phones: ['0922222222'], platform: 'Instagram', createdAt: '2026-11-02T08:00:00Z' },
+      { id: 'c3', name: 'Sahara Parts', phones: ['0933333333'], platform: 'Phone', createdAt: '2026-11-03T08:00:00Z' }
+    ];
+    const receipt = (id, customerId, extra) => ({ id, customerId, amountUSD: 100, amountLocal: 700, exchangeRate: 7, paymentMethod: 'Cash (LYD)', serialNumber: String(1000 + Number(id.slice(1))), createdAt: `2026-11-0${id.slice(1)}T10:00:00Z`, ...extra });
+    f.state.receipts = [
+      receipt('r1', 'c1', { status: 'Paid', isPaid: true, collected: true }),
+      receipt('r2', 'c1', { status: 'Not Paid', isPaid: false, collected: false }),
+      receipt('r3', 'c2', { status: 'Not Paid', isPaid: false, collected: false, deliveryStatus: 'Needs Delivery', needsDelivery: true }),
+      receipt('r4', 'c2', { status: 'Paid', isPaid: true, collected: false }),
+      receipt('r5', 'c3', { status: 'Canceled', collected: false })
+    ];
+    const ad = (id, customerId, extra) => ({ id, customerId, amountUSD: 50, status: 'Active', paymentStatus: 'paid', isPaid: true, startDate: '2026-11-01', endDate: '2026-11-10', createdAt: `2026-11-0${id.slice(1)}T09:00:00Z`, ...extra });
+    f.state.ads = [
+      ad('a1', 'c1', {}),
+      ad('a2', 'c1', { paymentStatus: 'not_paid', isPaid: false }),
+      ad('a3', 'c2', { status: 'Stopped' }),
+      ad('a4', 'c2', { paymentStatus: 'pending_setup', isPaid: false, metaImportState: 'needs_completion' }),
+      ad('a5', 'c3', { status: 'Stopped', paymentStatus: 'not_paid', isPaid: false })
+    ];
+    f.state.pages = [{ id: 'p1', name: 'Medina Coffee Page', customerIds: ['c1'] }, { id: 'p2', name: 'Ownerless Page', customerIds: [] }, { id: 'p3', name: 'Another Ownerless', customerIds: [] }];
+    const tabs = (html, id) => Array.from((html.split(`id="${id}" class="smart-filter-chips" role="group"`)[1] || '').split('</div>')[0]
+      .matchAll(/<button type="button" onclick="([^"]*)" aria-pressed="(true|false)" class="smart-filter-chip([^"]*)">(.*?)<b>(\d+)<\/b><\/button>/g), m => ({ press: m[1], on: m[2] === 'true', tone: m[3].trim(), words: m[4], count: Number(m[5]) }));
+    // Every tab of a screen: its words and count, then pressed: the list is exactly that long and only that tab is pressed.
+    const walk = (view, id) => {
+      f.state.currentView = view;
+      const list = tabs(String(f.run('renderView()')), id);
+      for (const tab of list) {
+        f.run(tab.press);
+        const html = String(f.run('renderView()'));
+        const shown = Number((html.match(new RegExp(`id="${view}-count"[^>]*>(\\d+)`)) || [])[1]);
+        assert.equal(shown, tab.count, `${view}: "${tab.words}" said ${tab.count} and its list has ${shown}`);
+        assert.deepEqual(tabs(html, id).filter(now => now.on).map(now => now.words), [tab.words], `${view}: the pressed tab is the one on screen`);
+        assert.deepEqual(tabs(html, id).map(now => now.count), list.map(before => before.count), `${view}: the counts do not move when a tab is pressed`);
+      }
+      f.run(list[0].press);
+      return list.map(tab => `${tab.words} ${tab.count}`);
+    };
+    assert.deepEqual(walk('receipts', 'receipt-quick-filters'), ['All 5', 'Unpaid 2', 'Debt 2', 'Not collected 4']);
+    assert.deepEqual(walk('ads', 'ad-quick-filters'), ['All 5', 'Needs setup 1', 'Unpaid 2', 'Stopped 2'], 'an ad that needs setup is not also counted as unpaid, as in the filter');
+    assert.deepEqual(walk('customers', 'customer-quick-filters'), ['All 3', 'Has debt 3', 'Has credit 0']);
+    assert.deepEqual(walk('pages', 'page-quick-filters'), ['All 3', 'Needs owner 2']);
+    assert.deepEqual(walk('users', 'user-quick-filters'), ['All 3', 'Admins 1', 'Employees 1', 'Drivers 1']);
+    // The counts follow the search (a press keeps the search and resets the dropdowns).
+    f.state.receiptSearch = 'medina'; assert.deepEqual(walk('receipts', 'receipt-quick-filters'), ['All 2', 'Unpaid 1', 'Debt 1', 'Not collected 1']); f.state.receiptSearch = '';
+    f.state.adSearch = 'tripoli'; assert.deepEqual(walk('ads', 'ad-quick-filters'), ['All 2', 'Needs setup 1', 'Unpaid 0', 'Stopped 1']); f.state.adSearch = '';
+    f.state.customerSearch = 'sweets'; assert.deepEqual(walk('customers', 'customer-quick-filters'), ['All 1', 'Has debt 1', 'Has credit 0']); f.state.customerSearch = '';
+    f.state.pageSearch = 'ownerless'; assert.deepEqual(walk('pages', 'page-quick-filters'), ['All 2', 'Needs owner 2']); f.state.pageSearch = '';
+    f.state.userSearch = 'sara'; assert.deepEqual(walk('users', 'user-quick-filters'), ['All 1', 'Admins 0', 'Employees 1', 'Drivers 0']); f.state.userSearch = '';
+    // A dropdown beside a tab narrows the list, not the tab's count; a dropdown no tab stands for leaves no tab pressed on Ads.
+    f.state.currentView = 'receipts'; f.state.receiptPaymentFilter = 'bank';
+    let html = String(f.run('renderView()'));
+    assert.ok(/id="receipts-count"[^>]*>0 of 5 receipts/.test(html) && tabs(html, 'receipt-quick-filters')[0].count === 5);
+    f.state.receiptPaymentFilter = 'all';
+    f.state.currentView = 'ads'; f.state.adFilters = { status: 'Active', payment: 'all', page: 'all' };
+    html = String(f.run('renderView()'));
+    assert.deepEqual(tabs(html, 'ad-quick-filters').map(tab => tab.on), [false, false, false, false]);
+    f.state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+    // Arabic words, the colour of a pressed tab, and no balance tabs for an account that may not see balances.
+    f.state.language = 'ar'; f.state.currentView = 'receipts'; f.run("applyReceiptQuickFilter('debt')");
+    const arabic = tabs(String(f.run('renderView()')), 'receipt-quick-filters');
+    assert.deepEqual(arabic.map(tab => `${tab.words} ${tab.count} ${tab.tone}`.trim()), ['الكل 5', 'غير مدفوع 2', 'عليه دين 2 is-active is-danger', 'غير مُحصّل 4']);
+    f.state.language = 'en'; f.run("applyReceiptQuickFilter('all')");
+    f.state.currentUser = { id: 'emp', name: 'Sara', role: 'Employee', permissions: { customers: ['view'] } };
+    f.state.currentView = 'customers';
+    assert.ok(!String(f.run('renderView()')).includes('customer-quick-filters'), 'how many customers owe money is a balance fact');
+    // While a search box is typed in, the counts are among the parts swapped in.
+    const helpers = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8') + fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+    for (const id of ['receipt-quick-filters', 'ad-quick-filters', 'customer-quick-filters', 'page-quick-filters', 'user-quick-filters']) {
+      assert.ok(new RegExp(`swapViewParts\\('[a-z]+', render[A-Za-z]+View, \\[[^\\]]*'${id}'`).test(helpers), id);
+    }
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {
@@ -8137,7 +8215,7 @@ async function main() {
     state.adFilters = { status: 'all', payment: 'all', page: 'p_quiet' };
     html = String(sandbox.renderAdsView());
     assert.ok(html.includes('0 total ads') && html.includes('No ads match your filters') && html.includes(`onclick="state.adSearch='';applyAdQuickFilter('all')"`), 'no Clear');
-    assert.ok(!html.includes(`onclick="applyAdQuickFilter('all')" class="smart-filter-chip is-active"`), 'the All chip is lit over a page filter');
+    assert.ok(html.includes(`onclick="applyAdQuickFilter('all')" aria-pressed="false" class="smart-filter-chip">All<b>3</b></button>`), 'the All tab is lit over a page filter (it would list 3)');
     assert.equal(state.adFilters.page, 'p_quiet', 'a live page filter stays');
     state.language = 'ar';
     assert.ok(String(sandbox.renderAdsView()).includes('لا توجد إعلانات تطابق الفلاتر'));

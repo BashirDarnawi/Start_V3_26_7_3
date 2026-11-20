@@ -16608,6 +16608,13 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
 // on its first choice, with its name and its value. Pressing a chip puts that one filter back; "Clear
 // all" does it for every chip. They are read from the panel's own dropdowns, so each list gets them
 // the same way. A dropdown marked data-quick is one whose state the quick filters already show.
+// Quick filters are tabs with counts (DESIGN.md 7.5): each says how many records it would list.
+// One tab: [key, what a press runs, its words, its count, its colour when chosen].
+function renderQuickTabs(id, label, active, tabs) {
+  return `<div id="${id}" class="smart-filter-chips" role="group" aria-label="${label}">${tabs.map(([key, open, words, count, tone]) =>
+    `<button type="button" onclick="${open}" aria-pressed="${active === key}" class="smart-filter-chip${active === key ? ` is-active${tone ? ` is-${tone}` : ''}` : ''}">${words}<b>${count}</b></button>`).join('')}</div>`;
+}
+
 function workspaceFiltersInForce(html) {
   const head = /<div id="[a-z]+-advanced-filters" class="workspace-advanced-panel hidden"/.exec(html);
   if (!head) return html;
@@ -17539,27 +17546,27 @@ function onCustomerSearchInput(value) {
   }, 60);
 }
 
-function updateCustomersViewFiltered() {
-  if (state.currentView !== 'customers') return;
-  const grid = document.getElementById('customers-grid');
-  const countEl = document.getElementById('customers-count');
-  if (!grid || !countEl) {
-    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
+// While a search box is typed in, the screen is drawn off-screen and only the named parts are swapped
+// in (the list first, then its count, its quick-filter counts...), so the box keeps its caret and the
+// phone keyboard stays open. If the list is not on screen (mid-navigation), the whole screen is drawn.
+function swapViewParts(view, draw, ids) {
+  if (state.currentView !== view) return;
+  if (!document.getElementById(ids[0])) {
     render();
-    if (window.lucide) lucide.createIcons();
-    return;
+  } else {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = draw();
+    ids.forEach(id => {
+      const now = document.getElementById(id), next = tpl.content.querySelector('#' + id);
+      if (now && next) now.innerHTML = next.innerHTML;
+    });
+    _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   }
-  // Build the view off-screen and swap in only the grid + count, so the search keeps its caret
-  // (like updateReceiptsViewFiltered); renderCustomersView owns paging and Load more.
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderCustomersView();
-  const src = tpl.content;
-  const newGrid = src.querySelector('#customers-grid');
-  const newCount = src.querySelector('#customers-count');
-  if (newGrid) grid.innerHTML = newGrid.innerHTML;
-  if (newCount) countEl.textContent = newCount.textContent;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
   if (window.lucide) lucide.createIcons();
+}
+
+function updateCustomersViewFiltered() {
+  swapViewParts('customers', renderCustomersView, ['customers-grid', 'customers-count', 'customer-quick-filters']);
 }
 
 function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
@@ -17808,7 +17815,8 @@ function renderCustomersView() {
   }
   // ONE statsIndex per render pass (a full ads/receipts/pages pass): the filter, header stats and every card reuse it.
   const statsIndex = buildCustomerStatsIndex();
-  const allFilteredCustomers = getFilteredCustomers(statsIndex);
+  const customerTabCounts = [0, 0, 0];
+  const allFilteredCustomers = getFilteredCustomers(statsIndex, customerTabCounts);
   const allCustomers = getCustomersVisibleToCurrentUser();
   const duplicateCustomerGroups = isCurrentUserAdmin() ? findDuplicateCustomerGroups(state.customers) : [];
   const duplicateCustomerCount = duplicateCustomerGroups.reduce((sum, group) => sum + group.customers.length, 0);
@@ -17886,11 +17894,11 @@ function renderCustomersView() {
             <i data-lucide="search" class="h-5 w-5"></i>
             <input type="search" id="customer-search" placeholder="${isAr ? (canSeeCustomerContacts ? 'ابحث بالاسم أو الهاتف...' : 'ابحث بالاسم أو المنصة...') : (canSeeCustomerContacts ? 'Search by name or phone...' : 'Search by name or platform...')}" value="${Security.escapeHtml(state.customerSearch || '')}" oninput="onCustomerSearchInput(this.value)" autocomplete="off" />
           </div>
-          ${canSeeCustomerBalances ? `<div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر مالية سريعة' : 'Quick financial filters'}">
-            <button type="button" onclick="applyCustomerQuickFilter('all')" class="smart-filter-chip ${state.customerFinancialFilter === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
-            <button type="button" onclick="applyCustomerQuickFilter('debt')" class="smart-filter-chip ${state.customerFinancialFilter === 'hasDebt' ? 'is-active is-danger' : ''}"><i data-lucide="circle-minus" class="h-4 w-4"></i>${isAr ? 'عليه دين' : 'Has debt'}</button>
-            <button type="button" onclick="applyCustomerQuickFilter('credit')" class="smart-filter-chip ${state.customerFinancialFilter === 'hasCredit' ? 'is-active is-success' : ''}"><i data-lucide="circle-plus" class="h-4 w-4"></i>${isAr ? 'له رصيد' : 'Has credit'}</button>
-          </div>` : ''}
+          ${canSeeCustomerBalances ? renderQuickTabs('customer-quick-filters', isAr ? 'فلاتر مالية سريعة' : 'Quick financial filters', state.customerFinancialFilter, [
+            ['all', "applyCustomerQuickFilter('all')", isAr ? 'الكل' : 'All', customerTabCounts[0]],
+            ['hasDebt', "applyCustomerQuickFilter('debt')", isAr ? 'عليه دين' : 'Has debt', customerTabCounts[1], 'danger'],
+            ['hasCredit', "applyCustomerQuickFilter('credit')", isAr ? 'له رصيد' : 'Has credit', customerTabCounts[2], 'success']
+          ]) : ''}
           ${renderWorkspaceFilterToggle('customers', customerAdvancedFilterCount)}
         </div>
 
@@ -17990,6 +17998,7 @@ function renderReceiptsView() {
   // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
   // digit queries (٠-٩) and unhamza'd Arabic names match the stored values.
   const receiptSearchTerm = foldSearchText(state.receiptSearch || '');
+  // First what a quick filter keeps (the opened record, the customer, the search); the dropdowns follow.
   let filteredReceipts = allReceipts.filter(receipt => {
     if (receiptRecordFilter && String(receipt?.id || '') !== receiptRecordFilter) return false;
     const receiptCustomerId = getReceiptCustomerReferenceId(receipt);
@@ -18010,7 +18019,16 @@ function renderReceiptsView() {
         return false;
       }
     }
-    
+    return true;
+  });
+  // Each quick filter's count is the length of the list it opens (applyReceiptQuickFilter).
+  const receiptTabCounts = [filteredReceipts.length, 0, 0, 0];
+  filteredReceipts.forEach(receipt => {
+    if (getReceiptPaymentState(receipt) === 'not_paid') receiptTabCounts[1]++;
+    if (getReceiptDebtType(receipt) !== 'none') receiptTabCounts[2]++;
+    if (_receiptCollectedFraction(receipt) < 1) receiptTabCounts[3]++;
+  });
+  filteredReceipts = filteredReceipts.filter(receipt => {
     // Status filter
     if (state.receiptStatusFilter !== 'all') {
       const requestedStatus = ({
@@ -18136,12 +18154,12 @@ function renderReceiptsView() {
             <span id="receipt-search-clear">${state.receiptSearch ? `<button onclick="clearReceiptSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
 
-          <div id="receipt-quick-filters" class="smart-filter-chips" aria-label="${isArV ? 'فلاتر سريعة' : 'Quick filters'}">
-            <button type="button" onclick="applyReceiptQuickFilter('all')" class="smart-filter-chip ${receiptQuickMode === 'all' ? 'is-active' : ''}">${isArV ? 'الكل' : 'All'}</button>
-            <button type="button" onclick="applyReceiptQuickFilter('unpaid')" class="smart-filter-chip ${receiptQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="clock-3" class="h-4 w-4"></i>${isArV ? 'غير مدفوع' : 'Unpaid'}</button>
-            <button type="button" onclick="applyReceiptQuickFilter('debt')" class="smart-filter-chip ${receiptQuickMode === 'debt' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isArV ? 'عليه دين' : 'Debt'}</button>
-            <button type="button" onclick="applyReceiptQuickFilter('not-collected')" class="smart-filter-chip ${receiptQuickMode === 'not-collected' ? 'is-active is-warning' : ''}"><i data-lucide="hand-coins" class="h-4 w-4"></i>${isArV ? 'غير مُحصّل' : 'Not collected'}</button>
-          </div>
+          ${renderQuickTabs('receipt-quick-filters', isArV ? 'فلاتر سريعة' : 'Quick filters', receiptQuickMode, [
+            ['all', "applyReceiptQuickFilter('all')", isArV ? 'الكل' : 'All', receiptTabCounts[0]],
+            ['unpaid', "applyReceiptQuickFilter('unpaid')", isArV ? 'غير مدفوع' : 'Unpaid', receiptTabCounts[1], 'danger'],
+            ['debt', "applyReceiptQuickFilter('debt')", isArV ? 'عليه دين' : 'Debt', receiptTabCounts[2], 'danger'],
+            ['not-collected', "applyReceiptQuickFilter('not-collected')", isArV ? 'غير مُحصّل' : 'Not collected', receiptTabCounts[3], 'warning']
+          ])}
           ${renderWorkspaceFilterToggle('receipts', receiptAdvancedFilterCount)}
         </div>
 
@@ -18645,24 +18663,7 @@ function applyPageOwnerFilter(mode) {
 }
 
 function updatePagesViewFiltered() {
-  if (state.currentView !== 'pages') return;
-  const grid = document.getElementById('pages-grid');
-  const countEl = document.getElementById('pages-count');
-  if (!grid || !countEl) {
-    render();
-    if (window.lucide) lucide.createIcons();
-    return;
-  }
-  // Swap only the pages grid + count so the search input keeps its caret and
-  // the phone keyboard stays open (same approach as updateCustomersViewFiltered).
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderPagesView();
-  const newGrid = tpl.content.querySelector('#pages-grid');
-  const newCount = tpl.content.querySelector('#pages-count');
-  if (newGrid) grid.innerHTML = newGrid.innerHTML;
-  if (newCount) countEl.textContent = newCount.textContent;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
-  if (window.lucide) lucide.createIcons();
+  swapViewParts('pages', renderPagesView, ['pages-grid', 'pages-count', 'page-quick-filters']);
 }
 
 function renderPagesView() {
@@ -18673,7 +18674,6 @@ function renderPagesView() {
   const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
   const pageOwnerFilter = state.pageOwnerFilter === 'needs-owner' ? 'needs-owner' : 'all';
   const pageNeedsOwner = page => getPageCustomerIds(page).length === 0;
-  const needsOwnerCount = allPages.filter(pageNeedsOwner).length;
   // FIRST-wins like the Array.find() it replaced (new Map(array.map(...)) is last-wins); this only
   // matters if ids ever collide.
   const customersById = new Map();
@@ -18681,15 +18681,15 @@ function renderPagesView() {
     const key = String(customer.id);
     if (!customersById.has(key)) customersById.set(key, customer);
   });
-  const allFilteredPages = allPages.filter(page => {
-        if (pageOwnerFilter === 'needs-owner' && !pageNeedsOwner(page)) return false;
-        if (!pageSearch) return true;
+  const searchedPages = !pageSearch ? allPages : allPages.filter(page => {
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
         return [page.name, page.category, ownerNames, page.id, page.metaPageId, page.metaPageName]
           .some(value => foldSearchText(value).includes(pageSearch));
       });
+  const ownerlessPages = searchedPages.filter(pageNeedsOwner);
+  const allFilteredPages = pageOwnerFilter === 'needs-owner' ? ownerlessPages : searchedPages;
   const hasPageFilters = !!pageSearch || pageOwnerFilter !== 'all';
   // Reset the reveal limit when the SEARCH changes (only then: keying on the result count let a
   // background Meta sync throw the user back to the first 50 rows after "Load more").
@@ -18739,13 +18739,10 @@ function renderPagesView() {
           <input id="page-search" type="search" value="${Security.escapeHtml(state.pageSearch || '')}" oninput="onPageSearchInput(this.value)" placeholder="${isAr ? 'ابحث باسم الصفحة أو المالك أو التصنيف...' : 'Search by page, owner or category...'}" autocomplete="off" />
           ${state.pageSearch ? `<button type="button" onclick="state.pageSearch='';render()" aria-label="${isAr ? 'مسح البحث' : 'Clear search'}"><i data-lucide="x" class="h-4 w-4"></i></button>` : ''}
         </div>
-        <div class="smart-filter-chips mt-3" aria-label="${isAr ? 'فلتر مالك الصفحة' : 'Page owner filter'}">
-          <button type="button" onclick="applyPageOwnerFilter('all')" class="smart-filter-chip ${pageOwnerFilter === 'all' ? 'is-active' : ''}" aria-pressed="${pageOwnerFilter === 'all' ? 'true' : 'false'}">${isAr ? 'الكل' : 'All'}</button>
-          <button type="button" onclick="applyPageOwnerFilter('needs-owner')" class="smart-filter-chip ${pageOwnerFilter === 'needs-owner' ? 'is-active is-warning' : ''}" aria-pressed="${pageOwnerFilter === 'needs-owner' ? 'true' : 'false'}">
-            <i data-lucide="user-round-x" class="h-4 w-4"></i>
-            <span>${isAr ? 'يحتاج مالك' : 'Needs owner'} (${needsOwnerCount})</span>
-          </button>
-        </div>
+        ${renderQuickTabs('page-quick-filters', isAr ? 'فلتر مالك الصفحة' : 'Page owner filter', pageOwnerFilter, [
+          ['all', "applyPageOwnerFilter('all')", isAr ? 'الكل' : 'All', searchedPages.length],
+          ['needs-owner', "applyPageOwnerFilter('needs-owner')", isAr ? 'يحتاج مالك' : 'Needs owner', ownerlessPages.length, 'warning']
+        ])}
       </div>
 
       <div id="pages-grid" class="workspace-directory-grid">
@@ -18925,26 +18922,7 @@ function onAdSearchInput(value) {
 }
 
 function updateAdsViewFiltered() {
-  if (state.currentView !== 'ads') return;
-  const container = document.getElementById('ads-table-container');
-  const countEl = document.getElementById('ads-count');
-  if (!container) {
-    // View not on screen (e.g. mid-navigation): fall back to a full render.
-    render();
-    if (window.lucide) lucide.createIcons();
-    return;
-  }
-  // Build the fresh view off-screen and swap only the table + count so the search
-  // input keeps its caret (same approach as updateReceiptsViewFiltered).
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderAdsView();
-  const src = tpl.content;
-  const newContainer = src.querySelector('#ads-table-container');
-  const newCount = src.querySelector('#ads-count');
-  if (newContainer) container.innerHTML = newContainer.innerHTML;
-  if (countEl && newCount) countEl.textContent = newCount.textContent;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
-  if (window.lucide) lucide.createIcons();
+  swapViewParts('ads', renderAdsView, ['ads-table-container', 'ads-count', 'ad-quick-filters']);
 }
 
 function renderAdsView() {
@@ -18961,7 +18939,8 @@ function renderAdsView() {
   // once per render pass instead of once per row (same shape as the deliveries
   // view's collection-target cache).
   if (typeof resetAdMergePairCache === 'function') resetAdMergePairCache();
-  const allAds = getFilteredAds(customersById);
+  const adTabCounts = [0, 0, 0, 0];
+  const allAds = getFilteredAds(customersById, adTabCounts);
   const adF = state.adFilters || {};
   const isAr = state.language === 'ar';
   const adReceiptFilter = String(state.adReceiptFilter || '').trim();
@@ -19013,12 +18992,12 @@ function renderAdsView() {
             <i data-lucide="search" class="h-5 w-5"></i>
             <input type="search" id="ad-search" placeholder="${isAr ? (canSearchAdContacts ? 'ابحث بالعميل أو الهاتف أو الرقم أو الصفحة أو Meta...' : 'ابحث بالعميل أو الرقم أو الصفحة أو Meta...') : (canSearchAdContacts ? 'Search customer, phone, serial, page or Meta...' : 'Search customer, serial, page or Meta...')}" value="${Security.escapeHtml(state.adSearch || '')}" oninput="onAdSearchInput(this.value)" autocomplete="off" />
           </div>
-          <div class="smart-filter-chips" aria-label="${isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters'}">
-            <button type="button" onclick="applyAdQuickFilter('all')" class="smart-filter-chip ${adQuickMode === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
-            <button type="button" onclick="applyAdQuickFilter('setup')" class="smart-filter-chip ${adQuickMode === 'setup' ? 'is-active is-warning' : ''}"><i data-lucide="wand-sparkles" class="h-4 w-4"></i>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</button>
-            <button type="button" onclick="applyAdQuickFilter('unpaid')" class="smart-filter-chip ${adQuickMode === 'unpaid' ? 'is-active is-danger' : ''}"><i data-lucide="circle-dollar-sign" class="h-4 w-4"></i>${isAr ? 'غير مدفوع' : 'Unpaid'}</button>
-            <button type="button" onclick="applyAdQuickFilter('stopped')" class="smart-filter-chip ${adQuickMode === 'stopped' ? 'is-active is-warning' : ''}"><i data-lucide="square" class="h-4 w-4"></i>${isAr ? 'متوقف' : 'Stopped'}</button>
-          </div>
+          ${renderQuickTabs('ad-quick-filters', isAr ? 'فلاتر إعلانات سريعة' : 'Quick ad filters', adQuickMode, [
+            ['all', "applyAdQuickFilter('all')", isAr ? 'الكل' : 'All', adTabCounts[0]],
+            ['setup', "applyAdQuickFilter('setup')", isAr ? 'يحتاج إكمال' : 'Needs setup', adTabCounts[1], 'warning'],
+            ['unpaid', "applyAdQuickFilter('unpaid')", isAr ? 'غير مدفوع' : 'Unpaid', adTabCounts[2], 'danger'],
+            ['stopped', "applyAdQuickFilter('stopped')", isAr ? 'متوقف' : 'Stopped', adTabCounts[3], 'warning']
+          ])}
           ${renderWorkspaceFilterToggle('ads', adAdvancedFilterCount)}
         </div>
         ${adReceiptFilter ? `<div id="ad-receipt-link-filter" role="status" class="mt-3 flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-200 sm:flex-row sm:items-center sm:justify-between">
@@ -20886,22 +20865,7 @@ function updateUserSearch(value) {
 }
 
 function updateUsersViewFiltered() {
-  if (state.currentView !== 'users') return;
-  const grid = document.getElementById('users-grid');
-  const countEl = document.getElementById('users-count');
-  if (!grid || !countEl) {
-    render();
-    if (window.lucide) lucide.createIcons();
-    return;
-  }
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderUsersView();
-  const newGrid = tpl.content.querySelector('#users-grid');
-  const newCount = tpl.content.querySelector('#users-count');
-  if (newGrid) grid.innerHTML = newGrid.innerHTML;
-  if (newCount) countEl.textContent = newCount.textContent;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
-  if (window.lucide) lucide.createIcons();
+  swapViewParts('users', renderUsersView, ['users-grid', 'users-count', 'user-quick-filters']);
 }
 
 function applyUserRoleFilter(role) {
@@ -20915,12 +20879,10 @@ function renderUsersView() {
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const userSearch = foldSearchText(String(state.userSearch || '').trim());
   const userRoleFilter = String(state.userRoleFilter || 'all');
-  const visibleUsers = allVisibleUsers.filter(user => {
-    if (userRoleFilter !== 'all' && String(user.role || '') !== userRoleFilter) return false;
-    if (!userSearch) return true;
-    return [user.name, user.email, user.role]
-      .some(value => foldSearchText(value).includes(userSearch));
-  });
+  const searchedUsers = !userSearch ? allVisibleUsers : allVisibleUsers.filter(user => [user.name, user.email, user.role]
+    .some(value => foldSearchText(value).includes(userSearch)));
+  const usersOfRole = role => searchedUsers.filter(user => String(user.role || '') === role);
+  const visibleUsers = userRoleFilter === 'all' ? searchedUsers : usersOfRole(userRoleFilter);
   const isAdmin = isCurrentUserAdmin();
   const canAddUsers = canManageUsersAction('add');
   const canEditUsers = canManageUsersAction('edit');
@@ -20987,12 +20949,12 @@ function renderUsersView() {
             <i data-lucide="search" class="h-5 w-5"></i>
             <input id="user-search" type="search" value="${Security.escapeHtml(state.userSearch || '')}" oninput="updateUserSearch(this.value)" placeholder="${isAr ? 'ابحث بالاسم أو البريد أو الدور...' : 'Search by name, email or role...'}" autocomplete="off" />
           </div>
-          <div class="smart-filter-chips" aria-label="${isAr ? 'فلتر الدور' : 'Role filter'}">
-            <button type="button" onclick="applyUserRoleFilter('all')" class="smart-filter-chip ${userRoleFilter === 'all' ? 'is-active' : ''}">${isAr ? 'الكل' : 'All'}</button>
-            <button type="button" onclick="applyUserRoleFilter('Admin')" class="smart-filter-chip ${userRoleFilter === 'Admin' ? 'is-active' : ''}">${isAr ? 'مدير' : 'Admins'}</button>
-            <button type="button" onclick="applyUserRoleFilter('Employee')" class="smart-filter-chip ${userRoleFilter === 'Employee' ? 'is-active' : ''}">${isAr ? 'موظف' : 'Employees'}</button>
-            <button type="button" onclick="applyUserRoleFilter('Delivery')" class="smart-filter-chip ${userRoleFilter === 'Delivery' ? 'is-active' : ''}">${isAr ? 'سائق' : 'Drivers'}</button>
-          </div>
+          ${renderQuickTabs('user-quick-filters', isAr ? 'فلتر الدور' : 'Role filter', userRoleFilter, [
+            ['all', "applyUserRoleFilter('all')", isAr ? 'الكل' : 'All', searchedUsers.length],
+            ['Admin', "applyUserRoleFilter('Admin')", isAr ? 'مدير' : 'Admins', usersOfRole('Admin').length],
+            ['Employee', "applyUserRoleFilter('Employee')", isAr ? 'موظف' : 'Employees', usersOfRole('Employee').length],
+            ['Delivery', "applyUserRoleFilter('Delivery')", isAr ? 'سائق' : 'Drivers', usersOfRole('Delivery').length]
+          ])}
         </div>
       </div>
 
@@ -24335,32 +24297,12 @@ function isMetaAdSetupPending(ad) {
     || String(ad.paymentStatus || '').toLowerCase() === 'pending_setup';
 }
 
-function getFilteredAds(customersById = null) {
+function getFilteredAds(customersById = null, tabCounts = null) {
   let filtered = getAdsVisibleToCurrentUser();
 
   const receiptFilter = String(state.adReceiptFilter || '').trim();
   if (receiptFilter) {
     filtered = filtered.filter(ad => isAdLinkedToReceipt(ad, receiptFilter));
-  }
-
-  // Dropdown filters (status / payment / page) — state.adFilters is kept in
-  // sync by updateAdFilter(); 'all' or unset means no filtering.
-  const f = state.adFilters || {};
-  if (f.status && f.status !== 'all') {
-    filtered = filtered.filter(ad => String(ad.status || 'Active') === f.status);  // an empty status renders as Active
-  }
-  if (f.payment && f.payment !== 'all') {
-    filtered = filtered.filter(ad => {
-      const needsSetup = isMetaAdSetupPending(ad);
-      if (f.payment === 'pending_setup') return needsSetup;
-      const paymentState = getAdPaymentState(ad);
-      if (f.payment === 'paid') return !needsSetup && paymentState === 'paid';
-      if (f.payment === 'wont_pay') return !needsSetup && paymentState === 'wont_pay';
-      return !needsSetup && paymentState === 'not_paid';
-    });
-  }
-  if (f.page && f.page !== 'all') {
-    filtered = filtered.filter(ad => String(ad.pageId || '') === String(f.page));
   }
 
   // Read the search term from state (the debounced input keeps it), else the DOM. foldSearchText
@@ -24398,6 +24340,36 @@ function getFilteredAds(customersById = null) {
         foldSearchText(ad.metaPageName || page?.metaPageName).includes(searchTerm)
       );
     });
+  }
+
+  // What each quick filter would list (applyAdQuickFilter keeps the receipt link and the search only).
+  if (tabCounts) {
+    tabCounts[0] = filtered.length;
+    filtered.forEach(ad => {
+      if (isMetaAdSetupPending(ad)) tabCounts[1]++;
+      else if (getAdPaymentState(ad) === 'not_paid') tabCounts[2]++;
+      if (String(ad.status || 'Active') === 'Stopped') tabCounts[3]++;
+    });
+  }
+
+  // Dropdown filters (status / payment / page) — state.adFilters is kept in
+  // sync by updateAdFilter(); 'all' or unset means no filtering.
+  const f = state.adFilters || {};
+  if (f.status && f.status !== 'all') {
+    filtered = filtered.filter(ad => String(ad.status || 'Active') === f.status);  // an empty status renders as Active
+  }
+  if (f.payment && f.payment !== 'all') {
+    filtered = filtered.filter(ad => {
+      const needsSetup = isMetaAdSetupPending(ad);
+      if (f.payment === 'pending_setup') return needsSetup;
+      const paymentState = getAdPaymentState(ad);
+      if (f.payment === 'paid') return !needsSetup && paymentState === 'paid';
+      if (f.payment === 'wont_pay') return !needsSetup && paymentState === 'wont_pay';
+      return !needsSetup && paymentState === 'not_paid';
+    });
+  }
+  if (f.page && f.page !== 'all') {
+    filtered = filtered.filter(ad => String(ad.pageId || '') === String(f.page));
   }
 
   return filtered;
@@ -25926,7 +25898,7 @@ function getCustomersVisibleToCurrentUser() {
   );
 }
 
-function getFilteredCustomers(sharedStatsIndex = null) {
+function getFilteredCustomers(sharedStatsIndex = null, tabCounts = null) {
   // Do not rely only on the server/cached collection being pre-scoped. During
   // permission changes and in local mode, a viewOwn user may still have other
   // creators' customers in memory. Scope before search, counts, or rendering.
@@ -25969,6 +25941,11 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   // renderCustomersView passes its own index so the whole customers render
   // pass builds it exactly ONCE (header stats + filter + sort + cards).
   const statsIndex = needsStats ? (sharedStatsIndex || buildCustomerStatsIndex()) : sharedStatsIndex;
+  // What each quick filter would list: the search stays, the financial filter is the tab itself.
+  if (tabCounts && canViewBalance && statsIndex) {
+    tabCounts[0] = filtered.length;
+    filtered.forEach(c => { const sign = customerBalanceView(getCustomerStats(c.id, statsIndex)).sign; if (sign) tabCounts[sign < 0 ? 1 : 2]++; });
+  }
 
   // Apply financial filter
   if (financialFilter === 'hasCredit' || financialFilter === 'hasDebt') {
@@ -28743,35 +28720,7 @@ function updateReceiptSearch(value) {
 }
 
 function updateReceiptsViewFiltered() {
-  if (state.currentView !== 'receipts') return;
-  const grid = document.getElementById('receipts-grid');
-  const countEl = document.getElementById('receipts-count');
-  const chipsEl = document.getElementById('receipt-active-filters');
-  const clearEl = document.getElementById('receipt-search-clear');
-  const clearFiltersEl = document.getElementById('receipt-clear-filters');
-  if (!grid || !countEl) {
-    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
-    render();
-    if (window.lucide) lucide.createIcons();
-    return;
-  }
-  // Build the fresh view HTML off-screen, then swap in only the parts that
-  // change while searching (results grid, count, filter chips, clear button).
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderReceiptsView();
-  const src = tpl.content;
-  const newGrid = src.querySelector('#receipts-grid');
-  const newCount = src.querySelector('#receipts-count');
-  const newChips = src.querySelector('#receipt-active-filters');
-  const newClear = src.querySelector('#receipt-search-clear');
-  const newClearFilters = src.querySelector('#receipt-clear-filters');
-  if (newGrid) grid.innerHTML = newGrid.innerHTML;
-  if (newCount) countEl.textContent = newCount.textContent;
-  if (chipsEl && newChips) chipsEl.innerHTML = newChips.innerHTML;
-  if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
-  if (clearFiltersEl && newClearFilters) clearFiltersEl.innerHTML = newClearFilters.innerHTML;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
-  if (window.lucide) lucide.createIcons();
+  swapViewParts('receipts', renderReceiptsView, ['receipts-grid', 'receipts-count', 'receipt-quick-filters', 'receipt-active-filters', 'receipt-search-clear', 'receipt-clear-filters']);
 }
 
 function clearReceiptSearch() {

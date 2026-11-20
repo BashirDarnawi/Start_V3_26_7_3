@@ -203,32 +203,12 @@ function isMetaAdSetupPending(ad) {
     || String(ad.paymentStatus || '').toLowerCase() === 'pending_setup';
 }
 
-function getFilteredAds(customersById = null) {
+function getFilteredAds(customersById = null, tabCounts = null) {
   let filtered = getAdsVisibleToCurrentUser();
 
   const receiptFilter = String(state.adReceiptFilter || '').trim();
   if (receiptFilter) {
     filtered = filtered.filter(ad => isAdLinkedToReceipt(ad, receiptFilter));
-  }
-
-  // Dropdown filters (status / payment / page) — state.adFilters is kept in
-  // sync by updateAdFilter(); 'all' or unset means no filtering.
-  const f = state.adFilters || {};
-  if (f.status && f.status !== 'all') {
-    filtered = filtered.filter(ad => String(ad.status || 'Active') === f.status);  // an empty status renders as Active
-  }
-  if (f.payment && f.payment !== 'all') {
-    filtered = filtered.filter(ad => {
-      const needsSetup = isMetaAdSetupPending(ad);
-      if (f.payment === 'pending_setup') return needsSetup;
-      const paymentState = getAdPaymentState(ad);
-      if (f.payment === 'paid') return !needsSetup && paymentState === 'paid';
-      if (f.payment === 'wont_pay') return !needsSetup && paymentState === 'wont_pay';
-      return !needsSetup && paymentState === 'not_paid';
-    });
-  }
-  if (f.page && f.page !== 'all') {
-    filtered = filtered.filter(ad => String(ad.pageId || '') === String(f.page));
   }
 
   // Read the search term from state (the debounced input keeps it), else the DOM. foldSearchText
@@ -266,6 +246,36 @@ function getFilteredAds(customersById = null) {
         foldSearchText(ad.metaPageName || page?.metaPageName).includes(searchTerm)
       );
     });
+  }
+
+  // What each quick filter would list (applyAdQuickFilter keeps the receipt link and the search only).
+  if (tabCounts) {
+    tabCounts[0] = filtered.length;
+    filtered.forEach(ad => {
+      if (isMetaAdSetupPending(ad)) tabCounts[1]++;
+      else if (getAdPaymentState(ad) === 'not_paid') tabCounts[2]++;
+      if (String(ad.status || 'Active') === 'Stopped') tabCounts[3]++;
+    });
+  }
+
+  // Dropdown filters (status / payment / page) — state.adFilters is kept in
+  // sync by updateAdFilter(); 'all' or unset means no filtering.
+  const f = state.adFilters || {};
+  if (f.status && f.status !== 'all') {
+    filtered = filtered.filter(ad => String(ad.status || 'Active') === f.status);  // an empty status renders as Active
+  }
+  if (f.payment && f.payment !== 'all') {
+    filtered = filtered.filter(ad => {
+      const needsSetup = isMetaAdSetupPending(ad);
+      if (f.payment === 'pending_setup') return needsSetup;
+      const paymentState = getAdPaymentState(ad);
+      if (f.payment === 'paid') return !needsSetup && paymentState === 'paid';
+      if (f.payment === 'wont_pay') return !needsSetup && paymentState === 'wont_pay';
+      return !needsSetup && paymentState === 'not_paid';
+    });
+  }
+  if (f.page && f.page !== 'all') {
+    filtered = filtered.filter(ad => String(ad.pageId || '') === String(f.page));
   }
 
   return filtered;
@@ -1794,7 +1804,7 @@ function getCustomersVisibleToCurrentUser() {
   );
 }
 
-function getFilteredCustomers(sharedStatsIndex = null) {
+function getFilteredCustomers(sharedStatsIndex = null, tabCounts = null) {
   // Do not rely only on the server/cached collection being pre-scoped. During
   // permission changes and in local mode, a viewOwn user may still have other
   // creators' customers in memory. Scope before search, counts, or rendering.
@@ -1837,6 +1847,11 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   // renderCustomersView passes its own index so the whole customers render
   // pass builds it exactly ONCE (header stats + filter + sort + cards).
   const statsIndex = needsStats ? (sharedStatsIndex || buildCustomerStatsIndex()) : sharedStatsIndex;
+  // What each quick filter would list: the search stays, the financial filter is the tab itself.
+  if (tabCounts && canViewBalance && statsIndex) {
+    tabCounts[0] = filtered.length;
+    filtered.forEach(c => { const sign = customerBalanceView(getCustomerStats(c.id, statsIndex)).sign; if (sign) tabCounts[sign < 0 ? 1 : 2]++; });
+  }
 
   // Apply financial filter
   if (financialFilter === 'hasCredit' || financialFilter === 'hasDebt') {
@@ -4611,35 +4626,7 @@ function updateReceiptSearch(value) {
 }
 
 function updateReceiptsViewFiltered() {
-  if (state.currentView !== 'receipts') return;
-  const grid = document.getElementById('receipts-grid');
-  const countEl = document.getElementById('receipts-count');
-  const chipsEl = document.getElementById('receipt-active-filters');
-  const clearEl = document.getElementById('receipt-search-clear');
-  const clearFiltersEl = document.getElementById('receipt-clear-filters');
-  if (!grid || !countEl) {
-    // View structure not on screen (e.g. mid-navigation): fall back to a full render.
-    render();
-    if (window.lucide) lucide.createIcons();
-    return;
-  }
-  // Build the fresh view HTML off-screen, then swap in only the parts that
-  // change while searching (results grid, count, filter chips, clear button).
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderReceiptsView();
-  const src = tpl.content;
-  const newGrid = src.querySelector('#receipts-grid');
-  const newCount = src.querySelector('#receipts-count');
-  const newChips = src.querySelector('#receipt-active-filters');
-  const newClear = src.querySelector('#receipt-search-clear');
-  const newClearFilters = src.querySelector('#receipt-clear-filters');
-  if (newGrid) grid.innerHTML = newGrid.innerHTML;
-  if (newCount) countEl.textContent = newCount.textContent;
-  if (chipsEl && newChips) chipsEl.innerHTML = newChips.innerHTML;
-  if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
-  if (clearFiltersEl && newClearFilters) clearFiltersEl.innerHTML = newClearFilters.innerHTML;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
-  if (window.lucide) lucide.createIcons();
+  swapViewParts('receipts', renderReceiptsView, ['receipts-grid', 'receipts-count', 'receipt-quick-filters', 'receipt-active-filters', 'receipt-search-clear', 'receipt-clear-filters']);
 }
 
 function clearReceiptSearch() {
