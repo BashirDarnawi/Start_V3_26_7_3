@@ -44,7 +44,9 @@ test('Audit cleanup asks for the days and then for the delete in the app\'s own 
   const yes = box.locator('.management-button-row button').last();
 
   // --- The question with a field: the suggested value is there and has the focus. Escape answers nothing. ---
-  await cleanup.click();
+  // With a keyboard it is opened from the keyboard, so the button has the focus in every browser
+  // (Safari does not move the focus to a button that is clicked with the mouse).
+  if (isMobile) await cleanup.click(); else { await cleanup.focus(); await page.keyboard.press('Enter'); }
   await expect(box).toBeVisible();
   await expect(box).toHaveAttribute('role', 'alertdialog');
   await expect(box).toHaveAttribute('aria-modal', 'true');

@@ -60,9 +60,9 @@ test('on a phone the Filters button shares a row with the search and the first c
   // The first record starts in the upper two thirds of the first screen (before: at its bottom edge).
   const firstCard = page.locator('#customers-grid > .workspace-record').first();
   await expect(firstCard).toBeVisible();
-  expect(await top(firstCard)).toBeLessThan(Math.round(viewport.height * 0.62));
+  expect(await top(firstCard)).toBeLessThan(Math.round(viewport.height * 2 / 3));
   await expect(page.locator(`[data-shell-row="customers"][data-shell-row-id="${customerId}"]`)).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
 
   // Deliveries: the stage counters and the delivery log come before the money summary.
   await page.evaluate(() => navigateTo('deliveries'));
@@ -76,6 +76,6 @@ test('on a phone the Filters button shares a row with the search and the first c
   expect(await top(page.locator('.ops-deliveries .ops-controls')), 'the search of the delivery log is on the first screen').toBeLessThan(viewport.height - 160);
   // The two lists keep their names for a screen reader although the small labels are not drawn.
   await expect(page.locator('.ops-deliveries .ops-controls select').first()).toHaveAccessibleName('Status');
-  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
   expect(errors).toEqual([]);
 });

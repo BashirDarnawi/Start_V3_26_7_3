@@ -28,8 +28,10 @@ const openMenus = page => page.evaluate(() => Array.from(document.querySelectorA
 const sidebarWidth = page => page.evaluate(() => Math.round(document.getElementById('app-sidebar').getBoundingClientRect().width));
 const sections = page => page.evaluate(() => Array.from(document.querySelectorAll('#app-sidebar .workspace-sidebar-nav .frame-link'), link => link.textContent.trim()));
 const awayFromSidebar = page => page.mouse.move(900, 500);
+// Sideways overflow is measured against the visible width (clientWidth): desktop Safari draws a
+// scrollbar that takes 8 px of the window, so scrollWidth - innerWidth is -8 there with no overflow.
 
-test('the Admin changes area from the switcher by keyboard and pointer, each area lists its own sections, and one account menu holds theme, language, privacy, deletion and sign-out', async ({ page }) => {
+test('the Admin changes area from the switcher by keyboard and pointer, each area lists its own sections, and one account menu holds theme, language, privacy, deletion and sign-out', async ({ page, browserName }) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -48,7 +50,8 @@ test('the Admin changes area from the switcher by keyboard and pointer, each are
   expect(await openMenus(page)).toEqual([true, false]);
   await expect(page.locator('#app-sidebar .frame-head .frame-menu-list button')).toHaveText(['Owner dashboard', 'Albayan Manager', 'Ads Studio', 'Clothes System', 'Services']);
   await expect(page.locator('#app-sidebar .frame-head .frame-menu-list [aria-current="true"]')).toHaveText('Owner dashboard');
-  await page.keyboard.press('Tab');
+  // Safari walks buttons and links with Option+Tab; plain Tab stops at fields only there.
+  await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
   expect(await page.evaluate(() => document.activeElement.closest('.frame-menu-list') !== null)).toBe(true);
   await page.keyboard.press('Escape');
   expect(await openMenus(page)).toEqual([false, false]);
@@ -103,7 +106,7 @@ test('from 901 to 1279 px the sidebar is a rail of icons that keeps every name a
   await awayFromSidebar(page);
   await expect.poll(() => sidebarWidth(page)).toBe(72);
   // The content starts where the rail ends and nothing overflows.
-  const layout = await page.evaluate(() => ({ contentStart: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - innerWidth }));
+  const layout = await page.evaluate(() => ({ contentStart: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth }));
   expect(layout).toEqual({ contentStart: 72, overflow: 0 });
   // Every line still has its name for a screen reader although only the icon is drawn.
   await expect(page.getByRole('button', { name: 'Receipts', exact: true }).first()).toBeAttached();
@@ -121,7 +124,7 @@ test('from 901 to 1279 px the sidebar is a rail of icons that keeps every name a
   await awayFromSidebar(page);
   await expect.poll(() => page.evaluate(() => Math.round(innerWidth - document.querySelector('.app-main').getBoundingClientRect().right))).toBe(72);
   expect(await page.evaluate(() => Math.round(innerWidth - document.getElementById('app-sidebar').getBoundingClientRect().right))).toBe(0);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
 });
 
 test('on a tablet card lists use two columns, a dialog is a centred window as wide as it needs, and it takes the top position while a field is in use', async ({ page }) => {
@@ -129,7 +132,7 @@ test('on a tablet card lists use two columns, a dialog is a centred window as wi
   await signIn(page);
   await page.evaluate(() => navigateTo('customers'));
   await expect.poll(() => new URL(page.url()).pathname).toBe('/customers');
-  const grid = await page.evaluate(() => ({ columns: getComputedStyle(document.getElementById('customers-grid')).gridTemplateColumns.split(' ').length, overflow: document.documentElement.scrollWidth - innerWidth }));
+  const grid = await page.evaluate(() => ({ columns: getComputedStyle(document.getElementById('customers-grid')).gridTemplateColumns.split(' ').length, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth }));
   expect(grid).toEqual({ columns: 2, overflow: 0 });
   await page.evaluate(() => showCustomerModal());
   const panel = page.locator('#app-modal .app-dialog-panel');
@@ -163,7 +166,7 @@ test('the Clothes System sits in the frame on a wide screen: its sections are li
   await expect(page.getByRole('button', { name: 'Back to Smart Systems' })).toBeHidden();
   // No platform top bar over the system's own header, and nothing scrolls sideways.
   await expect(page.locator('.workspace-topbar')).toHaveCount(0);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
 
   // A section opens at its own address, and the browser's Back returns to the one before.
   await page.locator('#app-sidebar .frame-link', { hasText: 'Orders' }).click();
@@ -196,7 +199,7 @@ test('the Clothes System sits in the frame on a wide screen: its sections are li
   await expect(page.getByRole('button', { name: 'Back to Smart Systems' })).toBeVisible();
   await expect(page.locator('#app-sidebar')).not.toBeInViewport();
   await expect(page.locator('.mobile-bottom-nav')).toHaveCount(0);
-  expect(await page.evaluate(() => ({ start: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - innerWidth }))).toEqual({ start: 0, overflow: 0 });
+  expect(await page.evaluate(() => ({ start: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth }))).toEqual({ start: 0, overflow: 0 });
   expect(errors).toEqual([]);
 });
 
@@ -213,7 +216,7 @@ test('the Ads Studio sits beside a narrow rail of the frame at every wide size, 
   // A rail even at 1440 px: the Studio's own navigation is beside it, in the page.
   await expect(page.locator('#app-sidebar')).toHaveClass(/frame-rail/);
   await expect.poll(() => sidebarWidth(page)).toBe(72);
-  expect(await page.evaluate(() => ({ start: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - innerWidth }))).toEqual({ start: 72, overflow: 0 });
+  expect(await page.evaluate(() => ({ start: Math.round(document.querySelector('.app-main').getBoundingClientRect().left), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth }))).toEqual({ start: 72, overflow: 0 });
   expect(await sections(page)).toEqual(['Owner dashboard']);
   await expect(page.locator('.workspace-topbar')).toHaveCount(0);
   // The keyboard opens the rail; the switcher lists the areas with the Studio ticked; Escape closes it.
@@ -287,7 +290,7 @@ test('from 1280 px a record opens its details in a panel beside the list, one at
   expect(Math.abs(panel.width - closedCard.width)).toBeLessThanOrEqual(1);
   // Every other record is in the first column too: nothing is left beside or under the panel.
   expect(await page.evaluate(() => Array.from(document.querySelectorAll('#customers-grid > .workspace-record'), card => Math.round(card.getBoundingClientRect().left)).filter((left, index, all) => left !== all[0]).length)).toBe(0);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
   // The actions of the full card are in the panel.
   await expect(card.locator(`button[onclick="editCustomer('${first}')"]`)).toBeVisible();
 
