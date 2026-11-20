@@ -253,7 +253,54 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
     await page.getByTestId('studio-back').click();
     await expect(page.getByTestId('studio-help-tickets')).toContainText('تذاكري');
     await expectFits(page, 'Help (AR)');
-    await setLanguage(page, 'en');
+
+    // Redesign round 4: a tab shows how many tickets it holds when the server's answer carries the counts. Here
+    // the answer is given three- and four-digit counts, to see that both tabs still fit a 320 px phone.
+    await expect(page.locator('[data-testid^="studio-help-count-"]')).toHaveCount(0);  // this answer has none: no number is drawn
+    await page.route('**/api/studio/tickets?status=*', async route => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), counts: { active: 128, resolved: 4096, open: 7 } } });
+    });
+    await page.evaluate(() => studioHelpRetry('active'));
+    await expect(page.getByTestId('studio-help-count-active')).toHaveText('128');
+    await expect(page.getByTestId('studio-help-count-resolved')).toHaveText('4096');
+    const tabs = () => page.locator('[data-testid="studio-help-tickets"] .studio-help-chip').evaluateAll(chips => chips.map(chip => {
+      const range = document.createRange();
+      range.selectNodeContents(chip);
+      const rects = [...range.getClientRects()].filter(rect => rect.width > 0);
+      const count = chip.querySelector('.studio-ads-count').getBoundingClientRect();
+      const name = chip.querySelector('span').getBoundingClientRect();
+      return { text: chip.textContent.replace(/\s+/g, ' ').trim(), lines: Math.max(...rects.map(rect => rect.top)) < Math.min(...rects.map(rect => rect.bottom)) ? 1 : 2, apart: Math.round(Math.max(count.left - name.right, name.left - count.right)), height: Math.round(chip.getBoundingClientRect().height) };
+    }));
+    for (const [language, names] of [['ar', ['مفتوحة128', 'محلولة4096']], ['en', ['Open128', 'Resolved4096']]]) {
+      await setLanguage(page, language);
+      for (const width of WIDTHS) {
+        await page.setViewportSize({ width, height: 800 });
+        const seen = await tabs();
+        expect(seen.map(tab => tab.text), `${language} ${width}`).toEqual(names);
+        for (const tab of seen) {
+          expect(tab.lines, `${language} ${width}: "${tab.text}" is one line`).toBe(1);
+          expect(tab.apart, `${language} ${width}: the count stands clear of the name in "${tab.text}"`).toBeGreaterThanOrEqual(4);
+          expect(tab.height, `${language} ${width}: "${tab.text}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
+        }
+      }
+      await expectFits(page, `Help tabs with counts (${language})`);
+    }
+    // The other tab keeps the counts while its own list is read; once both lists have been answered without
+    // counts, no number is left.
+    await page.getByTestId('studio-help-filter-resolved').click();
+    await expect(page.getByTestId('studio-help-filter-resolved')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('studio-help-count-active')).toHaveText('128');
+    await page.unroute('**/api/studio/tickets?status=*');
+    await page.route('**/api/studio/tickets?status=*', async route => {
+      const response = await route.fetch();
+      const { counts, ...rest } = await response.json();
+      await route.fulfill({ response, json: rest });
+    });
+    await page.evaluate(() => { studioHelpRetry('resolved'); studioHelpRetry('active'); });
+    await expect(page.locator('[data-testid^="studio-help-count-"]')).toHaveCount(0);
+    await page.unroute('**/api/studio/tickets?status=*');
+    await page.getByTestId('studio-help-filter-active').click();
     expect(errors).toEqual([]);
   });
 
@@ -426,6 +473,23 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
         await expect(section.locator('[data-testid="studio-staff-list"] > li').first()).toContainText(stopNumber, { timeout: BOOT_TIMEOUT });
         await expect(section).not.toContainText(paymentNumber);
         await expect(desk.getByTestId(`studio-ticket-${paymentTicketId}`)).toHaveCount(0);
+        // Redesign round 4: the team's five tabs show their counts when the answer carries them, and still fit a
+        // 320 px phone with four-digit counts in both languages.
+        await desk.route('**/api/studio/staff/tickets?status=*', async route => {
+          const response = await route.fetch();
+          await route.fulfill({ response, json: { ...(await response.json()), counts: { active: 1280, open: 640, answered: 320, waiting_customer: 160, resolved: 4096 } } });
+        });
+        await desk.evaluate(() => studioStaffRetry());
+        const counted = () => section.locator('.studio-help-chip').evaluateAll(chips => chips.map(chip => `${chip.getAttribute('aria-pressed') === 'true' ? '*' : ''}${chip.textContent.replace(/\s+/g, ' ').trim()}`));
+        await expect.poll(counted).toEqual(['*Active1280', 'Waiting for the team640', 'Answered320', 'Waiting for the customer160', 'Resolved4096']);
+        for (const language of ['ar', 'en']) {
+          await setLanguage(desk, language);
+          await expect(section.locator('.studio-ads-count')).toHaveText(['1280', '640', '320', '160', '4096']);
+          await expectFits(desk, `Team tickets tabs with counts (${language})`, '[data-testid="studio-staff-tickets"]');
+        }
+        await desk.getByTestId('studio-staff-filter-answered').click();
+        await expect.poll(counted).toEqual(['Active1280', 'Waiting for the team640', '*Answered320', 'Waiting for the customer160', 'Resolved4096']);
+        await desk.unroute('**/api/studio/staff/tickets?status=*');
       } finally {
         await deskContext.close();
       }

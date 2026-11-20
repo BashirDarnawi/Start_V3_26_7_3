@@ -627,6 +627,7 @@ html.dark, html.dark :is(.studio-help, .studio-stop-sheet) {
 .studio-help-chips { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .studio-help-chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 44px; min-height: 44px; max-width: 100%; padding: 8px 14px; border: 1px solid var(--ui-line); border-radius: 999px; background: var(--ui-surface); color: var(--ui-ink); font: inherit; font-size: 14px; font-weight: 700; line-height: 1.3; text-align: center; overflow-wrap: anywhere; }
 .studio-help-chip > span { min-width: 0; }
+.studio-help-chip > .studio-ads-count { flex: none; min-width: 22px; }
 .studio-help-chip[aria-pressed="true"] { border-color: var(--ui-accent); background: var(--ui-accent-soft); color: var(--ui-accent); }
 .studio-help-chip[disabled] { opacity: 0.55; }
 .studio-help-chip-icon, .studio-help-status-icon, .studio-help-ask-icon { width: 16px; height: 16px; flex-shrink: 0; }

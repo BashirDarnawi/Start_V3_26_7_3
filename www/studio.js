@@ -12833,7 +12833,16 @@ function studioHelpCleanMessage(raw) {
 function studioHelpCleanList(raw) {
   const items = raw && Array.isArray(raw.tickets) ? raw.tickets.map(studioHelpCleanTicket).filter(Boolean) : [];
   const cursor = raw && typeof raw.nextCursor === 'string' && /^[0-9:]+tkt_[0-9a-f]{40}$/.test(raw.nextCursor) ? raw.nextCursor : null;
-  return { items, nextCursor: cursor };
+  // How many tickets each tab holds, when the server says (round 4): whole numbers, nothing else.
+  const sent = raw && raw.counts && typeof raw.counts === 'object' ? raw.counts : null;
+  const counts = sent ? Object.fromEntries(STUDIO_STAFF_FILTERS.map(item => [item[0], sent[item[0]]]).filter(item => Number.isSafeInteger(item[1]) && item[1] >= 0)) : null;
+  return { items, nextCursor: cursor, counts };
+}
+
+// A tab of a ticket list: its name and its count when known. No count rather than a count that may be wrong.
+function studioHelpChip(id, key, label, on, click, counts) {
+  const count = counts && key in counts ? `<span class="studio-ads-count" data-testid="${id}-count-${key}">${counts[key]}</span>` : '';
+  return `<button type="button" class="studio-help-chip" data-testid="${id}-filter-${key}" aria-pressed="${on ? 'true' : 'false'}" onclick="${click}('${key}')"><span>${studioEsc(label)}</span>${count}</button>`;
 }
 
 function studioHelpEmptySlot() {
@@ -12864,6 +12873,7 @@ function studioHelpReadSlot(slot, path, generationOf, force, more = false) {
       slot.items = slot.items.concat(page.items.filter(item => !seen.has(item.id)));
     } else {
       slot.items = page.items;
+      slot.counts = page.counts;
       slot.loadedAt = now;
     }
     slot.nextCursor = page.nextCursor;
@@ -12995,6 +13005,7 @@ function studioHelpUpdateListed(ticket) {
   for (const [key, slot] of Object.entries(_studioHelp.lists)) {
     const at = slot.items.findIndex(item => item.id === ticket.id);
     const fits = key === 'resolved' ? ticket.status === 'resolved' : ticket.status !== 'resolved';
+    if (at >= 0 && slot.items[at].status !== ticket.status) Object.values(_studioHelp.lists).forEach(list => { list.counts = null; });
     if (at >= 0) slot.items[at] = ticket;
     else if (fits) slot.loadedAt = 0;
   }
@@ -13474,7 +13485,7 @@ function renderStudioHelpList(view) {
   studioHelpWantList(filter);
   const on = studioHelpOn();
   const chips = [['active', adsStudioText('Open', 'مفتوحة')], ['resolved', adsStudioText('Resolved', 'محلولة')]].map(([key, label]) =>
-    `<button type="button" class="studio-help-chip" data-testid="studio-help-filter-${key}" aria-pressed="${key === filter ? 'true' : 'false'}" onclick="studioHelpFilter('${key}')">${studioEsc(label)}</button>`).join('');
+    studioHelpChip('studio-help', key, label, key === filter, 'studioHelpFilter', slot.counts || Object.values(_studioHelp.lists).map(list => list.counts).find(Boolean))).join('');
   let body = '';
   if (!slot.loadedAt && slot.error) body = renderStudioHelpProblem(slot.error, `studioHelpRetry('${filter}')`, 'studio-help-problem');
   else if (!slot.loadedAt) body = `<p class="studio-help-empty" data-testid="studio-help-loading">${studioEsc(adsStudioText('Reading your tickets…', 'نقرأ تذاكرك…'))}</p>`;
@@ -14201,7 +14212,7 @@ function studioStaffFilter(filter) {
   if (!STUDIO_STAFF_FILTERS.some(item => item[0] === String(filter || ''))) return;
   studioStaffScope();
   _studioStaff.filter = String(filter);
-  _studioStaff.list = studioHelpEmptySlot();
+  _studioStaff.list = Object.assign(studioHelpEmptySlot(), { counts: studioStaffListSlot().counts });  // the tabs keep their counts while the next list is read
   _studioStaff.openId = '';
   studioStaffWant(true);
   studioHelpRedraw();
@@ -14266,6 +14277,7 @@ function studioStaffUpdateListed(ticket) {
   const at = slot.items.findIndex(item => item.id === ticket.id);
   const filter = _studioStaff.filter;
   const fits = filter === 'active' ? ticket.status !== 'resolved' : ticket.status === filter;
+  if (at >= 0 && slot.items[at].status !== ticket.status) slot.counts = null;
   // A thread read does not say whether a stop request is still open: the list row keeps what the list said.
   if (at >= 0) slot.items[at] = slot.items[at].stopOpen && ticket.status === 'resolved' ? { ...ticket, stopOpen: true } : ticket;
   else if (fits) slot.loadedAt = 0;
@@ -14514,7 +14526,7 @@ function renderStudioStaffTicketsClassic() {
   const slot = studioStaffListSlot();
   studioStaffWant();
   const chips = STUDIO_STAFF_FILTERS.map(([key, en, ar]) =>
-    `<button type="button" class="studio-help-chip" data-testid="studio-staff-filter-${key}" aria-pressed="${key === _studioStaff.filter ? 'true' : 'false'}" onclick="studioStaffFilter('${key}')">${studioEsc(adsStudioText(en, ar))}</button>`).join('');
+    studioHelpChip('studio-staff', key, adsStudioText(en, ar), key === _studioStaff.filter, 'studioStaffFilter', slot.counts)).join('');
   let body = '';
   if (!slot.loadedAt && slot.error) body = renderStudioHelpProblem(slot.error, 'studioStaffRetry()', 'studio-staff-problem');
   else if (!slot.loadedAt) body = `<p class="studio-help-empty" data-testid="studio-staff-loading">${studioEsc(adsStudioText('Reading the tickets…', 'نقرأ التذاكر…'))}</p>`;

@@ -6086,7 +6086,91 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio staff tickets: "$$", "$&" and "$`" in a customer message and in the reply draft show as typed (one row button, the thread inside its row, the draft unchanged)',
     !loadError && dollarCases.every(Boolean), loadError || `cases ${failed(dollarCases)}`);
+
+  // Redesign round 4 (ROUND3.md section 4, item 5): a tab of a ticket list shows how many tickets it holds, when
+  // the server's answer carries the counts. An answer without them (a server not yet updated) draws the tabs as before.
+  // [pressed, name, count or undefined] of one tab; undefined when the tab is not drawn exactly this way.
+  const tabOf = (text, id, key) => { const m = String(text).match(new RegExp(`<button type="button" class="studio-help-chip" data-testid="${id}-filter-${key}" aria-pressed="(true|false)" onclick="[A-Za-z]+\\('${key}'\\)"><span>([^<]*)</span>(?:<span class="studio-ads-count" data-testid="${id}-count-${key}">(\\d+)</span>)?</button>`)); return m ? [m[1], m[2], m[3]] : undefined; };
+  const staffTabs = text => ['active', 'open', 'answered', 'waiting_customer', 'resolved'].map(key => tabOf(text, 'studio-staff', key));
+  const staffFresh = () => run("_studioStaff.forUser = ''; __replies['/api/studio/staff/tickets?status=active'] = []; __replies['/api/studio/staff/tickets?status=resolved'] = [];");
+  staffFresh();
+  reply('/api/studio/staff/tickets?status=active', { tickets: [dollarTicket], nextCursor: null, counts: { active: 3, open: 2, answered: 1, waiting_customer: 0, resolved: 14, other: 9, constructor: 5 } });
+  run('renderStudioStaffTicketsClassic();');
+  const countedStaff = staffTabs(run('renderStudioStaffTicketsClassic()'));
+  // Another tab is pressed and its list is still being read (no answer yet): the counts stay where they were.
+  run("studioStaffFilter('resolved');");
+  const loadingStaff = String(run('renderStudioStaffTicketsClassic()'));
+  // The answer has no counts (an older server): no numbers, nothing else changes.
+  reply('/api/studio/staff/tickets?status=resolved', { tickets: [], nextCursor: null });
+  run("studioStaffFilter('resolved');");
+  const plainStaff = String(run('renderStudioStaffTicketsClassic()'));
+  // Counts that are not whole numbers from 0 up are left out one by one.
+  staffFresh();
+  reply('/api/studio/staff/tickets?status=active', { tickets: [dollarTicket], nextCursor: null, counts: { active: 1, open: -1, answered: 1.5, waiting_customer: '4', resolved: null } });
+  run('renderStudioStaffTicketsClassic();');
+  const partStaff = staffTabs(run('renderStudioStaffTicketsClassic()'));
+  for (const odd of ['[1, 2]', '"12"', '7', 'null']) {
+    staffFresh();
+    run(`(__replies['/api/studio/staff/tickets?status=active'] = []).push({ value: { tickets: [], nextCursor: null, counts: ${odd} } });`);
+    run('renderStudioStaffTicketsClassic();');
+    partStaff.push(String(run('renderStudioStaffTicketsClassic()')).includes('studio-ads-count') ? `a count drawn from ${odd}` : 'none');
+  }
+  // A status changed on this screen (the row stays, by design, until the list is read again): the counts are no longer known.
+  staffFresh();
+  reply('/api/studio/staff/tickets?status=active', { tickets: [dollarTicket], nextCursor: null, counts: { active: 1, open: 1, answered: 0, waiting_customer: 0, resolved: 0 } });
+  run('renderStudioStaffTicketsClassic();');
+  const beforeChange = staffTabs(run('renderStudioStaffTicketsClassic()'));
+  run(`studioStaffUpdateListed(Object.assign({}, _studioStaff.list.items[0]));`);  // the same status (a thread was read): nothing to forget
+  const sameStatus = staffTabs(run('renderStudioStaffTicketsClassic()'));
+  run(`studioStaffUpdateListed(Object.assign({}, _studioStaff.list.items[0], { status: 'answered' }));`);
+  const afterChange = String(run('renderStudioStaffTicketsClassic()'));
+  // "Show more" reads an older page, which brings no counts of its own: the tabs keep theirs.
+  staffFresh();
+  reply('/api/studio/staff/tickets?status=active', { tickets: [dollarTicket], nextCursor: `0:5:${T2}`, counts: { active: 2, open: 2, answered: 0, waiting_customer: 0, resolved: 6 } });
+  run('renderStudioStaffTicketsClassic();');
+  reply(`/api/studio/staff/tickets?status=active&cursor=${encodeURIComponent(`0:5:${T2}`)}`, { tickets: [ticket(T2, 'T-000002', 'open', { ownerId: 'cust-77' })], nextCursor: null });
+  run('studioStaffMore();');
+  const afterMore = String(run('renderStudioStaffTicketsClassic()'));
   who.staff = false;
+  // The customer's two tabs.
+  const helpTabs = text => ['active', 'resolved'].map(key => tabOf(text, 'studio-help', key));
+  const helpFresh = () => run("_studioHelp.lists = Object.create(null); __replies['/api/studio/tickets?status=active'] = []; __replies['/api/studio/tickets?status=resolved'] = [];");
+  const drawHelp = filter => run(`renderStudioHelpList({ view: 'list', id: '', filter: '${filter}' })`);
+  helpFresh();
+  reply('/api/studio/tickets?status=active', { tickets: [ticket(T1, 'T-000001', 'open')], nextCursor: null, counts: { active: 1, resolved: 4, open: 1 } });
+  drawHelp('active');
+  const countedHelp = helpTabs(drawHelp('active'));
+  const countedHelpAr = helpTabs(inLanguage('ar', "renderStudioHelpList({ view: 'list', id: '', filter: 'active' })"));
+  const otherTab = helpTabs(drawHelp('resolved'));  // not read yet: the counts the other tab's answer brought
+  // Both tabs have been read (each answer brought the counts); then one ticket changes its status here.
+  run('_studioHelp.lists.resolved = studioHelpEmptySlot();');  // (the read above never got an answer)
+  reply('/api/studio/tickets?status=resolved', { tickets: [], nextCursor: null, counts: { active: 1, resolved: 4 } });
+  drawHelp('resolved');
+  const bothRead = !!run('_studioHelp.lists.resolved.counts && _studioHelp.lists.active.counts');
+  run(`studioHelpUpdateListed(Object.assign({}, _studioHelp.lists.active.items[0]));`);
+  const helpSame = helpTabs(drawHelp('active'));
+  run(`studioHelpUpdateListed(Object.assign({}, _studioHelp.lists.active.items[0], { status: 'resolved' }));`);
+  const helpChanged = String(drawHelp('active'));
+  helpFresh();
+  reply('/api/studio/tickets?status=active', { tickets: [ticket(T1, 'T-000001', 'open')], nextCursor: null });
+  drawHelp('active');
+  const plainHelp = String(drawHelp('active'));
+  const countCases = [
+    JSON.stringify(countedStaff) === JSON.stringify([['true', 'Active', '3'], ['false', 'Waiting for the team', '2'], ['false', 'Answered', '1'], ['false', 'Waiting for the customer', '0'], ['false', 'Resolved', '14']]),
+    JSON.stringify(staffTabs(loadingStaff)) === JSON.stringify([['false', 'Active', '3'], ['false', 'Waiting for the team', '2'], ['false', 'Answered', '1'], ['false', 'Waiting for the customer', '0'], ['true', 'Resolved', '14']]) && loadingStaff.includes('data-testid="studio-staff-loading"'),
+    JSON.stringify(staffTabs(plainStaff)) === JSON.stringify([['false', 'Active', undefined], ['false', 'Waiting for the team', undefined], ['false', 'Answered', undefined], ['false', 'Waiting for the customer', undefined], ['true', 'Resolved', undefined]].map(tab => tab.slice(0, 3))) && !plainStaff.includes('studio-ads-count') && plainStaff.includes('data-testid="studio-staff-empty"'),
+    JSON.stringify(partStaff.slice(0, 5).map(tab => tab && tab[2])) === JSON.stringify(['1', undefined, undefined, undefined, undefined].map(v => v === undefined ? null : v)) && partStaff.slice(5).every(note => note === 'none'),
+    JSON.stringify(beforeChange) === JSON.stringify(sameStatus) && beforeChange[0][2] === '1' && !afterChange.includes('studio-ads-count') && afterChange.includes('data-status="answered"'),
+    JSON.stringify(countedHelp) === JSON.stringify([['true', 'Open', '1'], ['false', 'Resolved', '4']]) && JSON.stringify(countedHelpAr) === JSON.stringify([['true', 'مفتوحة', '1'], ['false', 'محلولة', '4']]),
+    JSON.stringify(otherTab) === JSON.stringify([['false', 'Open', '1'], ['true', 'Resolved', '4']]),
+    bothRead && JSON.stringify(helpSame) === JSON.stringify(countedHelp) && !helpChanged.includes('studio-ads-count') && helpChanged.includes('data-testid="studio-help-list-done"') && !String(drawHelp('resolved')).includes('studio-ads-count'),
+    !plainHelp.includes('studio-ads-count') && JSON.stringify(helpTabs(plainHelp).map(tab => tab && tab.slice(0, 2))) === JSON.stringify([['true', 'Open'], ['false', 'Resolved']]),
+    afterMore.includes('T-000002') && afterMore.includes('T-000003') && JSON.stringify(staffTabs(afterMore).map(tab => tab && tab[2])) === JSON.stringify(['2', '2', '0', '0', '6']),
+    helpSrc.includes("const counts = sent ? Object.fromEntries(STUDIO_STAFF_FILTERS.map(item => [item[0], sent[item[0]]]).filter(item => Number.isSafeInteger(item[1]) && item[1] >= 0)) : null;"),
+    read('assets/ads-workspace.css').includes('\n.studio-help-chip > .studio-ads-count { flex: none; min-width: 22px; }\n')
+  ];
+  check('Studio ticket tabs (round 4): each tab shows its count when the answer carries one, keeps it while another tab loads, shows none for an answer without counts or after a status changed here, and takes whole numbers only',
+    !loadError && countCases.every(Boolean), loadError || `cases ${failed(countCases)}`);
 
   // Texts, handlers and styles.
   const textPairs = [...helpSrc.matchAll(/adsStudioText\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
