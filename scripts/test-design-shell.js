@@ -395,6 +395,11 @@ check('round 3: filters in force are chips above the folded panel, and Home offe
   const shell = fs.readFileSync(path.join(root, 'src', '12d-manager-shell.js'), 'utf8');
   assert(shell.includes(`onclick: "navigateTo('more')", phone: 1 }`) && shell.includes("class=\"shell-quick-action${q.phone ? ' is-phone-only' : ''} touch-target"));
   assert.equal(shell.split('phone: 1').length - 1, 1, 'only "More" is phone-only');
+  // Icon-only actions in a record's details: 32 px for a mouse (they were the 16 px of the drawing), on screens that have one.
+  const icons = layoutCss.slice(layoutCss.indexOf('/* Icon-only actions inside a record'));
+  assert(icons.includes('@supports selector(:has(*)) {\n  @media (min-width: 901px) and (pointer: fine) {') && icons.includes('    .ui-workspace .shell-row-body button[class^="text-"][class*=" hover:text-"]:has(> svg:only-child),\n    .ui-workspace .shell-row-body button[class^="text-"][class*=" hover:text-"]:has(> i:only-child) {\n      display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; border-radius: 8px;'));
+  // It must not reach the panel's own Close button (hidden below 1280 px) or a button with a word.
+  assert(!/\.shell-row-body button:has\(> (svg|i):only-child\)/.test(icons));
 });
 check('phones: the Filters button sits beside the search, Customers totals share one row, and the delivery log comes before the money summary', () => {
   const start = layoutCss.indexOf('Phones: the first record sooner (redesign round 2');

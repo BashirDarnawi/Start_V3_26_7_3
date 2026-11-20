@@ -510,3 +510,18 @@ pre.font-sans { font-family: inherit; }
   .shell-quick-actions { grid-template-columns: none !important; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
   .shell-quick-action.is-phone-only { display: none; }
 }
+
+/* Icon-only actions inside a record's details (edit, print, delete, split payments, transfer): 32 px
+   to press with a mouse, instead of the 16 px of the drawing itself (DESIGN.md 7.1: never under
+   24 px). Touch screens already give them their own larger size. Each keeps its tooltip as its name. */
+@supports selector(:has(*)) {
+  @media (min-width: 901px) and (pointer: fine) {
+    /* These buttons carry only a text colour and its hover colour as classes; that tells them from
+       buttons with a word (and from the panel's Close button, which must stay hidden below 1280 px). */
+    .ui-workspace .shell-row-body button[class^="text-"][class*=" hover:text-"]:has(> svg:only-child),
+    .ui-workspace .shell-row-body button[class^="text-"][class*=" hover:text-"]:has(> i:only-child) {
+      display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; border-radius: 8px;
+    }
+    .ui-workspace .shell-row-body button[class^="text-"][class*=" hover:text-"]:has(> svg:only-child):hover { background: var(--ui-surface-soft); }
+  }
+}
