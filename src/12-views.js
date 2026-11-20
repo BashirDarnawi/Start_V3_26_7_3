@@ -1253,8 +1253,9 @@ function isWorkspaceFilterPanelExpanded(view) {
   // Simple/Advanced preference (on a phone that was a screenful of controls).
   const panels = loadWorkspaceFilterPanels();
   if (typeof panels[view] === 'boolean') return panels[view];
-  // Default: open on wide screens, folded on phones.
-  try { return typeof window !== 'undefined' && Number(window.innerWidth) >= 768; } catch (_) { return false; }
+  // Folded until asked for, on every screen size (finding B-24: on a computer Receipts opened with
+  // six dropdowns in a row). Before: open from 768 px.
+  return false;
 }
 
 function toggleWorkspaceFilterPanel(view) {
@@ -1281,6 +1282,34 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
       <i data-lucide="chevron-${expanded ? 'up' : 'down'}" class="w-4 h-4"></i>
     </button>
   `;
+}
+
+// Filters in force, shown while the filter panel is folded: one chip for each dropdown that is not
+// on its first choice, with its name and its value. Pressing a chip puts that one filter back; "Clear
+// all" does it for every chip. They are read from the panel's own dropdowns, so each list gets them
+// the same way. A dropdown marked data-quick is one whose state the quick filters already show.
+function workspaceFiltersInForce(html) {
+  const head = /<div id="[a-z]+-advanced-filters" class="workspace-advanced-panel hidden"/.exec(html);
+  if (!head) return html;
+  let depth = 0, end = head.index;
+  for (const tag of html.slice(head.index).matchAll(/<(\/?)div\b/g)) {
+    depth += tag[1] ? -1 : 1;
+    if (!depth) { end = head.index + tag.index; break; }
+  }
+  const isAr = state.language === 'ar', chips = [], resets = [];
+  for (const [, tag, body] of html.slice(head.index, end).matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/g)) {
+    const options = Array.from(body.matchAll(/<option value="([^"]*)"([^>]*)>([^<]*)</g));
+    const chosen = options.find(option => /\sselected/.test(option[2]));
+    const change = (tag.match(/\sonchange="([^"]*)"/) || [])[1] || '';
+    if (!chosen || chosen === options[0] || !change.includes('this.value') || /\sdata-quick/.test(tag)) continue;
+    const reset = change.replace(/this\.value/g, `'${options[0][1]}'`);
+    const name = (tag.match(/\saria-label="([^"]*)"/) || [])[1];
+    resets.push(reset);
+    chips.push(`<button type="button" class="workspace-active-filter" onclick="${reset}" title="${isAr ? 'إزالة هذا الفلتر' : 'Remove this filter'}">${name ? `<b>${name}:</b> ` : ''}${chosen[3].trim()}<i data-lucide="x"></i></button>`);
+  }
+  if (!chips.length) return html;
+  const all = chips.length > 1 ? `<button type="button" class="workspace-active-filter is-clear" onclick="${resets.join(';')}">${isAr ? 'مسح الكل' : 'Clear all'}</button>` : '';
+  return `${html.slice(0, head.index)}<div class="workspace-active-filters" role="group" aria-label="${isAr ? 'الفلاتر المطبّقة' : 'Filters in force'}">${chips.join('')}${all}</div>${html.slice(head.index)}`;
 }
 
 function renderWorkspaceTopbar() {
@@ -1501,14 +1530,14 @@ function renderView() {
     case 'plans': return renderPlansView();
     case 'charge-wallet': return renderChargeWalletView();
     case 'analytics': return renderAnalyticsView();
-    case 'customers': return renderCustomersView();
-    case 'receipts': return renderReceiptsView();
+    case 'customers': return workspaceFiltersInForce(renderCustomersView());
+    case 'receipts': return workspaceFiltersInForce(renderReceiptsView());
     case 'pages': return renderPagesView();
-    case 'ads': return renderAdsView();
+    case 'ads': return workspaceFiltersInForce(renderAdsView());
     case 'deliveries': return renderDeliveriesView();
     case 'reconciliation': return renderReconciliationView();
     case 'users': return renderUsersView();
-    case 'audit': return renderAuditView();
+    case 'audit': return workspaceFiltersInForce(renderAuditView());
     case 'settings': return renderSettingsView();
     case 'delivery-dashboard': return renderDeliveryDashboard();
     case 'no-access': return renderNoAccessView();
@@ -2567,7 +2596,7 @@ function renderCustomersView() {
             
             <!-- Financial Filter -->
             ${canSeeCustomerBalances ? `<div class="relative min-w-0">
-              <select id="customer-financial-filter" aria-label="${isAr ? 'الحالة المالية' : 'Financial status'}" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
+              <select id="customer-financial-filter" data-quick aria-label="${isAr ? 'الحالة المالية' : 'Financial status'}" onchange="state.customerFinancialFilter = this.value; render();" class="w-full min-w-0 glass-input px-4 py-2 pr-10 rounded-lg appearance-none cursor-pointer">
                 <option value="all" ${state.customerFinancialFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات المالية' : 'All Financials'}</option>
                 <option value="hasCredit" ${state.customerFinancialFilter === 'hasCredit' ? 'selected' : ''}>${isAr ? 'لديه رصيد دائن' : 'Has Credit'}</option>
                 <option value="hasDebt" ${state.customerFinancialFilter === 'hasDebt' ? 'selected' : ''}>${isAr ? 'عليه دين' : 'Has Debt'}</option>
@@ -2800,7 +2829,7 @@ function renderReceiptsView() {
           <!-- Filter Dropdowns -->
           <div class="receipt-filter-controls workspace-filter-grid">
             <!-- Status Filter -->
-            <select aria-label="${t('status')}" onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select${receiptQuickMode === 'unpaid' ? ' data-quick' : ''} aria-label="${t('status')}" onchange="updateReceiptFilter('status', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptStatusFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptStatusFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الحالات' : 'All Status'}</option>
               <option value="paid" ${state.receiptStatusFilter === 'paid' ? 'selected' : ''}>✓ ${isArV ? 'مدفوع' : 'Paid'}</option>
               <option value="not_paid" ${['not_paid', 'pending', 'unpaid', 'not-paid'].includes(state.receiptStatusFilter) ? 'selected' : ''}>⏳ ${isArV ? 'غير مدفوع / دين' : 'Unpaid / Debt'}</option>
@@ -2826,7 +2855,7 @@ function renderReceiptsView() {
             </select>
 
             <!-- Customer Debt Source Filter -->
-            <select aria-label="${isArV ? 'نوع الدين' : 'Debt type'}" onchange="updateReceiptFilter('debt', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${(state.receiptDebtFilter || 'all') !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select${receiptQuickMode === 'debt' ? ' data-quick' : ''} aria-label="${isArV ? 'نوع الدين' : 'Debt type'}" onchange="updateReceiptFilter('debt', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${(state.receiptDebtFilter || 'all') !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${(state.receiptDebtFilter || 'all') === 'all' ? 'selected' : ''}>${isArV ? 'كل أنواع الديون' : 'All Debt Types'}</option>
               <option value="any-debt" ${state.receiptDebtFilter === 'any-debt' ? 'selected' : ''}>${isArV ? 'أي دين' : 'Any Debt'}</option>
               <option value="delivery-debt" ${state.receiptDebtFilter === 'delivery-debt' ? 'selected' : ''}>🚚 ${isArV ? 'دين توصيل' : 'Delivery Debt'}</option>
@@ -2835,7 +2864,7 @@ function renderReceiptsView() {
             </select>
             
             <!-- Collected Filter -->
-            <select aria-label="${isArV ? 'التحصيل' : 'Collection'}" onchange="updateReceiptFilter('collected', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptCollectedFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select${receiptQuickMode === 'not-collected' ? ' data-quick' : ''} aria-label="${isArV ? 'التحصيل' : 'Collection'}" onchange="updateReceiptFilter('collected', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptCollectedFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptCollectedFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل حالات التحصيل' : 'All Collection'}</option>
               <option value="collected" ${state.receiptCollectedFilter === 'collected' ? 'selected' : ''}>✓ ${isArV ? 'مُحصَّل' : 'Collected'}</option>
               <option value="not-collected" ${state.receiptCollectedFilter === 'not-collected' ? 'selected' : ''}>○ ${isArV ? 'غير مُحصَّل' : 'Not Collected'}</option>
@@ -2859,18 +2888,14 @@ function renderReceiptsView() {
           </div>
         </div>
         
-        <!-- Active Filters Display -->
-        <div id="receipt-active-filters">${hasActiveFilters ? `
+        <!-- What the list is narrowed to besides the dropdowns (a linked record, a customer, the search).
+             The dropdowns in force are the chips above the folded panel (workspaceFiltersInForce). -->
+        <div id="receipt-active-filters">${receiptRecordFilter || receiptCustomerFilter || state.receiptSearch ? `
           <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <span class="text-xs font-medium text-slate-500">${isArV ? 'الفلاتر النشطة:' : 'Active filters:'}</span>
             ${receiptRecordFilter ? `<span class="min-h-11 px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded-full text-xs font-bold inline-flex items-center gap-1"><i data-lucide="receipt-text" class="w-3 h-3"></i>${isArV ? 'الوصل' : 'Receipt'}: ${filteredReceiptLabel}<button type="button" onclick="clearReceiptRecordFilter()" class="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full hover:bg-amber-200 dark:hover:bg-amber-800 focus:outline-none focus:ring-2 focus:ring-amber-500" aria-label="${isArV ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="w-3 h-3"></i></button></span>` : ''}
             ${receiptCustomerFilter ? `<span class="min-h-11 px-2 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-medium inline-flex items-center gap-1"><i data-lucide="user-round" class="w-3 h-3"></i>${isArV ? 'العميل' : 'Customer'}: ${filteredCustomerName}<button type="button" onclick="clearReceiptCustomerFilter()" class="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full hover:bg-violet-200 dark:hover:bg-violet-800 focus:outline-none focus:ring-2 focus:ring-violet-500" aria-label="${isArV ? 'إزالة فلتر العميل' : 'Remove customer filter'}"><i data-lucide="x" class="w-3 h-3"></i></button></span>` : ''}
             ${state.receiptSearch ? `<span class="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium flex items-center"><i data-lucide="search" class="w-3 h-3 mr-1"></i>"${Security.escapeHtml(state.receiptSearch)}"</span>` : ''}
-            ${state.receiptStatusFilter !== 'all' ? `<span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs font-medium">${isArV ? ({ paid: 'مدفوع', not_paid: 'غير مدفوع / دين', pending: 'غير مدفوع / دين', unpaid: 'غير مدفوع / دين', canceled: 'ملغي', cancelled: 'ملغي', lost: 'ضائع' })[state.receiptStatusFilter] || state.receiptStatusFilter : ({ paid: 'Paid', not_paid: 'Unpaid / Debt', pending: 'Unpaid / Debt', unpaid: 'Unpaid / Debt', canceled: 'Canceled', cancelled: 'Canceled', lost: 'Lost' })[state.receiptStatusFilter] || state.receiptStatusFilter}</span>` : ''}
-            ${state.receiptPaymentFilter !== 'all' ? `<span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-full text-xs font-medium">${isArV ? ({ cash: 'نقدي', usdt: 'USDT', bank: 'حوالة مصرفية', split: 'دفعات مقسّمة' })[state.receiptPaymentFilter] || state.receiptPaymentFilter : state.receiptPaymentFilter}</span>` : ''}
-            ${state.receiptDateFilter !== 'all' ? `<span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full text-xs font-medium">${isArV ? ({ today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر' })[state.receiptDateFilter] || state.receiptDateFilter : state.receiptDateFilter}</span>` : ''}
-            ${(state.receiptDebtFilter || 'all') !== 'all' ? `<span class="px-2 py-1 bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 rounded-full text-xs font-medium">${isArV ? ({ 'any-debt': 'أي دين', 'delivery-debt': 'دين توصيل', 'shop-debt': 'دين داخل المحل', 'no-debt': 'بدون دين' })[state.receiptDebtFilter] : ({ 'any-debt': 'Any Debt', 'delivery-debt': 'Delivery Debt', 'shop-debt': 'In-shop Debt', 'no-debt': 'No Debt' })[state.receiptDebtFilter]}</span>` : ''}
-            ${state.receiptCollectedFilter !== 'all' ? `<span class="px-2 py-1 ${state.receiptCollectedFilter === 'collected' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300' : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300'} rounded-full text-xs font-medium">${isArV ? (state.receiptCollectedFilter === 'collected' ? 'مُحصَّل' : 'غير مُحصَّل') : state.receiptCollectedFilter}</span>` : ''}
           </div>
         ` : ''}</div>
       </div>
@@ -3682,11 +3707,11 @@ function renderAdsView() {
         </div>` : ''}
         <div id="ads-advanced-filters" class="workspace-advanced-panel ${adAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${adAdvancedFiltersOpen ? 'false' : 'true'}">
           <div class="ad-filter-controls workspace-filter-grid">
-          <select aria-label="${t('status')}" onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
+          <select${adQuickMode === 'stopped' ? ' data-quick' : ''} aria-label="${t('status')}" onchange="updateAdFilter('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.status || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
             ${AD_STATUSES.map(s => `<option value="${s}" ${adF.status === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
           </select>
-          <select aria-label="${isAr ? 'الدفع' : 'Payment'}" onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
+          <select${adQuickMode === 'setup' || adQuickMode === 'unpaid' ? ' data-quick' : ''} aria-label="${isAr ? 'الدفع' : 'Payment'}" onchange="updateAdFilter('payment', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
             <option value="all" ${(adF.payment || 'all') === 'all' ? 'selected' : ''}>${isAr ? 'كل طرق الدفع' : 'All Payments'}</option>
             <option value="pending_setup" ${adF.payment === 'pending_setup' ? 'selected' : ''}>${isAr ? 'يحتاج إكمال' : 'Needs setup'}</option>
             <option value="paid" ${adF.payment === 'paid' ? 'selected' : ''}>${isAr ? 'مدفوع' : 'Paid'}</option>

@@ -485,3 +485,28 @@ pre.font-sans { font-family: inherit; }
 /* Home (finding B-17): the page starts once. Its name is in the frame's top bar and in a heading for
    screen readers; that heading takes no room, so the block after it keeps the page's top position. */
 .ui-workspace [data-view="analytics"] h1.sr-only + * { margin-top: 0; }
+
+/* Filters in force (round 3): one chip for each dropdown of the folded filter panel that is not on
+   its first choice. A chip names the filter and its value and removes that one filter. */
+.workspace-active-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.workspace-active-filter {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 32px; max-width: 100%; padding: 4px 10px;
+  border: 1px solid var(--ui-line); border-radius: 999px; background: var(--ui-surface-soft);
+  font-size: 13px; font-weight: 550; color: var(--ui-ink); text-align: start;
+}
+.workspace-active-filter > b { font-weight: 650; color: var(--ui-muted); }
+.workspace-active-filter > :is(i, svg) { flex: none; width: 14px; height: 14px; color: var(--ui-muted); }
+.workspace-active-filter:hover { border-color: var(--ui-accent); }
+.workspace-active-filter:hover > :is(i, svg) { color: var(--ui-danger-text); }
+.workspace-active-filter:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
+.workspace-active-filter.is-clear { border-color: transparent; background: transparent; color: var(--ui-link-text); font-weight: 650; }
+@media (max-width: 900px), (pointer: coarse) {
+  .workspace-active-filter { min-height: 44px; padding-inline: 14px; }
+}
+
+/* Home (round 3): on a computer the sidebar lists what "More" lists, so that quick action is for
+   phones and tablets. The remaining actions share the row. */
+@media (min-width: 901px) {
+  .shell-quick-actions { grid-template-columns: none !important; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+  .shell-quick-action.is-phone-only { display: none; }
+}

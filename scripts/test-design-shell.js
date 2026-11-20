@@ -101,13 +101,15 @@ check('receipt overview shows authoritative debt allocation, never a fabricated 
   assert(html.includes('Unassigned debt') && !html.includes('Available balance'));
   assert(!html.includes('999'));
 });
-check('outside receipt actions keep edit/photo/linked-record and admin coverage gates', () => {
+check('outside receipt actions keep edit/photo/linked-record gates; the company-funds action is in the details, not on the card', () => {
   const receipt = { id: 'r-actions', status: 'Not Paid' };
   let html = context.shellReceiptRow(receipt, {}, '', { canCoverWithCompanyFunds: true });
   assert(!html.includes('data-record-action='));
   context.state.currentUser.role = 'Admin';
   html = context.shellReceiptRow(receipt, {}, '', { canCoverWithCompanyFunds: true, receiptPhotoCount: 2, canSeeReceiptAds: true, linkedAdCount: 3, canEditThisReceipt: true });
-  for (const action of ['receiptCoverage', 'receiptPhotos', 'receiptAds', 'editReceipt']) assert(html.includes(`data-record-action="${action}"`));
+  for (const action of ['receiptPhotos', 'receiptAds', 'editReceipt']) assert(html.includes(`data-record-action="${action}"`));
+  // Round 3: it was the widest button on every card; the details (the panel on wide screens) keep it for the Admin.
+  assert(!html.includes('receiptCoverage') && !html.includes('Pay debt from company funds'));
   html = context.shellReceiptRow(receipt, {}, '', { destroyed: true, canCoverWithCompanyFunds: true, receiptPhotoCount: 2, canEditThisReceipt: true });
   assert(!html.includes('data-record-action='));
   delete context.state.currentUser.role;
@@ -381,6 +383,18 @@ check('wide screens: a record opens its details in a panel beside the list, one 
   assert(!/(?<![-\w])(left|right):/.test(rule.replace(/\/\*[\s\S]*?\*\//g, '')), 'no physical left/right in the panel rules');
   // Below 1280 px the old rule still gives an opened card the whole row.
   assert(layoutCss.includes('.workspace-record.is-open { grid-column: 1 / -1; }'));
+});
+check('round 3: filters in force are chips above the folded panel, and Home offers "More" on phones and tablets only', () => {
+  // The chips: at least 32 px for a mouse, 44 px for a finger.
+  assert(layoutCss.includes('.workspace-active-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }'));
+  assert(/\.workspace-active-filter \{\n  display: inline-flex; align-items: center; gap: 6px; min-height: 32px;/.test(layoutCss));
+  assert(layoutCss.includes('@media (max-width: 900px), (pointer: coarse) {\n  .workspace-active-filter { min-height: 44px; padding-inline: 14px; }\n}'));
+  // Home: the sidebar lists what "More" lists, so from 901 px the quick action is not drawn and the others share the row.
+  const home = layoutCss.slice(layoutCss.indexOf('/* Home (round 3)'));
+  assert(home.includes('@media (min-width: 901px) {\n  .shell-quick-actions { grid-template-columns: none !important; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }\n  .shell-quick-action.is-phone-only { display: none; }\n}'));
+  const shell = fs.readFileSync(path.join(root, 'src', '12d-manager-shell.js'), 'utf8');
+  assert(shell.includes(`onclick: "navigateTo('more')", phone: 1 }`) && shell.includes("class=\"shell-quick-action${q.phone ? ' is-phone-only' : ''} touch-target"));
+  assert.equal(shell.split('phone: 1').length - 1, 1, 'only "More" is phone-only');
 });
 check('phones: the Filters button sits beside the search, Customers totals share one row, and the delivery log comes before the money summary', () => {
   const start = layoutCss.indexOf('Phones: the first record sooner (redesign round 2');

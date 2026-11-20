@@ -238,7 +238,8 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
     canAddReceipt ? { icon: 'receipt', label: isAr ? 'وصل' : 'Receipt', onclick: 'showNewReceiptChooser()' } : null,
     canAddAd ? { icon: 'megaphone', label: isAr ? 'إعلان' : 'New ad', onclick: 'showAdModal()' } : null,
     shellCanCollect() ? { icon: 'hand-coins', label: isAr ? 'تحصيل' : 'Collect', onclick: "navigateTo('collect')" } : null,
-    { icon: 'grid-3x3', label: isAr ? 'المزيد' : 'More', onclick: "navigateTo('more')" }
+    // On a computer the sidebar lists the same destinations, so "More" is for phones and tablets.
+    { icon: 'grid-3x3', label: isAr ? 'المزيد' : 'More', onclick: "navigateTo('more')", phone: 1 }
   ].filter(Boolean);
   const kpi = (label, value, onclick) => `
     <button type="button" onclick="${onclick}" class="hub-card p-3.5 text-start touch-target">
@@ -261,7 +262,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
         </span>
       </button>
       <div class="shell-quick-actions grid gap-2" style="grid-template-columns: repeat(${quick.length}, minmax(0, 1fr));">
-        ${quick.map(q => `<button type="button" onclick="${q.onclick}" class="shell-quick-action touch-target flex flex-col items-center justify-center gap-1.5 p-3 text-center"><span class="shell-quick-icon w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 flex items-center justify-center"><i data-lucide="${q.icon}" class="w-5 h-5"></i></span><span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">${q.label}</span></button>`).join('')}
+        ${quick.map(q => `<button type="button" onclick="${q.onclick}" class="shell-quick-action${q.phone ? ' is-phone-only' : ''} touch-target flex flex-col items-center justify-center gap-1.5 p-3 text-center"><span class="shell-quick-icon w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 flex items-center justify-center"><i data-lucide="${q.icon}" class="w-5 h-5"></i></span><span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">${q.label}</span></button>`).join('')}
       </div>
       <div class="shell-home-kpis grid grid-cols-3 gap-2">
         ${kpi(isAr ? 'الوصولات' : 'Receipts', receiptsThisMonth, "navigateTo('receipts')")}
@@ -659,11 +660,9 @@ function shellDirectoryFact(label, value, tone = '') {
 function shellRecordAction(action, id, label, icon = 'arrow-up-right') {
   const handlers = {
     editCustomer: 'editCustomer(this.dataset.recordId)',
-    customerCoverage: 'openCustomerCompanyDebtCoverage(this.dataset.recordId, this)',
     receiptAds: 'openReceiptAds(this.dataset.recordId)',
     receiptPhotos: 'openReceiptPhotoViewer(this.dataset.recordId, 0)',
     editReceipt: 'editReceipt(this.dataset.recordId)',
-    receiptCoverage: 'openCompanyDebtCoverageModal(this.dataset.recordId, this)',
     editPage: 'editPage(this.dataset.recordId)',
     editUser: 'editUser(this.dataset.recordId)'
   };
@@ -784,7 +783,6 @@ function shellReceiptRow(receipt, customer, card, meta = {}) {
     if (meta.canSeeReceiptAds) actions += shellRecordAction('receiptAds', id, `${isAr ? 'الإعلانات' : 'Ads'} ${Number(meta.linkedAdCount) || 0}`, 'megaphone');
     if (meta.receiptPhotoCount > 0) actions += shellRecordAction('receiptPhotos', id, `${isAr ? 'الصور' : 'Photos'} ${meta.receiptPhotoCount}`, 'images');
     if (meta.canEditThisReceipt) actions += shellRecordAction('editReceipt', id, isAr ? 'تعديل' : 'Edit', 'pencil');
-    if (meta.canCoverWithCompanyFunds && isCurrentUserAdmin()) actions += shellRecordAction('receiptCoverage', id, isAr ? 'سداد من أموال الشركة' : 'Pay debt from company funds', 'landmark');
   }
   const subParts = [];
   if (meta.receiptDisplayNum) subParts.push(`#${meta.receiptDisplayNum}`);
@@ -824,9 +822,10 @@ function shellCustomerRow(customer, stats, card, meta = {}) {
     ? shellDirectoryFact(isAr ? 'إجمالي المدفوع' : 'Total paid', `<span dir="ltr">${shellEsc(shellLyd(stats.totalPaidLYD || 0))}</span>`)
       + shellDirectoryFact(isAr ? 'تكلفة الإعلانات' : 'Ad charges', `<span dir="ltr">${shellEsc(shellLyd(stats.totalSpentLYD || 0))}</span>`)
     : '';
+  // The card offers the likely next steps. "Pay debt from company funds" (Admin only) is in the details:
+  // it was the widest button on every card and is rarely the next step.
   let actions = (meta.linkedReceiptsButton || '') + (meta.linkedPagesButton || '');
   if (meta.canEditThisCustomer) actions += shellRecordAction('editCustomer', id, isAr ? 'تعديل' : 'Edit', 'pencil');
-  if (meta.canSeeBalance && meta.coverableDebtUSD > 0.005 && isCurrentUserAdmin()) actions += shellRecordAction('customerCoverage', id, isAr ? 'سداد من أموال الشركة' : 'Pay debt from company funds', 'landmark');
   return shellListRow({
     kind: 'customers', id, card,
     open: shellRowIsOpen('customers', id),

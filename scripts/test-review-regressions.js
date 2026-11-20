@@ -1300,6 +1300,52 @@ async function main() {
     await f.sandbox.clearAllData(); f.sandbox.importData();
     assert.deepEqual(notes, ['error:Not Allowed', 'warning:Server Import Disabled']);
   });
+  await test('round 3 filters: the filter panel is folded until asked for on every screen size, and while it is folded each filter in force is a chip that removes that one filter', async () => {
+    const f = frameFixture(frameAdmin, 'receipts');
+    f.sandbox.window.innerWidth = 1440;
+    // Folded by default on a wide screen too (before: open from 768 px); the person's own choice still wins.
+    for (const view of ['customers', 'receipts', 'ads', 'audit']) assert.equal(f.sandbox.isWorkspaceFilterPanelExpanded(view), false, view);
+    f.state.expandedFilterPanels.receipts = true;
+    assert.equal(f.sandbox.isWorkspaceFilterPanelExpanded('receipts'), true);
+    f.state.expandedFilterPanels.receipts = false;
+    const draw = () => String(f.run('renderView()'));
+    const chips = html => Array.from((html.split('class="workspace-active-filters"')[1] || '').split('</div>')[0].matchAll(/<button type="button" class="workspace-active-filter([^"]*)" onclick="([^"]*)"[^>]*>(.*?)<\/button>/g), m => ({ clear: m[1].includes('is-clear'), press: m[2], text: m[3].replace(/<[^>]+>/g, '').trim() }));
+    // Nothing in force: no chips at all.
+    assert.deepEqual(chips(draw()), []);
+    // Two dropdowns moved: two chips with name and value, and "Clear all".
+    f.state.receiptPaymentFilter = 'cash'; f.state.receiptSortBy = 'oldest';
+    let html = draw();
+    assert.deepEqual(chips(html).map(chip => chip.text), ['Payment: 💵 Cash', 'Sort: 🕐 Oldest First', 'Clear all']);
+    assert.deepEqual(chips(html).map(chip => chip.press), ["updateReceiptFilter('payment', 'all')", "updateReceiptFilter('sort', 'newest')", "updateReceiptFilter('payment', 'all');updateReceiptFilter('sort', 'newest')"]);
+    assert.ok(html.indexOf('class="workspace-active-filters"') < html.indexOf('id="receipts-advanced-filters"'), 'the chips sit above the folded panel');
+    // Pressing a chip puts that one filter back and leaves the other.
+    f.sandbox.render = () => {};
+    f.run(chips(html)[0].press);
+    assert.deepEqual([f.state.receiptPaymentFilter, f.state.receiptSortBy], ['all', 'oldest']);
+    assert.deepEqual(chips(draw()).map(chip => chip.text), ['Sort: 🕐 Oldest First']);
+    // A quick filter shows its own state: no second chip for it. Another filter beside it still gets one.
+    f.run("applyReceiptQuickFilter('unpaid')");
+    assert.deepEqual(chips(draw()), []);
+    f.state.receiptDateFilter = 'today';
+    assert.deepEqual(chips(draw()).map(chip => chip.text), ['Period: 📅 Today']);
+    // With the panel open the dropdowns themselves show the state: no chips.
+    f.state.expandedFilterPanels.receipts = true;
+    assert.deepEqual(chips(draw()), []);
+    f.state.expandedFilterPanels.receipts = false;
+    f.run("applyReceiptQuickFilter('all')");
+    // Arabic, and the other lists.
+    f.state.language = 'ar'; f.state.receiptPaymentFilter = 'bank';
+    assert.deepEqual(chips(draw()).map(chip => chip.text), ['الدفع: 🏦 حوالة مصرفية']);
+    f.state.language = 'en'; f.state.receiptPaymentFilter = 'all';
+    f.state.currentView = 'customers'; f.state.customerSort = 'highestDebt'; f.state.customerFinancialFilter = 'hasDebt';
+    html = draw();
+    assert.equal(chips(html).length, 1, 'Customers: the sort only; "Has debt" is shown by its quick filter');
+    assert.ok(chips(html)[0].text === 'Sort: Highest Debt' && chips(html)[0].press === "state.customerSort = 'newest'; render();", JSON.stringify(chips(html)));
+    f.state.customerSort = 'newest'; f.state.customerFinancialFilter = 'all';
+    f.state.currentView = 'ads'; f.state.adFilters = { status: 'Active', payment: 'not_paid', page: 'all' };
+    html = draw();
+    assert.deepEqual(chips(html).map(chip => chip.press), ["updateAdFilter('status', 'all')"], 'Ads: "Unpaid" is a quick filter, the status gets a chip');
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {
