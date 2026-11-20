@@ -2550,12 +2550,28 @@ async function main() {
       assert.deepEqual([notes[0].message, notes[0].action && notes[0].action.label, state.clothesShipments[0].status], ['Shipment status is now: Shipped', 'Undo', 'Shipped']);
       await notes[0].action.run();
       assert.equal(state.clothesShipments[0].status, 'Ordered', 'back to the status it had');
-      assert.equal(notes[1].action && notes[1].action.label, 'Undo', 'the way back is a step too, and can be taken back');
+      assert.deepEqual([notes[1].message, notes[1].action], ['Shipment status is now: Ordered', null], 'the way back confirms itself and offers nothing further, as a receipt\'s does');
+      // The same step back taken by hand ("More") is an ordinary step, and can be taken back.
+      await sandbox.setClothesShipmentStatus('s1', 'Shipped');
+      await sandbox.setClothesShipmentStatus('s1', 'Ordered');
+      assert.equal(notes[3].action && notes[3].action.label, 'Undo');
+      notes.length = 2;
       await sandbox.setClothesShipmentStatus('s1', 'Received');
       assert.equal(state.clothesShipments[0].status, 'Received');
       assert.equal(notes[2].action, null, 'receiving moved stock: no Undo in the message');
       await sandbox.setClothesShipmentStatus('s1', 'Arrived');
       assert.equal(notes[3].action, null, 'un-receiving moved stock: no Undo in the message');
+      // A stale "Undo": the step it would take back was followed by receiving. The way back would then take stock
+      // out, so it asks first, exactly as "More" does; answered "no", nothing moves.
+      await sandbox.setClothesShipmentStatus('s1', 'Shipped');
+      const staleShipment = notes[4].action;
+      assert.equal(staleShipment && staleShipment.label, 'Undo');
+      await sandbox.setClothesShipmentStatus('s1', 'Received');
+      const asked = [];
+      sandbox.appConfirm = async question => { asked.push(String(question)); return false; };
+      await staleShipment.run();
+      assert.deepEqual([asked.length, state.clothesShipments[0].status, state.clothesShipments[0].stockApplied], [1, 'Received', true], 'the way back asked before taking stock out, and "no" left the shipment received');
+      sandbox.appConfirm = async () => true;
 
       state.clothesOrders = [{ id: 'o1', orderNo: 3, customerName: 'Sara', status: 'New', stockDeducted: true, paymentStatus: 'Not Paid', lines: [{ productId: 'p1', qty: 1, priceLYD: 50 }], createdBy: 'admin' }];
       notes.length = 0;
@@ -2565,9 +2581,14 @@ async function main() {
       assert.ok(state.clothesOrders[0].deliveredAt, 'delivered now');
       await notes[1].action.run();
       assert.deepEqual([state.clothesOrders[0].status, state.clothesOrders[0].deliveredAt], ['On the way', null], 'Undo is the same step back that "More" takes');
+      assert.deepEqual([notes[2].message, notes[2].action], ['Order status is now: On the way', null], 'and its own message offers nothing further');
       await sandbox.setClothesOrderStatus('o1', 'Canceled');
       assert.equal(state.clothesOrders[0].status, 'Canceled');
       assert.equal(notes[notes.length - 1].action, null, 'cancelling returned pieces to stock: no Undo in the message');
+      // The same for an order: after the cancel, the first step's "Undo" would take pieces from stock again, so it asks.
+      sandbox.appConfirm = async question => { asked.push(String(question)); return false; };
+      await notes[0].action.run();
+      assert.deepEqual([asked.length, /TAKEN from stock again/.test(asked[1] || ''), state.clothesOrders[0].status], [2, true, 'Canceled'], 'asked, and "no" left the order cancelled');
     }
     const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
     assert.ok(/\.notification-action \{[^}]*min-height: 44px;/.test(css), 'the button is full height for a finger');

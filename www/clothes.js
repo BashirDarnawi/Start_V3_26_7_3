@@ -1586,7 +1586,7 @@ function _clothesShipmentUnreceiveShortfall(shipment) {
   return out;
 }
 
-async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
+async function setClothesShipmentStatus(shipmentId, newStatus, sure, back) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_SHIPMENT_STATUSES.some(s => s.id === newStatus)) return;
@@ -1673,7 +1673,8 @@ async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
     isAr ? `حالة الشحنة الآن: ${meta.labelAr}` : `Shipment status is now: ${meta.label}`,
     'success',
     // "Undo" for a step that moved no stock: the way back "More" already offers. Receiving and un-receiving ask first.
-    receiving || unreceiving ? null : undoAction(() => setClothesShipmentStatus(shipmentId, before))
+    // A step taken back with "Undo" confirms itself and offers nothing further (as a receipt's way back does).
+    receiving || unreceiving || back ? null : undoAction(() => setClothesShipmentStatus(shipmentId, before, false, true))
   );
   updateClothesShipmentsFiltered();
 }
@@ -2511,7 +2512,7 @@ async function applyClothesOrderStockDelta(order, sign) {
   return true;
 }
 
-async function setClothesOrderStatus(orderId, newStatus, sure) {
+async function setClothesOrderStatus(orderId, newStatus, sure, back) {
   if (!clothesCanUse()) return;
   const isAr = clothesIsAr();
   if (!CLOTHES_ORDER_STATUSES.some(s => s.id === newStatus)) return;
@@ -2580,7 +2581,8 @@ async function setClothesOrderStatus(orderId, newStatus, sure) {
     isAr ? `حالة الطلب الآن: ${meta.labelAr}` : `Order status is now: ${meta.label}`,
     'success',
     // "Undo" for a step that moved no stock: the way back "More" already offers. Cancelling and returning ask first.
-    movesStock ? null : undoAction(() => setClothesOrderStatus(orderId, before))
+    // A step taken back with "Undo" confirms itself and offers nothing further.
+    movesStock || back ? null : undoAction(() => setClothesOrderStatus(orderId, before, false, true))
   );
   updateClothesOrdersFiltered();
 }
