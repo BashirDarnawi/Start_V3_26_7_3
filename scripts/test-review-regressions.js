@@ -2366,6 +2366,73 @@ async function main() {
     assert.deepEqual(box, [['تسجيل دفعة #0007', 'الإجمالي 150.00 د.ل · المدفوع حتى الآن 0.00 د.ل',
       'اكتب المبلغ المدفوع حتى الآن. الإجمالي كاملاً يجعل الطلب «مدفوع»، وصفر يجعله «غير مدفوع»، وما بينهما «مدفوع جزئياً».'], '0.00', 'حفظ الدفعة']);
   });
+  await test('round 3 first-run setup: the screen is titled by what it does, the "server did not answer" notice is a calm note that keeps its caution and its Retry button (before: a red alarm headed "Server unreachable"), every field is tied to its label, and the recovery-key line shows only where a key follows', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const draw = (language, { probeFailed = false, server = false } = {}) => {
+      state.language = language;
+      state.serverProbeFailed = probeFailed;
+      state.serverMode = server; state.needsServerSetup = server; state.serverSetupEnabled = server;
+      sandbox.isServerModeEnabled = () => server;
+      return sandbox.renderFirstRunSetup();
+    };
+    const words = html => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const note = html => (html.match(/<div class="first-run-note" role="note">([\s\S]*?)<\/div>/) || [])[1] || '';
+    for (const language of ['en', 'ar']) {
+      const local = draw(language, { probeFailed: true });
+      // One title, and it names the task.
+      assert.deepEqual([...local.matchAll(/<h1[^>]*>([^<]*)<\/h1>/g)].map(match => match[1]), [language === 'ar' ? 'إنشاء حساب المدير الأول' : 'Create the first admin']);
+      // The notice: calm, with the caution and the button it always had.
+      assert.ok(!/role="alert"/.test(local) && !/rose-|red-|bg-amber/.test(local), `${language}: nothing on the screen is an alarm`);
+      assert.ok(!/Server unreachable|تعذّر الوصول إلى الخادم/.test(local), `${language}: no alarm heading`);
+      assert.equal((local.match(/first-run-note/g) || []).length, 1);
+      assert.equal(words(note(local)), language === 'ar'
+        ? 'لم يستجب خادم البيان أثناء بدء التشغيل، لذا هذا الإعداد لهذا الجهاز فقط. إذا كان لديك حساب على خادم البيان فلا تنشئ حساباً محلياً جديداً — أعد المحاولة أولاً. إعادة محاولة الاتصال'
+        : 'The Albayan server did not respond during startup, so this setup is for this device only. If you already have an account on an Albayan server, do not create a new local account — retry the connection first. Retry connection');
+      assert.match(note(local), /<button type="button" onclick="retryServerDetection\(\)" class="management-button">/);
+      assert.ok(local.indexOf('first-run-note') < local.indexOf('id="first-run-form"'), 'the note comes before the form it is about');
+      // No "Why this setup?" box: its sentence is the one line under the title.
+      assert.ok(!/Why this setup\?|لماذا هذا الإعداد؟/.test(local));
+      assert.ok(words(local).includes(language === 'ar' ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.'));
+      // The four fields, each with a label that points at it, and hints for the browser's password manager.
+      const fields = html => [...html.matchAll(/<label for="([^"]+)"[^>]*>([^<]+)<\/label>\s*<input id="([^"]+)" ([^>]*)\/>/g)].map(match => ({ label: match[1], words: match[2], id: match[3], attrs: match[4] }));
+      const localFields = fields(local);
+      assert.deepEqual(localFields.map(item => item.id), ['first-name', 'first-email', 'first-password', 'first-password-confirm']);
+      assert.ok(localFields.every(item => item.label === item.id && item.words.trim() && / required /.test(item.attrs)), 'each label names its own field, and each field is required');
+      assert.equal((local.match(/<input /g) || []).length, 4, 'no field without a label');
+      assert.deepEqual(localFields.map(item => (item.attrs.match(/autocomplete="([^"]+)"/) || [])[1]), ['name', 'username', 'new-password', 'new-password']);
+      assert.deepEqual(localFields.map(item => (item.attrs.match(/type="([^"]+)"/) || [])[1]), ['text', 'email', 'password', 'password']);
+      assert.ok(localFields.slice(2).every(item => /minlength="8"/.test(item.attrs)) && /maxlength="100"/.test(localFields[0].attrs) && /maxlength="120"/.test(localFields[1].attrs), 'the limits are the ones the form always had');
+      assert.ok(localFields.every(item => (item.attrs.match(/\b(lang|inputmode|dir|autocapitalize)=/g) || []).length === new Set(item.attrs.match(/\b(lang|inputmode|dir|autocapitalize)=/g) || []).size), 'no attribute is written twice');
+      // A recovery key follows a local setup, and only a local one.
+      const keyLine = language === 'ar' ? 'بعد الإنشاء يظهر لك مفتاح الاستعادة. احفظه في مكان آمن: به تُستعاد كلمة المرور إذا نُسيت.' : 'A Recovery Key comes next. Keep it somewhere safe: it resets a forgotten password.';
+      assert.ok(words(local).includes(keyLine));
+      assert.ok(words(local).includes(language === 'ar' ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)'));
+      // The language switch is a full-height control.
+      assert.match(local, /<button type="button" onclick="toggleLanguage\(\)" class="[^"]*\bmin-h-11\b[^"]*">/);
+
+      // Without a failed start there is no notice at all.
+      const quiet = draw(language, { probeFailed: false });
+      assert.ok(!quiet.includes('first-run-note') && !quiet.includes('retryServerDetection'));
+      assert.equal(fields(quiet).length, 4);
+
+      // A new server: its own sentence, the token field, the way back, no notice and no recovery-key line.
+      const server = draw(language, { probeFailed: true, server: true });
+      assert.ok(!server.includes('first-run-note') && !words(server).includes(keyLine));
+      assert.deepEqual(fields(server).map(item => item.id), ['first-name', 'first-email', 'first-password', 'first-password-confirm', 'first-setup-token']);
+      assert.ok(/minlength="16" maxlength="256" autocomplete="off"/.test(fields(server)[4].attrs));
+      assert.ok(words(server).includes(language === 'ar'
+        ? 'الخادم جديد ولا يحتوي على أي حساب بعد. هذا الحساب الأول (مدير) يُنشأ مرة واحدة فقط على الخادم. بعد إنشائه تختفي هذه الشاشة نهائياً.'
+        : 'This server is fresh and has no account yet. This first admin account is created once on the server. After that, this screen disappears for good.'));
+      assert.ok(words(server).includes(language === 'ar' ? 'إنشاء حساب المدير' : 'Create Admin') && !words(server).includes('(Local)') && !words(server).includes('(محلي)'));
+      // "Back" points to where the text starts: left in English, right in Arabic.
+      assert.match(server, new RegExp(`<button type="button" onclick="cancelServerSetup\\(\\)" class="[^"]*\\bmin-h-11\\b[^"]*">${language === 'ar' ? '→ العودة لتسجيل الدخول' : '← Back to login'}</button>`));
+    }
+    // The note's own style is calm: the app's soft surface and its ordinary text colour.
+    const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
+    const rule = (css.match(/\.first-run-note \{([^}]*)\}/) || [])[1] || '';
+    assert.ok(rule.includes('background: var(--ui-surface-soft)') && rule.includes('color: var(--ui-ink)') && rule.includes('border: 1px solid var(--ui-line)'), rule);
+  });
+
   await test('round 3 legal pages: the privacy and account-deletion pages show one language at a time (both when scripts are off), follow the language and theme chosen in the app, open the language of a part named in the address, list the parts of the policy, and stay one self-contained file each', async () => {
     const root = path.join(__dirname, '..');
     const pages = { privacy: fs.readFileSync(path.join(root, 'privacy.html'), 'utf8'), 'delete-account': fs.readFileSync(path.join(root, 'delete-account.html'), 'utf8') };

@@ -15717,69 +15717,52 @@ function renderStorageUnavailableNotice() {
 function renderFirstRunSetup() {
   const isAr = state.language === 'ar';
   const serverSetup = isServerModeEnabled() && state.needsServerSetup && state.serverSetupEnabled === true;
+  // The title says what the screen is for and one sentence says where the account will live. (Before: the app's
+  // name as the title, a sentence, and a "Why this setup?" box before the first field.)
   const modeNote = serverSetup
-    ? (isAr ? 'الخادم جديد ولا يحتوي على أي حساب بعد. أنشئ حساب المدير الأول للبدء.' : 'This server is fresh and has no account yet. Create the first admin to begin.')
-    : (isAr ? 'الإعداد لأول مرة (تجربة محلية). أنشئ حساب مدير للبدء.' : 'First time setup (local testing). Create an Admin account to start.');
+    ? (isAr ? 'الخادم جديد ولا يحتوي على أي حساب بعد. هذا الحساب الأول (مدير) يُنشأ مرة واحدة فقط على الخادم. بعد إنشائه تختفي هذه الشاشة نهائياً.' : 'This server is fresh and has no account yet. This first admin account is created once on the server. After that, this screen disappears for good.')
+    : (isAr ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.');
+  const field = (id, label, attrs, hint = '') => `<div>
+            <label for="${id}" class="block text-sm font-medium mb-2">${label}</label>
+            <input id="${id}" ${attrs} required class="w-full px-4 py-3 glass-input rounded-xl" />${hint ? `
+            <p class="mt-1 text-xs text-slate-500">${hint}</p>` : ''}
+          </div>`;
+  const typed = 'dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false"';
 
   return `
     <div class="min-h-screen flex items-center justify-center p-4">
       <div class="glass-panel w-full max-w-md p-8 rounded-3xl animate-fade-in-up">
         <div class="text-center mb-6">
-          <div class="w-16 h-16 alb-mark rounded-2xl mx-auto mb-4 flex items-center justify-center text-white text-2xl font-bold">A</div>
-          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${t('appName')}</h1>
-          <p class="text-slate-500 mt-1">${modeNote}</p>
+          <div class="w-16 h-16 alb-mark rounded-2xl mx-auto mb-4 flex items-center justify-center text-white text-2xl font-bold" aria-hidden="true">A</div>
+          <p class="text-sm font-bold text-slate-500">${t('appName')}</p>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'إنشاء حساب المدير الأول' : 'Create the first admin'}</h1>
+          <p class="text-sm text-slate-500 mt-2 leading-6">${modeNote}</p>
         </div>
 
         ${state.serverProbeFailed && !serverSetup ? `
-        <div class="w-full mb-6 rounded-2xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4 text-sm text-rose-800 dark:text-rose-200" role="alert">
-          <div class="font-bold mb-1">${isAr ? 'تعذّر الوصول إلى الخادم' : 'Server unreachable'}</div>
-          <div class="text-xs mb-3">${isAr
-            ? 'إذا كان لديك حساب على خادم البيان فلا تنشئ حساباً محلياً جديداً — أعد المحاولة أولاً.'
-            : 'If you already have an account on an Albayan server, do not create a new local account — retry the connection first.'}</div>
-          <button type="button" onclick="retryServerDetection()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">
-            ${isAr ? 'إعادة محاولة الاتصال' : 'Retry connection'}
-          </button>
+        <div class="first-run-note" role="note">
+          <p>${isAr
+            ? 'لم يستجب خادم البيان أثناء بدء التشغيل، لذا هذا الإعداد لهذا الجهاز فقط. إذا كان لديك حساب على خادم البيان فلا تنشئ حساباً محلياً جديداً — أعد المحاولة أولاً.'
+            : 'The Albayan server did not respond during startup, so this setup is for this device only. If you already have an account on an Albayan server, do not create a new local account — retry the connection first.'}</p>
+          <button type="button" onclick="retryServerDetection()" class="management-button">${isAr ? 'إعادة محاولة الاتصال' : 'Retry connection'}</button>
         </div>
         ` : ''}
 
-        <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 mb-6">
-          <div class="text-xs text-slate-600 dark:text-slate-300">
-            <div class="font-bold mb-1">${isAr ? 'لماذا هذا الإعداد؟' : 'Why this setup?'}</div>
-            <div>${serverSetup
-              ? (isAr ? 'هذا الحساب الأول (مدير) يُنشأ مرة واحدة فقط على الخادم. بعد إنشائه تختفي هذه الشاشة نهائياً.' : 'This first admin account is created once on the server. After that, this screen disappears for good.')
-              : (isAr ? 'للتجربة المحلية تحتاج إلى مستخدم مدير واحد. أما للنشر على الإنترنت، فيجب إنشاء المستخدمين على السيرفر.' : 'For local testing you need one admin user. For internet deployment, users must be created on the server.')}</div>
-          </div>
-        </div>
-
         <form id="first-run-form" class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium mb-2">${isAr ? 'اسم المدير' : 'Admin Name'}</label>
-            <input type="text" id="first-name" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'اسمك' : 'Your name'}" maxlength="100" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium mb-2">${t('email')}</label>
-            <input type="email" id="first-email" dir="ltr" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium mb-2">${t('password')}</label>
-            <input type="password" id="first-password" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="first-password-confirm" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
-          </div>
-          ${serverSetup ? `<div>
-            <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
-            <input type="password" id="first-setup-token" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
-            <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
-          </div>` : ''}
+          ${field('first-name', isAr ? 'اسم المدير' : 'Admin Name', `type="text" placeholder="${isAr ? 'اسمك' : 'Your name'}" maxlength="100" autocomplete="name"`)}
+          ${field('first-email', t('email'), `type="email" ${typed} inputmode="email" placeholder="name@company.com" maxlength="120" autocomplete="username"`)}
+          ${field('first-password', t('password'), `type="password" ${typed} placeholder="${isAr ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" autocomplete="new-password"`)}
+          ${field('first-password-confirm', t('confirmPassword'), `type="password" ${typed} placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" autocomplete="new-password"`,
+            serverSetup ? '' : (isAr ? 'بعد الإنشاء يظهر لك مفتاح الاستعادة. احفظه في مكان آمن: به تُستعاد كلمة المرور إذا نُسيت.' : 'A Recovery Key comes next. Keep it somewhere safe: it resets a forgotten password.'))}
+          ${serverSetup ? field('first-setup-token', isAr ? 'رمز إعداد الخادم' : 'Server Setup Token', `type="password" ${typed} placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off"`,
+            isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.') : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
             ${serverSetup ? (isAr ? 'إنشاء حساب المدير' : 'Create Admin') : (isAr ? 'إنشاء مدير (محلي)' : 'Create Admin (Local)')}
           </button>
         </form>
 
-        ${serverSetup ? `<button onclick="cancelServerSetup()" class="mt-4 text-xs text-slate-500 alb-hover-brand mx-auto block">${isAr ? '← العودة لتسجيل الدخول' : '← Back to login'}</button>` : ''}
-        <button onclick="toggleLanguage()" class="mt-3 text-xs text-slate-400 alb-hover-brand mx-auto block">${state.language === 'en' ? 'العربية' : 'English'}</button>
+        ${serverSetup ? `<button type="button" onclick="cancelServerSetup()" class="mt-4 text-xs text-slate-500 alb-hover-brand mx-auto block min-h-11">${isAr ? '→ العودة لتسجيل الدخول' : '← Back to login'}</button>` : ''}
+        <button type="button" onclick="toggleLanguage()" class="mt-3 text-xs text-slate-400 alb-hover-brand mx-auto block min-h-11">${state.language === 'en' ? 'العربية' : 'English'}</button>
       </div>
     </div>
   `;

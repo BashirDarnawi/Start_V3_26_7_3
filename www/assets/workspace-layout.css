@@ -766,3 +766,8 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
 .clothes-stages > li.is-done > span { border-color: var(--ui-ink); background: var(--ui-ink); color: var(--ui-surface); }
 .clothes-stages > li.is-now { font-weight: 800; color: var(--ui-ink); }
 .clothes-stages > li.is-now > span { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); }
+
+/* First-run setup (round 3, B-20): the "server did not answer" notice is a calm note with the same caution and
+   the same Retry button. It used to be a red alarm above the first field. */
+.first-run-note { margin-block-end: 24px; padding: 14px 16px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface-soft); color: var(--ui-ink); font-size: 13px; line-height: 1.6; }
+.first-run-note > p { margin: 0 0 12px; }
