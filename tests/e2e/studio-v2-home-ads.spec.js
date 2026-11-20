@@ -205,6 +205,12 @@ test.describe('Albayan Studio v2 Home and My ads (pilot)', () => {
     const waiting = page.getByTestId(`studio-tracker-${seed.ids.wait}`);
     await expect(waiting).toContainText('Waiting for Albayan review');
     await expect(waiting).toContainText('Next: Albayan team');
+    // The server's own review time for the request sent a moment ago: the closing time of the next working day.
+    await expect(waiting).toContainText(/Next: Albayan team\. We review it by (Sun|Mon|Tue|Wed|Thu) \d{1,2} [A-Z][a-z]{2}, \d{2}:\d{2} \(Tripoli time\)\./);
+    const promised = await page.evaluate(id => studioDataStage(studioDataRequest(id)).dueAt, seed.ids.wait);
+    expect(Date.parse(promised) - Date.now(), 'between now and five days from now').toBeGreaterThan(0);
+    expect(Date.parse(promised) - Date.now()).toBeLessThan(5 * 24 * 3600 * 1000);
+    await expect(page.getByTestId('studio-home-trackers').getByText('We review it by')).toHaveCount(1);
     await expect(page.getByTestId(`studio-tracker-${seed.ids.approved}`)).toContainText('Approved — being set up in Meta');
     await expect(page.getByTestId('studio-home-start'), 'Getting started is gone once a request was sent').toHaveCount(0);
     for (const goal of ['messages', 'promote', 'grow', 'comments', 'help']) await expect(page.getByTestId(`studio-goal-${goal}`)).toBeEnabled();

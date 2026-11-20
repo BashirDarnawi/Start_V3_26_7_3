@@ -26,7 +26,7 @@ from server.db import db_conn, init_db, json_dumps, now_ms
 from server.main import app, validate_entity_id
 from server.rate_limiter import check_rate_limit, reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import OWNED_TYPES, studio_results
+from server.systems.ads_studio import OWNED_TYPES, studio_hours, studio_jobs, studio_results, studio_settings
 from server.systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS
 from server.systems.ads_studio.studio_results import (
     MONEY_MEANINGS,
@@ -284,6 +284,7 @@ def test_campaigns_summary_requires_login():
 def test_stage_mapping_seeded_summary(people, seeded, monkeypatch):
     now = datetime(2026, 10, 15, 10, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(studio_results, "utc_now", lambda: now)
+    monkeypatch.setattr(studio_results, "read_all_settings", _default_settings)  # never what another module saved
     owner, other, staff = people["owner"], people["other"], people["staff"]
     meta = "120200000000001"
     ids = {name: f"sum_{name}_{TAG}" for name in (
@@ -332,6 +333,9 @@ def test_stage_mapping_seeded_summary(people, seeded, monkeypatch):
     assert running["stopRequested"] is True and running["stopRequestedAt"] == "2026-10-15T09:00:00Z"
     assert running["labels"] == {"en": "Running", "ar": "يعمل الآن"} and running["nextActor"] == "none"
     assert running["dueAt"] is None and running["settleExpectedAt"] is None
+    # Sent on Wednesday 14 October: reviewed by Thursday's closing time, 17:00 in Tripoli. Only the waiting request has one.
+    assert body[ids["submitted"]]["dueAt"] == "2026-10-15T15:00:00.000Z"
+    assert [name for name in ids if ids[name] in body and body[ids[name]]["dueAt"] is not None] == ["submitted"]
     ended = body[ids["ended"]]
     assert ended["stale"] is True and ended["metaUsedMinor"] == 2700
     assert ended["settleExpectedAt"] == "2026-10-17T02:00:00Z" and ended["moneyKey"] == "paid_settling"
@@ -342,6 +346,98 @@ def test_stage_mapping_seeded_summary(people, seeded, monkeypatch):
 
     other_view = client.get("/api/studio/campaigns/summary", cookies=other["cookies"]).json()
     assert set(other_view) == {ids["foreign"]} and other_view[ids["foreign"]]["stage"] == 8
+
+
+def _default_settings(**targets) -> dict:
+    value = {key: studio_settings.default_value(key) for key in studio_settings.SETTING_KEYS}
+    value["targets"].update(targets)
+    return value
+
+
+def test_summary_says_when_a_waiting_request_is_reviewed_by(people, seeded, monkeypatch):
+    """Redesign round 4 (item 12): ``dueAt`` of a request waiting for review, by the rule of the
+    overdue-review alert. Default hours: Sunday to Thursday, 09:00 to 17:00 in Tripoli (UTC+2)."""
+    now = datetime(2026, 10, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(studio_results, "utc_now", lambda: now)
+    settings = _default_settings()
+    reads: list[int] = []
+    monkeypatch.setattr(studio_results, "read_all_settings", lambda: reads.append(1) or settings)
+    owner, other = people["owner"], people["other"]
+    sent = {
+        "wednesday": ("2026-10-14T08:00:00Z", "2026-10-15T15:00:00.000Z"),         # the next working day, at closing time
+        "thursday_night": ("2026-10-15T20:00:00Z", "2026-10-18T15:00:00.000Z"),    # Friday and Saturday are closed: Sunday
+        "friday": ("2026-10-16T08:00:00Z", "2026-10-18T15:00:00.000Z"),
+        "sunday_0130": ("2026-10-17T23:30:00Z", "2026-10-19T15:00:00.000Z"),       # already Sunday in Tripoli: Monday
+        "no_zone": ("2026-10-14T08:00:00", "2026-10-15T15:00:00.000Z"),             # a time without a zone counts as UTC
+    }
+    ids = {name: f"due_{name}_{TAG}" for name in [*sent, "blank", "words", "long", "missing", "draft", "changes", "approved", "stopped", "foreign"]}
+    for name, (when, _due) in sent.items():
+        _campaign(seeded, owner["id"], ids[name], status="Submitted", submittedAt=when, budgetMinorUSD=2000)
+    _campaign(seeded, owner["id"], ids["blank"], status="Submitted", submittedAt="")
+    _campaign(seeded, owner["id"], ids["words"], status="Submitted", submittedAt="yesterday")
+    _campaign(seeded, owner["id"], ids["long"], status="Submitted", submittedAt="2026-10-14T08:00:00." + "0" * 30 + "Z")  # longer than a time
+    _campaign(seeded, owner["id"], ids["missing"], status="Submitted")
+    # Sent, and no longer waiting: never a review time, whatever the stage.
+    _campaign(seeded, owner["id"], ids["draft"], status="Draft", submittedAt="2026-10-14T08:00:00Z")
+    _campaign(seeded, owner["id"], ids["changes"], status="Changes Requested", submittedAt="2026-10-14T08:00:00Z", changeReasons=["photo"])
+    _campaign(seeded, owner["id"], ids["approved"], status="Approved", submittedAt="2026-10-14T08:00:00Z", startDate="2026-10-10", endDate="2026-10-20")
+    _campaign(seeded, owner["id"], ids["stopped"], status="Stopped", submittedAt="2026-10-14T08:00:00Z", closeReason="staff_stop")
+    _campaign(seeded, other["id"], ids["foreign"], status="Submitted", submittedAt="2026-10-14T08:00:00Z")
+
+    def summary(person=owner) -> dict:
+        response = client.get("/api/studio/campaigns/summary", cookies=person["cookies"])
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    body = summary()
+    assert len(reads) == 1  # the settings are read once for the whole answer
+    for name, (when, due) in sent.items():
+        assert body[ids[name]]["stage"] == 2 and body[ids[name]]["dueAt"] == due, name
+        # ...and it is the time the team's overdue-review alert uses for the same request.
+        alert = studio_jobs.review_due_at(when, int(settings["targets"]["reviewBusinessDays"]), settings["hours"])
+        assert studio_hours.iso(alert) == due, name
+    for name in ("blank", "words", "long", "missing"):
+        assert body[ids[name]]["stage"] == 2 and body[ids[name]]["dueAt"] is None, name
+    for name in ("draft", "changes", "approved", "stopped"):
+        assert body[ids[name]]["stage"] != 2 and body[ids[name]]["dueAt"] is None, name
+    assert ids["foreign"] not in body and summary(other)[ids["foreign"]]["dueAt"] == "2026-10-15T15:00:00.000Z"
+    assert set(body[ids["wednesday"]]) == set(body[ids["draft"]])  # the same fields for every request: no new one
+
+    # The owner's own settings decide: two working days, and a holiday on the way.
+    settings = _default_settings(reviewBusinessDays=2)
+    assert summary()[ids["wednesday"]]["dueAt"] == "2026-10-18T15:00:00.000Z"
+    settings = _default_settings()
+    settings["hours"]["holidays"] = [{"date": "2026-10-15", "label": {"en": "Closed", "ar": "عطلة"}}]
+    assert summary()[ids["wednesday"]]["dueAt"] == "2026-10-18T15:00:00.000Z"
+    settings["hours"]["week"]["sun"] = {"open": "10:00", "close": "14:30"}
+    assert summary()[ids["wednesday"]]["dueAt"] == "2026-10-18T12:30:00.000Z"
+
+    # Settings that cannot be read or used: no promised time, and the summary still answers in full.
+    for broken in ({}, {"hours": _default_settings()["hours"]}, {"targets": {"reviewBusinessDays": "soon"}, "hours": _default_settings()["hours"]},
+                   {"targets": {"reviewBusinessDays": 0}, "hours": _default_settings()["hours"]}):
+        settings = broken
+        again = summary()
+        assert set(again) == set(body) and all(item["dueAt"] is None for item in again.values()), broken
+        assert again[ids["wednesday"]]["stage"] == 2 and again[ids["approved"]]["stage"] == body[ids["approved"]]["stage"]
+
+    def unreadable():
+        raise RuntimeError("the settings row cannot be read")
+
+    monkeypatch.setattr(studio_results, "read_all_settings", unreadable)
+    again = summary()
+    assert set(again) == set(body) and all(item["dueAt"] is None for item in again.values())
+
+    # Nobody is waiting: the settings are not read at all.
+    reads.clear()
+    monkeypatch.setattr(studio_results, "read_all_settings", lambda: reads.append(1) or _default_settings())
+    with db_conn() as conn:
+        for name in [*sent, "blank", "words", "long", "missing"]:
+            conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": CAMPAIGNS, "id": ids[name]})
+    quiet = summary()
+    assert set(quiet) == {ids[name] for name in ("draft", "changes", "approved", "stopped")} and reads == []
+    # The helper on its own.
+    assert studio_results.review_due("2026-10-14T08:00:00Z", _default_settings()) == "2026-10-15T15:00:00.000Z"
+    assert studio_results.review_due("2026-10-14T08:00:00Z", None) is None and studio_results.review_due(None, _default_settings()) is None
 
 
 def test_campaigns_summary_rate_limited(people):

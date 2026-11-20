@@ -24,8 +24,10 @@ built before any screen:
   OWN live requests (archived ones left out), ``{<campaign id>: {stage, stageKey, labels, ...,
   checkedAt, checkedAgo, metaUsedMinor, stopRequestedAt, dueAt, settleExpectedAt}}``. Staff ids
   and names are never part of it (the route passes it through studio_privacy.redact_staff_identity,
-  P1-05), nor the staff-only Meta review text. ``dueAt`` stays null until the service-hours helper
-  exists (P3-16).
+  P1-05), nor the staff-only Meta review text. ``dueAt`` is set only for a request waiting for
+  review (stage 2): when the team reviews it by (``review_due``: the ``review`` target of the studio
+  settings counted in the working hours, the rule of the overdue-review alert). Null for every other
+  stage, and when the time it was sent or the settings cannot be read.
 * ``GET /api/studio/campaigns/{id}/results`` (P3-04b; the owner, or staff) and ``POST
   .../results/refresh`` (P3-04c, staff "Check Meta now"): one request's results card
   (``results_view``), always from the stored row, so a failed sync shows the last good values.
@@ -69,9 +71,11 @@ from sqlalchemy.exc import IntegrityError
 from ...db import db_conn, json_dumps, json_fields_select_sql, json_loads, json_loads_or_raw, now_ms
 from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION, REVIEWER_VISIBLE_STATUSES
+from . import studio_hours
 from .studio_diagnostics import libya_today, parse_day, parse_time
 from .studio_errors import studio_error
 from .studio_privacy import redact_staff_identity
+from .studio_settings import read_all_settings
 from .studio_types import created_by_or_none, derived_id
 
 RESULTS_TYPE = "adCampaignResults"
@@ -717,16 +721,40 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def review_due(submitted_at: Any, settings: dict[str, Any] | None) -> str | None:
+    """When the team reviews a waiting request by (``2026-09-27T15:00:00.000Z``): closing time of the
+    ``targets.reviewBusinessDays``-th working day after the Tripoli day it was sent, counted in the
+    ``hours`` setting (studio_hours.target_due_at). The overdue-review alert uses the same rule
+    (studio_jobs.review_due_at), so the time a customer is shown and the time the team is alerted
+    agree. None when the time it was sent, or the settings, cannot be read: the summary is never
+    refused because of this one line."""
+    sent = parse_time(submitted_at)
+    if sent is None or not settings:
+        return None
+    try:
+        return studio_hours.iso(studio_hours.target_due_at("review", sent, settings))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def campaigns_summary(conn: Any, owner_id: str, now: datetime) -> dict[str, dict[str, Any]]:
     """{campaign id: display stage + checkedAgo, dueAt, settleExpectedAt} for the owner's live requests."""
     requests = load_owner_requests(conn, owner_id, include_archived=False)
     results = load_owner_results(conn, owner_id, (r["id"] for r in requests))
     out: dict[str, dict[str, Any]] = {}
+    settings: dict[str, Any] | None = None  # read once, and only when a request is waiting for review
     for request in requests:
         row = results.get(request["id"])
         stage = derive_display_stage(request, row, now)
         stage["checkedAgo"] = checked_ago(stage["checkedAt"], now)
-        stage["dueAt"] = None  # the service-hours helper (P3-16) fills the team's due time
+        stage["dueAt"] = None
+        if stage["stage"] == 2:
+            if settings is None:
+                try:
+                    settings = read_all_settings()
+                except Exception:  # unreadable settings: no promised time, the summary itself still answers
+                    settings = {}
+            stage["dueAt"] = review_due(request.get("submittedAt"), settings)
         settle = row.get("settleReadDueAt") if row and stage["stage"] == 10 and stage["checkedAt"] else None
         stage["settleExpectedAt"] = settle if stage["variant"] == "" else None
         out[request["id"]] = stage
