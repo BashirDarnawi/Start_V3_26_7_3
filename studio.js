@@ -3953,12 +3953,19 @@ async function refreshAdsStudioWallet() {
   if (_adsStudioWalletBusy) return;
   _adsStudioWalletBusy = true;
   const forUser = String(state.currentUser?.id || '');
+  // The catalogue this load works with. A reset that arrives while the load runs (a second draw of
+  // the wallet before the first answer, a quick second Refresh) wipes the shared copy; the load then
+  // put its lists on the card without it, and the card said "Payment methods did not load" although
+  // the server had answered. The load hands its own copy back: to the same user only, and only if
+  // nothing newer is there.
+  let methods = _adsStudioPayMethods, rate = _adsStudioPayRate;
+  const keepCatalog = () => { if (_adsStudioPayMethods === null && methods) { _adsStudioPayMethods = methods; _adsStudioPayRate = rate; } };
   try {
-    if (_adsStudioPayMethods === null) {
+    if (methods === null) {
       try {
         const catalog = await apiWalletPaymentMethods();
-        _adsStudioPayMethods = Array.isArray(catalog?.methods) ? catalog.methods : [];
-        _adsStudioPayRate = catalog?.rate || null;
+        _adsStudioPayMethods = methods = Array.isArray(catalog?.methods) ? catalog.methods : [];
+        _adsStudioPayRate = rate = catalog?.rate || null;
       } catch (_) { /* stays null so the next refresh retries */ }
     }
     const mine = await apiWalletPaymentRequestList('mine');
@@ -3973,6 +3980,7 @@ async function refreshAdsStudioWallet() {
       _adsStudioWalletPendingAll = pendingAll;
       _adsStudioWalletForUser = forUser;
       _adsStudioWalletLoadFailed = false;
+      keepCatalog();
     }
   } catch (_) {
     if (forUser === String(state.currentUser?.id || '')) {
@@ -3981,6 +3989,7 @@ async function refreshAdsStudioWallet() {
       _adsStudioWalletMine = _adsStudioWalletMine || [];
       _adsStudioWalletForUser = forUser;
       _adsStudioWalletLoadFailed = true;
+      keepCatalog();
     }
   } finally {
     _adsStudioWalletBusy = false;

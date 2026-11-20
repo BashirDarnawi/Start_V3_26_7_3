@@ -2723,6 +2723,85 @@ async function main() {
     state.language = 'en';
   });
 
+  await test('classic Add money: a second draw (or a second Refresh) while the wallet is still loading no longer leaves the card saying "Payment methods did not load"', async () => {
+    const { sandbox, state, run, calls, renders, replies } = studioFixture();
+    const METHODS = '/api/wallet/payment-requests/methods', LISTS = '/api/wallet/payment-requests';
+    const waiting = [];   // the list answers when the test says so
+    let methodsFail = false, listsFail = false;
+    replies[METHODS] = () => (methodsFail ? Promise.reject(new Error('offline')) : { methods: [{ id: 'adfali', name: { en: 'Adfali', ar: 'ادفع لي' }, desc: {} }], rate: { usdToLyd: 5 } });
+    replies[LISTS] = () => new Promise((resolve, reject) => waiting.push(() => (listsFail ? reject(new Error('offline')) : resolve({ requests: [] }))));
+    const answer = async () => { while (waiting.length) { waiting.shift()(); await settle(); await settle(); } };
+    const asked = url => calls.filter(call => call.url === url).length;
+    const card = () => String(run('renderAdsStudioWallet()'));
+    const shown = html => html.includes('name="ads-studio-charge-method"') && html.includes('Adfali') && !html.includes('Payment methods did not load');
+
+    // 1. The first draw starts the load; the methods arrive, the list is still on its way.
+    card();
+    await settle(); await settle();
+    assert.deepEqual([asked(METHODS), asked(LISTS), waiting.length], [1, 1, 1]);
+    // 2. A second draw arrives before the list does (live data, a language switch). The user is not
+    //    stamped yet, so this draw resets the cache: the methods just fetched are wiped.
+    card();
+    assert.equal(run('_adsStudioPayMethods'), null);
+    // 3. The list answers. Before: the card was then drawn without methods and stayed so until Refresh.
+    await answer();
+    assert.ok(shown(card()), 'the methods are on the card');
+    assert.deepEqual([asked(METHODS), asked(LISTS)], [1, 1], 'with no extra request: the load kept what it had fetched');
+    assert.ok(renders.length >= 1 && run('_adsStudioWalletBusy') === false && run("_adsStudioPayRate.usdToLyd") === 5);
+    card(); await settle(); await answer();
+    assert.deepEqual([asked(METHODS), asked(LISTS)], [1, 1], 'drawing again starts nothing');
+
+    // 4. The Refresh button pressed twice in a row: the second press resets while the first load runs.
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await settle(); await settle();
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await answer();
+    assert.ok(shown(card()), 'after a double Refresh the methods are on the card');
+    // 5. A re-read that started with the methods already there (after a payment, say), and Refresh pressed meanwhile.
+    run('refreshAdsStudioWallet();');
+    await settle(); await settle();
+    const duringReread = asked(METHODS);
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await answer();
+    assert.ok(shown(card()) && asked(METHODS) === duringReread);
+    // 6. A load whose methods request failed keeps nothing: the card says so and Refresh asks again.
+    methodsFail = true;
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await settle(); await answer();
+    assert.ok(card().includes('Payment methods did not load'));
+    methodsFail = false;
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await settle(); await answer();
+    assert.ok(shown(card()));
+    // 6b. The lists fail after a reset arrived mid-load: the methods the load fetched are still kept.
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await settle(); await settle();
+    run('resetAdsStudioWalletCache()');
+    listsFail = true;
+    await answer();
+    listsFail = false;
+    assert.ok(run('_adsStudioWalletLoadFailed') === true && shown(card()), 'the lists failed, the methods are there');
+    // 7. Another account signs in while a load is running: nothing of the first account's load is kept for it.
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await settle(); await settle();
+    state.currentUser = { id: 'cust2', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn'] }, subscriptions: ['ad_maker'] };
+    state.users.push(state.currentUser);
+    run('resetAdsStudioWalletCache()');   // what the first draw for the new account does
+    waiting.shift()(); await settle(); await settle();
+    assert.deepEqual([run('_adsStudioWalletForUser'), run('_adsStudioPayMethods'), run('_adsStudioWalletMine')], ['', null, null], 'the load that belonged to the first account leaves nothing behind');
+    card(); await settle(); await answer();
+    assert.ok(run("_adsStudioWalletForUser === 'cust2'") && shown(card()));
+    // 8. Signing out while a load is running (sign-out resets the cache): nothing is kept and nothing more is asked.
+    run('resetAdsStudioWalletCache(); refreshAdsStudioWallet();');
+    await settle(); await settle();
+    const atSignOut = [asked(METHODS), asked(LISTS)];
+    run('resetAdsStudioWalletCache()');
+    state.currentUser = null;
+    await answer();
+    assert.deepEqual([asked(METHODS), asked(LISTS)], atSignOut, 'no request after sign-out');
+    assert.deepEqual([run('_adsStudioPayMethods'), run('_adsStudioWalletMine'), run('_adsStudioWalletBusy')], [null, null, false]);
+  });
+
   // ---- Review loop r5 batch MGR: Manager money screens and Arabic texts ----
   const realEscape = "Security.escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')";
   await test('r5 MGR n=11: driver completion shows the exact 107.25 LYD debt and the real 0.25 shortfall, never "107" and "remaining 0"', async () => {
