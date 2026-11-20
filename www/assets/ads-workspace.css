@@ -711,6 +711,31 @@ textarea.studio-desk-input { resize: vertical; min-height: 84px; }
 .studio-desk-box[data-ready="1"] .studio-desk-countdown { background: var(--studio-green-bg); color: var(--studio-green-fg); }
 .studio-desk-problem { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--studio-rose-bg); color: var(--studio-rose-fg); font-size: 13px; font-weight: 700; line-height: 1.6; }
 .studio-desk-problem > p { margin: 0; }
+/* The desk on a wide screen (round 3, DESIGN.md template T15). An opened request keeps its three boxes
+   apart; from 900 px the decision sits beside the brief and stays in view; from 1280 px the queue stays
+   beside the opened request. Below those widths everything stacks, and the queue is a screen of its
+   own, as before. */
+.studio-desk-detail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.studio-desk-queue { display: none; }
+/* Approving needs no reason, so its button comes first; the reason and the note belong to the two buttons under them. */
+.studio-desk-or { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--ui-line); }
+.studio-desk-decision > .studio-v2-action { gap: 8px; }
+@media (min-width: 900px) {
+  .studio-desk-detail:not([data-status="gone"]) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); grid-template-rows: auto 1fr; align-items: start; }
+  .studio-desk-detail > :is(.studio-desk-detail-head, [data-testid="studio-desk-brief"]) { grid-column: 1; }
+  .studio-desk-detail:not([data-status="gone"]) > :is(.studio-desk-decision, .studio-desk-outcome) { grid-column: 2; grid-row: 1 / span 2; position: sticky; top: 16px; }
+  .studio-desk-decision-actions > .studio-v2-action { padding-inline: 10px; }
+}
+@media (min-width: 1280px) {
+  .studio-desk-split { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); align-items: start; gap: 14px; min-width: 0; }
+  .studio-desk-queue { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .studio-desk-queue .studio-desk-h2 { font-size: 15px; }
+  .studio-desk-queue .studio-desk-note { display: none; }
+  .studio-desk-queue .studio-desk-card { padding: 12px; gap: 6px; }
+  .studio-desk-queue .studio-desk-card-name { font-size: 14px; }
+  .studio-desk-queue .studio-desk-card .studio-desk-note { display: block; }
+  .studio-desk-card[aria-current="true"] { border-color: var(--ui-accent); box-shadow: 0 0 0 1px var(--ui-accent); }
+}
 .studio-desk-outcome { border-color: var(--studio-fg); background: var(--studio-bg); }
 .studio-desk-outcome .studio-desk-note, .studio-desk-outcome .studio-desk-label { color: inherit; }
 .studio-desk-outcome-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; font-weight: 800; color: var(--studio-fg); }

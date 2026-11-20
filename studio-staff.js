@@ -1202,13 +1202,13 @@ function studioDeskNoteInput(id, input) {
   draft.note = String((input && input.value) || '').slice(0, 1000);
 }
 
-function renderStudioDeskRequestCard(request) {
+function renderStudioDeskRequestCard(request, open = '') {
   const id = studioEsc(request.id);
   const legacy = typeof adsStudioIsLegacyDailyRequest === 'function' && adsStudioIsLegacyDailyRequest(request);
   const since = request.submittedAt ? studioDeskWhen(request.submittedAt) : '';
   return `
               <li>
-                <button type="button" class="studio-desk-card" data-testid="studio-desk-request-${id}" onclick="studioDeskGo('requests', '${id}')">
+                <button type="button" class="studio-desk-card" data-testid="studio-desk-request-${id}"${open === String(request.id) ? ' aria-current="true"' : ''} onclick="studioDeskGo('requests', '${id}')">
                   <span class="studio-desk-card-name" dir="auto">${studioEsc(studioDeskName(request))}</span>
                   ${renderStudioDeskMeta(request)}
                   ${since ? `<span class="studio-desk-note">${studioEsc(adsStudioText(`Sent ${since}`, `أُرسل ${since}`))}</span>` : ''}
@@ -1218,17 +1218,20 @@ function renderStudioDeskRequestCard(request) {
 }
 
 function renderStudioDeskRequests(route) {
-  if (route && route.id) return renderStudioDeskRequestDetail(route.id);
+  const open = route && route.id ? String(route.id) : '';
   const queue = studioDeskQueue();
   const shown = queue.slice(0, studioDeskShown('requests'));
   const intro = renderStudioDeskIntro(
     adsStudioText(`Waiting for review (${queue.length})`, `بانتظار المراجعة (${queue.length})`),
     adsStudioText("Approval charges the customer's held budget; the Meta setup is the next section.", 'الموافقة تخصم الميزانية المحجوزة من محفظة العميل؛ تجهيز ميتا في القسم التالي.'),
     'studio-desk-requests-head');
-  if (!queue.length) return intro + renderStudioDeskEmpty('badge-check', adsStudioText('The review queue is clear', 'لا طلبات تنتظر المراجعة'), adsStudioText('New requests appear here as soon as customers send them.', 'تظهر الطلبات الجديدة هنا فور إرسالها.'), 'studio-desk-requests-empty');
-  return `${intro}
-          <ul class="studio-desk-list" data-testid="studio-desk-requests">${shown.map(renderStudioDeskRequestCard).join('')}</ul>
+  const list = !queue.length ? intro + renderStudioDeskEmpty('badge-check', adsStudioText('The review queue is clear', 'لا طلبات تنتظر المراجعة'), adsStudioText('New requests appear here as soon as customers send them.', 'تظهر الطلبات الجديدة هنا فور إرسالها.'), 'studio-desk-requests-empty')
+    : `${intro}
+          <ul class="studio-desk-list" data-testid="studio-desk-requests">${shown.map(request => renderStudioDeskRequestCard(request, open)).join('')}</ul>
           ${renderStudioDeskMoreButton('requests', queue.length)}`;
+  // A request is open: on a wide screen the queue stays beside it (round 3, DESIGN.md template T15). The
+  // style sheet hides the queue below 1280 px, where the request is a screen of its own, as before.
+  return open ? `<div class="studio-desk-split"><div class="studio-desk-queue" data-testid="studio-desk-queue-beside">${list}</div>${renderStudioDeskRequestDetail(open)}</div>` : list;
 }
 
 // The exact goal the customer chose (goalDetail: video views, page likes…) in the builder's words (15l
@@ -1319,17 +1322,18 @@ function renderStudioDeskDecisionBox(request) {
   return `
           <section class="studio-desk-box studio-desk-decision" data-testid="studio-desk-decision" aria-labelledby="studio-desk-decision-title">
             <h3 id="studio-desk-decision-title" class="studio-desk-h3">${studioEsc(adsStudioText('Your decision', 'قرارك'))}</h3>
-            <p class="studio-desk-note">${studioEsc(adsStudioText(`Approve charges the held ${studioUsd(held)}${Number.isSafeInteger(days) && days > 0 ? ` and runs the ad for ${adsStudioDaysText(days)} from the start` : ''}. Send back or reject needs a reason and a note the customer will read.`,
-              `الموافقة تخصم ${studioUsd(held)} المحجوزة${Number.isSafeInteger(days) && days > 0 ? ` ويعمل الإعلان ${adsStudioDaysText(days)} من بدايته` : ''}. طلب التعديل أو الرفض يحتاج سبباً وملاحظة يقرؤها العميل.`))}</p>
+            <p class="studio-desk-note">${studioEsc(adsStudioText(`Approve charges the held ${studioUsd(held)}${Number.isSafeInteger(days) && days > 0 ? ` and runs the ad for ${adsStudioDaysText(days)} from the start` : ''}.`,
+              `الموافقة تخصم ${studioUsd(held)} المحجوزة${Number.isSafeInteger(days) && days > 0 ? ` ويعمل الإعلان ${adsStudioDaysText(days)} من بدايته` : ''}.`))}</p>
+            <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-approve" onclick="studioDeskDecide('${id}', 'Approved', this)"${busy ? ' disabled' : ''}>${studioDeskIcon('badge-check')}<span>${studioEsc(adsStudioText('Approve', 'وافق'))}</span></button>
+            <p class="studio-ads-sheet-error" role="alert" data-testid="studio-desk-decision-error"${draft.error ? '' : ' hidden'}>${studioEsc(draft.error)}</p>
+            <p class="studio-desk-note studio-desk-or">${studioEsc(adsStudioText('Send back or reject needs a reason and a note the customer will read.', 'طلب التعديل أو الرفض يحتاج سبباً وملاحظة يقرؤها العميل.'))}</p>
             <p class="studio-desk-label">${studioEsc(adsStudioText('Reason', 'السبب'))}</p>
             <div class="studio-help-chips" role="group" aria-label="${studioEsc(adsStudioText('Reason', 'السبب'))}" data-testid="studio-desk-reasons">${chips}</div>
             <label class="studio-desk-label" for="studio-desk-note-${id}">${studioEsc(adsStudioText('Note to the customer', 'ملاحظة للعميل'))}</label>
             <textarea id="studio-desk-note-${id}" class="studio-desk-input" rows="3" maxlength="1000" data-testid="studio-desk-note" oninput="studioDeskNoteInput('${id}', this)" placeholder="${studioEsc(adsStudioText('What should change, in plain words', 'ما الذي يجب تعديله، بكلمات بسيطة'))}">${studioEsc(draft.note)}</textarea>
-            <p class="studio-ads-sheet-error" role="alert" data-testid="studio-desk-decision-error"${draft.error ? '' : ' hidden'}>${studioEsc(draft.error)}</p>
             <div class="studio-desk-actions studio-desk-decision-actions">
               <button type="button" class="studio-v2-action" data-testid="studio-desk-changes" onclick="studioDeskDecide('${id}', 'Changes Requested', this)"${busy ? ' disabled' : ''}>${studioDeskIcon('message-square-warning')}<span>${studioEsc(adsStudioText('Send back', 'أعده للتعديل'))}</span></button>
               <button type="button" class="studio-v2-action studio-ads-danger" data-testid="studio-desk-reject" onclick="studioDeskDecide('${id}', 'Rejected', this)"${busy ? ' disabled' : ''}>${studioDeskIcon('x')}<span>${studioEsc(adsStudioText('Reject', 'ارفض'))}</span></button>
-              <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-approve" onclick="studioDeskDecide('${id}', 'Approved', this)"${busy ? ' disabled' : ''}>${studioDeskIcon('badge-check')}<span>${studioEsc(adsStudioText('Approve', 'وافق'))}</span></button>
             </div>
           </section>`;
 }

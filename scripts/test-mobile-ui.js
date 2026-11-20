@@ -6433,6 +6433,19 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && rejectCall.length === 1 && rejectCall[0].body.decision === 'Rejected' && rejectCall[0].body.reviewReasonCode === 'text_policy' && rejectCall[0].body.note === 'Please soften the claim.' && /^campaign-review-\d+$/.test(rejectCall[0].body.operationId) && rejectCall[0].body.expectedLastModified === 19
       && afterReject.includes('data-testid="studio-desk-outcome" data-decision="Rejected"') && !afterReject.includes('data-testid="studio-desk-decision"'),
     `calls ${rejectCall.length} noReason ${JSON.stringify(noReason)}`);
+  // Round 3 (DESIGN.md template T15): the queue stays beside an opened request, and approving comes before the reason and the note.
+  const deskOrder = ['data-testid="studio-desk-queue-beside"', 'data-testid="studio-desk-requests"', 'data-testid="studio-desk-request-detail"', 'data-testid="studio-desk-brief"', 'data-testid="studio-desk-decision"',
+    'Approve charges the held $70.00 and runs the ad for 7 days from the start.', 'data-testid="studio-desk-approve"', 'data-testid="studio-desk-decision-error"', 'Send back or reject needs a reason and a note the customer will read.',
+    'data-testid="studio-desk-reasons"', 'data-testid="studio-desk-note"', 'data-testid="studio-desk-changes"', 'data-testid="studio-desk-reject"'].map(part => detailHtml.indexOf(part));
+  check('Team desk, round 3: an opened request keeps the queue beside it with that request marked, the other one still opens from there, and the decision box reads Approve first, then the reason, the note, Send back and Reject',
+    deskOrder.every((at, i) => at >= 0 && (i === 0 || at > deskOrder[i - 1]))
+      && /data-testid="studio-desk-request-r_sub" aria-current="true" onclick="studioDeskGo\('requests', 'r_sub'\)"/.test(detailHtml)
+      && /data-testid="studio-desk-request-r_sub2" onclick="studioDeskGo\('requests', 'r_sub2'\)"/.test(detailHtml)
+      && !queueHtml.includes('studio-desk-queue-beside') && !queueHtml.includes('aria-current="true" onclick="studioDeskGo')
+      && (detailHtml.match(/data-testid="studio-desk-approve"/g) || []).length === 1
+      // once the request has left the lists, the queue beside the outcome no longer lists it
+      && afterReject.includes('data-testid="studio-desk-queue-beside"') && !afterReject.includes('data-testid="studio-desk-request-r_sub"') && afterReject.includes('data-testid="studio-desk-request-r_sub2"'),
+    `order ${deskOrder.join(',')}`);
   openAt('/studio?tab=review&section=requests&id=r_sub2');
   const pending = outcome("studioDeskDecide('r_sub2', 'Approved')");
   reply('/api/ad-studio/campaigns/r_sub2/review', { id: 'r_sub2', data: { ...requestsRows()[1], status: 'Approved', paidMinorUSD: 2500, studioRef: 'ALB-S-NEW11111', studioName: 'ALB-S-NEW11111 · Second waiting', _lastModified: 21 }, lastModified: 21 });
