@@ -468,15 +468,27 @@ function renderAdsStudioHeader() {
   `;
 }
 
+// The sections as one navigation (redesign round 4, wireframe 14): a list beside the page on a computer, a bar
+// at the bottom of a phone, as the new layout has. "New request" is not a section: it is the main button of
+// Home and My ads, and while a request is being written the navigation steps aside (the new layout's does too).
+// A request left unsent is found again under "Not sent yet" (renderAdsStudioOpenDraft).
 function renderAdsStudioTabBar() {
+  if (_adsStudioActiveTab === 'builder') return '';
   const isAr = adsStudioIsAr();
   return `
-    <div class="studio-section-navigation">
-      <div class="studio-section-tabs flex flex-wrap gap-2" role="tablist" aria-label="${isAr ? 'أقسام استوديو الإعلانات' : 'Ads Studio sections'}">
-        ${adsStudioTabsForUser().map(tab => `<button type="button" role="tab" aria-selected="${_adsStudioActiveTab === tab.id}" onclick="setAdsStudioTab('${tab.id}')" class="sc-tab"><i data-lucide="${tab.icon}"></i><span>${isAr ? tab.labelAr : tab.label}</span>${tab.id === 'review' ? `<b>${adsStudioReviewQueue().length}</b>` : ''}</button>`).join('')}
-      </div>
-    </div>
-  `;
+      <nav class="studio-section-tabs sc-nav" aria-label="${isAr ? 'أقسام استوديو الإعلانات' : 'Ads Studio sections'}">
+        ${adsStudioTabsForUser().filter(tab => tab.id !== 'builder').map(tab => `<button type="button" aria-current="${_adsStudioActiveTab === tab.id ? 'page' : 'false'}" onclick="setAdsStudioTab('${tab.id}')" class="sc-tab"><i data-lucide="${tab.icon}"></i><span>${isAr ? tab.labelAr : tab.label}</span>${tab.id === 'review' ? `<b>${adsStudioReviewQueue().length}</b>` : ''}</button>`).join('')}
+      </nav>`;
+}
+
+// The request being written, once it holds something, while another section is on screen: one line that leads
+// back to it with nothing lost (the "New request" section button did that until round 4). '' otherwise.
+function renderAdsStudioOpenDraft(alone) {
+  const d = _adsStudioDraft;
+  if (!d || _adsStudioActiveTab === 'builder' || !(_adsStudioEditingId || _adsStudioWizardStep > 1 || String(d.name || d.primaryText || '').trim())) return '';
+  const isAr = adsStudioIsAr();
+  const row = `<div class="sc-need" data-ads-studio-open-draft="1"><p><b>${isAr ? 'لم يُرسل بعد' : 'Not sent yet'}: ${Security.escapeHtml(d.name || (isAr ? 'حملة بدون اسم' : 'Untitled campaign'))}</b></p><button type="button" onclick="setAdsStudioTab('builder')" class="studio-v2-action">${isAr ? 'أكمله' : 'Continue'}</button></div>`;
+  return alone ? `<div class="glass-panel sc-needs mb-4">${row}</div>` : row;
 }
 
 function renderAdsStudioSubscriptionGate() {
@@ -539,8 +551,9 @@ function renderAdsStudioView() {
   return `
     <div class="studio-classic" dir="${isAr ? 'rtl' : 'ltr'}">
       ${renderAdsStudioHeader()}
-      ${renderAdsStudioTabBar()}
-      ${content}
+      <div class="sc-body${_adsStudioActiveTab === 'builder' ? ' is-focus' : ''}">${renderAdsStudioTabBar()}
+        <div class="sc-main">${content}</div>
+      </div>
       ${renderAdsStudioSheets()}
     </div>
   `;
@@ -570,14 +583,15 @@ function renderAdsStudioDashboard() {
   const isAr = adsStudioIsAr();
   const stats = [[isAr ? 'كل الحملات' : 'All campaigns', campaigns.length], [isAr ? 'تحتاج إكمال' : 'Needs work', draftCount], [isAr ? 'قيد المراجعة' : 'Under review', reviewCount], [isAr ? 'تمت الموافقة' : 'Approved', approvedCount]];
   // "Needs you" first (round 3, DESIGN.md template T13): a request sent back, then a draft not sent yet, each with the one button that moves it on.
-  const mine = campaigns.filter(item => ['Changes Requested', 'Draft'].includes(String(item.status || 'Draft')) && canActOnRecord('adCampaignRequests', 'edit', item.createdBy))
+  const open = renderAdsStudioOpenDraft();
+  const mine = campaigns.filter(item => ['Changes Requested', 'Draft'].includes(String(item.status || 'Draft')) && canActOnRecord('adCampaignRequests', 'edit', item.createdBy) && !(open && String(item.id) === _adsStudioEditingId))
     .sort((x, y) => (x.status === 'Draft') - (y.status === 'Draft')).slice(0, 3);
   const start = (onclick, icon, en, ar, primary = '') => `<button type="button" onclick="${onclick}" class="studio-v2-action${primary}"><i data-lucide="${icon}"></i>${isAr ? ar : en}</button>`;
   return `
     <section class="space-y-6">
-      ${mine.length ? `<div class="glass-panel sc-needs" data-ads-studio-needs="1">
+      ${mine.length || open ? `<div class="glass-panel sc-needs" data-ads-studio-needs="1">
         <h2>${isAr ? 'يحتاجك' : 'Needs you'}</h2>
-        ${mine.map(item => { const back = item.status === 'Changes Requested'; return `<div class="sc-need${back ? ' is-back' : ''}"><p><b>${back ? (isAr ? 'يحتاج تعديلك' : 'Needs your changes') : (isAr ? 'لم يُرسل بعد' : 'Not sent yet')}: ${Security.escapeHtml(item.name || (isAr ? 'حملة بدون اسم' : 'Untitled campaign'))}</b>${back && item.reviewReasonCode ? `<small>${Security.escapeHtml(adsStudioReviewReasonLabel(item.reviewReasonCode))}</small>` : ''}</p><button type="button" onclick="startAdsStudioCampaign('${Security.escapeHtml(String(item.id || ''))}')" class="studio-v2-action">${back ? (isAr ? 'عدّله' : 'Fix it') : (isAr ? 'أكمله' : 'Continue')}</button></div>`; }).join('')}
+        ${open}${mine.map(item => { const back = item.status === 'Changes Requested'; return `<div class="sc-need${back ? ' is-back' : ''}"><p><b>${back ? (isAr ? 'يحتاج تعديلك' : 'Needs your changes') : (isAr ? 'لم يُرسل بعد' : 'Not sent yet')}: ${Security.escapeHtml(item.name || (isAr ? 'حملة بدون اسم' : 'Untitled campaign'))}</b>${back && item.reviewReasonCode ? `<small>${Security.escapeHtml(adsStudioReviewReasonLabel(item.reviewReasonCode))}</small>` : ''}</p><button type="button" onclick="startAdsStudioCampaign('${Security.escapeHtml(String(item.id || ''))}')" class="studio-v2-action">${back ? (isAr ? 'عدّله' : 'Fix it') : (isAr ? 'أكمله' : 'Continue')}</button></div>`; }).join('')}
       </div>` : ''}
       ${adsStudioCanCreate() || isCurrentUserAdmin() ? `<div class="sc-start">
         ${adsStudioCanCreate() ? start("beginAdsStudioCampaign(); setAdsStudioTab('builder')", 'plus', 'New request', 'طلب جديد', ' is-primary') + start("beginAdsStudioBoost('boost_post')", 'rocket', 'Boost a post', 'تعزيز منشور') + start("beginAdsStudioBoost('boost_page')", 'flag', 'Boost my Page', 'تعزيز صفحتي') : ''}
@@ -2181,7 +2195,7 @@ function renderAdsStudioCampaigns() {
   const campaigns = getVisibleAdsStudioCampaigns().filter(item => !query || [item.name, item.pageName, item.objective, item.status].some(value => foldSearchText(value).includes(query)));
   return `
     <section>
-      <div class="glass-panel sc-find">
+      ${renderAdsStudioOpenDraft(true)}<div class="glass-panel sc-find">
         <div class="relative flex-1"><i data-lucide="search" class="absolute ${isAr ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400"></i><input type="search" value="${Security.escapeHtml(_adsStudioSearch)}" oninput="onAdsStudioSearch(this.value)" class="glass-input min-h-12 w-full rounded-xl ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'}" placeholder="${isAr ? 'ابحث باسم الحملة أو الصفحة...' : 'Search campaign or Page...'}" /></div>
         ${adsStudioCanCreate() ? `<button type="button" onclick="beginAdsStudioCampaign(); setAdsStudioTab('builder')" class="studio-v2-action is-primary"><i data-lucide="plus"></i>${isAr ? 'طلب جديد' : 'New request'}</button>` : ''}
       </div>

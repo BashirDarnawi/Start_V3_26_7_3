@@ -1016,11 +1016,30 @@ html.dark .studio-classic { --studio-slate-fg: #cbd5e1; --studio-amber-fg: #fcd3
 .sc-icon:hover { background: var(--ui-surface-soft); }
 .sc-icon.is-danger { color: var(--ui-danger-text); }
 .sc-icon > :is(i, svg) { width: 20px; height: 20px; }
-.studio-classic .studio-section-navigation { margin-bottom: 20px; }
-.ui-workspace .studio-classic .sc-tab { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 8px 16px; border: 1px solid var(--ui-line); border-radius: 12px; background: var(--ui-surface); color: var(--ui-muted); font-size: 13.5px; font-weight: 750; }
-.ui-workspace .studio-classic .sc-tab[aria-selected="true"] { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); }
-.sc-tab > :is(i, svg) { flex: none; width: 16px; height: 16px; }
-.sc-tab > b { padding: 0 6px; border-radius: 99px; background: var(--ui-accent-soft); color: var(--ui-accent); font-size: 11px; }
+/* The classic sections as one navigation (redesign round 4, wireframe 14). Phones and tablets (<= 900px, the
+   app shell's breakpoint): a bar fixed at the bottom, as the new layout's; wider: a list beside the page. The
+   insets stay physical (a notch on the left is on the left in Arabic too); every item is at least 44px; a name
+   wraps between words and is never cut inside one (six items fit a 320px phone in both languages). The page
+   already keeps the room of a bottom bar free on phones (.app-content in style.css), so nothing is added here.
+   While a request is being written there is no navigation (.sc-body.is-focus). */
+.sc-body, .sc-main { min-width: 0; max-width: 100%; }
+.ui-workspace .studio-classic .sc-nav { position: fixed; right: 0; bottom: 0; left: 0; z-index: 38; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px; margin: 0; padding: 6px max(6px, var(--app-safe-right, 0px)) max(6px, var(--app-safe-bottom, 0px)) max(6px, var(--app-safe-left, 0px)); background: var(--ui-surface); border-top: 1px solid var(--ui-line); }
+.ui-workspace .studio-classic .sc-tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-width: 0; min-height: 56px; padding: 4px 2px; border: 0; border-radius: 12px; background: transparent; color: var(--ui-muted); font-size: 11px; font-weight: 650; line-height: 1.25; text-align: center; }
+.ui-workspace .studio-classic .sc-tab[aria-current="page"] { background: var(--ui-accent-soft); color: var(--ui-accent); }
+.sc-tab > span { display: block; max-width: 100%; overflow-wrap: normal; word-break: normal; hyphens: none; }
+.sc-tab > :is(i, svg) { flex: none; width: 22px; height: 22px; }
+.sc-tab > b { position: absolute; top: 2px; inset-inline-end: calc(50% - 24px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px; background: var(--ui-accent); color: var(--ui-surface); font-size: 11px; font-weight: 800; line-height: 18px; text-align: center; }
+body.keyboard-open .sc-nav { display: none !important; }
+/* Six sections (staff with Help on) on the narrowest phones: the longest name, «المنشورات», needs smaller letters. */
+@media (max-width: 359px) { .ui-workspace .studio-classic .sc-tab:first-child:nth-last-child(n+6), .ui-workspace .studio-classic .sc-tab:first-child:nth-last-child(n+6) ~ .sc-tab { font-size: 9.5px; } }
+@media (min-width: 901px) {
+  .sc-body { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .sc-body.is-focus { grid-template-columns: minmax(0, 1fr); }
+  .ui-workspace .studio-classic .sc-nav { position: sticky; top: 16px; right: auto; bottom: auto; left: auto; z-index: 1; grid-auto-flow: row; grid-auto-columns: auto; gap: 4px; padding: 8px; border: 1px solid var(--ui-line); border-radius: var(--ui-radius); }
+  .ui-workspace .studio-classic .sc-tab { flex-direction: row; justify-content: flex-start; gap: 10px; min-height: 46px; padding: 8px 12px; font-size: 14px; text-align: start; }
+  .sc-tab > :is(i, svg) { width: 20px; height: 20px; }
+  .sc-tab > b { position: static; margin-inline-start: auto; }
+}
 .sc-needs { display: grid; gap: 10px; padding: 16px; border-radius: var(--ui-radius); }
 .sc-needs > h2 { margin: 0; font-size: 16px; font-weight: 800; color: var(--ui-ink); }
 .sc-need { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border-radius: 14px; border-inline-start: 4px solid var(--studio-slate-fg); background: var(--ui-surface-soft); }
@@ -1079,9 +1098,6 @@ html.dark .studio-classic { --studio-slate-fg: #cbd5e1; --studio-amber-fg: #fcd3
   .sc-card { padding: 14px; }
   .sc-actions { flex: 1 1 100%; }
   .sc-actions > .studio-v2-action { flex: 1 1 auto; }
-  .ui-workspace .studio-classic .studio-section-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-  .ui-workspace .studio-classic .sc-tab { padding: 6px 4px; font-size: 13px; white-space: normal; }
-  .sc-tab > :is(i, svg) { display: none; }
   .sc-start > .studio-v2-action { flex: 1 1 calc(50% - 4px); }
   .sc-start > .studio-v2-action.is-primary { flex-basis: 100%; }
   .sc-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

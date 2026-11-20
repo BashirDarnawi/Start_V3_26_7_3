@@ -322,7 +322,7 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
     try {
       await signInStudio(desk, seeded.reviewer);
       await expect(desk.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible({ timeout: BOOT_TIMEOUT });
-      await desk.getByRole('tab', { name: /Review Queue/ }).click();
+      await desk.locator('.studio-section-tabs').getByRole('button', { name: /Review Queue/ }).click();
       await expect.poll(() => tabParam(desk)).toBe('review');
       const section = desk.getByTestId('studio-staff-tickets');
       await expect(section).toBeVisible();
@@ -359,7 +359,7 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
       await signInStudio(page, seeded.user);
       await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible({ timeout: BOOT_TIMEOUT });
       await expect(page.getByTestId('studio-v2-frame')).toHaveCount(0);
-      const helpTab = page.getByRole('tab', { name: 'Help', exact: true });
+      const helpTab = page.locator('.studio-section-tabs').getByRole('button', { name: 'Help', exact: true });
       await expect(helpTab).toBeVisible({ timeout: BOOT_TIMEOUT });
 
       // A payment ticket (admin-only) from the wallet row of a pending payment.
@@ -393,7 +393,7 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
       await expectFits(page, 'Classic ticket thread', '.studio-help');
 
       // The campaign card: "Ask about this" pre-fills the request; "Ask to stop" opens the sheet and the card shows the marker.
-      await page.getByRole('tab', { name: /My ads/ }).click();
+      await page.locator('.studio-section-tabs').getByRole('button', { name: /My ads/ }).click();
       const card = page.locator(`[data-ads-studio-campaign="${seeded.requestId}"]`);
       await expect(card).toBeVisible();
       // Round 3: "Ask about this" sits in the card's "More" menu; an action in the menu is reached by opening it first.
@@ -402,7 +402,7 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
       await expect(page.getByTestId('studio-help-related')).toHaveValue(`campaign:${seeded.requestId}`);
       await page.getByTestId('studio-help-cancel').click();
       await expect(page.getByTestId('studio-help-tickets')).toBeVisible();
-      await page.getByRole('tab', { name: /My ads/ }).click();
+      await page.locator('.studio-section-tabs').getByRole('button', { name: /My ads/ }).click();
       await pressOnCard(card.locator('[data-ads-studio-ask-stop]'));
       const sheet = page.getByTestId('studio-sheet-ask-stop');
       await expect(sheet).toHaveAttribute('data-state', 'ask');
@@ -421,7 +421,7 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
       const desk = await deskContext.newPage();
       try {
         await signInStudio(desk, seeded.reviewer);
-        await desk.getByRole('tab', { name: /Review Queue/ }).click();
+        await desk.locator('.studio-section-tabs').getByRole('button', { name: /Review Queue/ }).click();
         const section = desk.getByTestId('studio-staff-tickets');
         await expect(section.locator('[data-testid="studio-staff-list"] > li').first()).toContainText(stopNumber, { timeout: BOOT_TIMEOUT });
         await expect(section).not.toContainText(paymentNumber);

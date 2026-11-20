@@ -133,11 +133,127 @@ test.describe('Albayan Studio v2 (pilot)', () => {
     for (const tab of ['dashboard', 'campaigns', 'builder', 'posts', 'replies']) {
       await page.evaluate(id => setAdsStudioTab(id), tab);
       await expect.poll(() => tabParam(page)).toBe(tab);
-      await expect(page.locator('.studio-section-tabs [role="tab"][aria-selected="true"]')).toHaveCount(1);
+      // Redesign round 4: the sections are one navigation; while a request is written it steps aside.
+      await expect(page.locator('.studio-section-tabs [aria-current="page"]')).toHaveCount(tab === 'builder' ? 0 : 1);
+      await expect(page.locator('.studio-section-tabs')).toHaveCount(tab === 'builder' ? 0 : 1);
       await expect(page.getByTestId('studio-v2-frame')).toHaveCount(0);
       await expect(page.getByTestId('studio-staff-frame')).toHaveCount(0);
       await expect(page.getByTestId('studio-nav')).toHaveCount(0);
     }
+    expect(errors).toEqual([]);
+  });
+
+  // Redesign round 4 (wireframe 14): the classic sections were a row of buttons above every page (a grid of two rows on
+  // phones). They are one navigation now: a bar at the bottom of a phone, a list beside the page on a computer.
+  test('classic navigation: a bar at the bottom of a phone and a list beside the page on a computer, whole names at every size in both languages; a request left unsent is found again', async ({ page, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    const { classic } = await studioUsers(playwright, baseURL, testInfo);
+    const errors = collectPageErrors(page);
+    await page.setViewportSize(PHONE);
+    await signInStudio(page, classic);
+    await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+    const nav = page.locator('.studio-classic nav.sc-nav');
+    await expect(nav).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(nav.getByRole('button')).toHaveText(['Home', 'My ads', 'Posts', 'Replies']);
+    await expect(nav.locator('[aria-current="page"]')).toHaveText('Home');
+    const measure = () => page.evaluate(() => {
+      const bar = document.querySelector('.studio-classic nav.sc-nav');
+      const main = document.querySelector('.studio-classic .sc-main');
+      const box = bar.getBoundingClientRect();
+      const items = [...bar.querySelectorAll('.sc-tab')].map(item => {
+        const r = item.getBoundingClientRect(); const word = item.querySelector('span'); const style = getComputedStyle(word);
+        return { name: word.textContent, top: Math.round(r.top), left: Math.round(r.left), right: Math.round(r.right), bottom: Math.round(r.bottom), height: Math.round(r.height),
+          cut: word.scrollWidth > word.clientWidth + 1 || item.scrollWidth > item.clientWidth + 1, wraps: `${style.overflowWrap} ${style.wordBreak}` };
+      });
+      scrollTo(0, document.documentElement.scrollHeight);
+      const end = main.getBoundingClientRect().bottom;
+      const barTop = bar.getBoundingClientRect().top;
+      scrollTo(0, 0);
+      return { position: getComputedStyle(bar).position, left: Math.round(box.left), right: Math.round(box.right), bottom: Math.round(box.bottom), top: Math.round(box.top),
+        mainLeft: Math.round(main.getBoundingClientRect().left), mainRight: Math.round(main.getBoundingClientRect().right), items, end: Math.round(end), barTop: Math.round(barTop), width: innerWidth, height: innerHeight };
+    });
+    for (const language of ['en', 'ar']) {
+      await setLanguage(page, language);
+      // Phones and a tablet: the bar spans the bottom edge; every name is whole and every item large enough to press.
+      for (const width of [320, 360, 390, 430, 820]) {
+        await page.setViewportSize({ width, height: 800 });
+        const at = `${language} ${width}`;
+        const seen = await measure();
+        expect([seen.position, seen.left, seen.right, seen.bottom], `${at}: a bar fixed along the bottom edge`).toEqual(['fixed', 0, width, seen.height]);
+        expect(seen.items.length).toBe(4);
+        for (const [index, item] of seen.items.entries()) {
+          expect(item.height, `${at}: "${item.name}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
+          expect([item.cut, item.wraps], `${at}: "${item.name}" is whole and never broken inside a word`).toEqual([false, 'normal normal']);
+          if (index) expect(language === 'ar' ? item.right <= seen.items[index - 1].left + 1 : item.left >= seen.items[index - 1].right - 1, `${at}: "${item.name}" stands beside the one before it`).toBe(true);
+        }
+        expect(seen.end, `${at}: the end of the page stays above the bar`).toBeLessThanOrEqual(seen.barTop + 1);
+        await expectNoPageOverflow(page, `classic navigation ${at}`);
+      }
+      // A computer: the same sections as a list beside the page (on the right in Arabic), one under the other.
+      for (const width of [1024, 1280]) {
+        await page.setViewportSize({ width, height: 800 });
+        const at = `${language} ${width}`;
+        const seen = await measure();
+        expect(seen.position, `${at}: the list stays in view while the page scrolls`).toBe('sticky');
+        expect(language === 'ar' ? seen.left >= seen.mainRight : seen.right <= seen.mainLeft, `${at}: the list stands beside the page, not above it`).toBe(true);
+        for (const [index, item] of seen.items.entries()) {
+          expect(item.height, `${at}: "${item.name}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
+          expect(item.cut, `${at}: "${item.name}" is whole`).toBe(false);
+          if (index) expect(item.top, `${at}: "${item.name}" is under the one before it`).toBeGreaterThanOrEqual(seen.items[index - 1].bottom - 1);
+        }
+        await expectNoPageOverflow(page, `classic navigation ${at}`);
+      }
+    }
+    // The fullest bar: staff with Help on see six sections. Drawn by the app's own navigation with that list, the six
+    // names stay whole on the narrowest phones in both languages (the longest single word is Arabic: «المنشورات»).
+    await page.evaluate(() => {
+      window.__sections = adsStudioTabsForUser;
+      adsStudioTabsForUser = () => [...window.__sections(), { id: 'help', icon: 'life-buoy', label: 'Help', labelAr: 'المساعدة' }, { id: 'review', icon: 'badge-check', label: 'Review Queue', labelAr: 'طلبات المراجعة' }];
+      render();
+    });
+    for (const language of ['en', 'ar']) {
+      await setLanguage(page, language);
+      await expect(nav.getByRole('button')).toHaveCount(6);
+      for (const width of [320, 360, 390]) {
+        await page.setViewportSize({ width, height: 800 });
+        const seen = await measure();
+        for (const item of seen.items) {
+          expect([item.cut, item.wraps], `six sections, ${language} ${width}: "${item.name}" is whole`).toEqual([false, 'normal normal']);
+          expect(item.height, `six sections, ${language} ${width}: "${item.name}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
+        }
+        const count = await nav.locator('.sc-tab > b').evaluate(el => { const b = el.getBoundingClientRect(); const item = el.parentElement.getBoundingClientRect(); return b.left >= item.left - 1 && b.right <= item.right + 1 && b.top >= item.top - 1; });
+        expect(count, `six sections, ${language} ${width}: the queue's count stays on its own item`).toBe(true);
+        await expectNoPageOverflow(page, `six classic sections ${language} ${width}`);
+      }
+    }
+    await page.evaluate(() => { adsStudioTabsForUser = window.__sections; render(); });
+    await expect(nav.getByRole('button')).toHaveCount(4);
+    await setLanguage(page, 'en');
+    await page.setViewportSize(PHONE);
+
+    // "New request" is the main button of Home; while the request is written the navigation steps aside.
+    await page.getByRole('button', { name: 'New request', exact: true }).click();
+    await expect.poll(() => tabParam(page)).toBe('builder');
+    await expect(nav).toHaveCount(0);
+    await expect(page.locator('.studio-classic .sc-body')).toHaveClass(/is-focus/);
+    // Closed without a word typed: nothing to come back to.
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect.poll(() => tabParam(page)).toBe('campaigns');
+    await expect(nav.locator('[aria-current="page"]')).toHaveText('My ads');
+    const unsent = page.locator('[data-ads-studio-open-draft]');
+    await expect(unsent).toHaveCount(0);
+    // With a name typed, closing keeps it: My ads shows one line that opens the same request again, and so does Home.
+    await page.getByRole('button', { name: 'New request', exact: true }).click();
+    await page.locator('#ads-studio-field-name').fill('Winter test');
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(unsent).toHaveCount(1);
+    await expect(unsent).toContainText('Not sent yet: Winter test');
+    await nav.getByRole('button', { name: 'Home', exact: true }).click();
+    await expect(page.locator('[data-ads-studio-needs] .sc-need').first()).toContainText('Not sent yet: Winter test');
+    await unsent.getByRole('button', { name: 'Continue', exact: true }).click();
+    await expect.poll(() => tabParam(page)).toBe('builder');
+    await expect(page.locator('#ads-studio-field-name')).toHaveValue('Winter test');
+    await expect(nav).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 

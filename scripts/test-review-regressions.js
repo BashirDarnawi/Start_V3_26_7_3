@@ -1880,10 +1880,12 @@ async function main() {
     sandbox.hasSubscription = () => true;
     for (const quiet of ['refreshAdsStudioLimits', 'refreshAdsStudioWallet', 'adsStudioLoadResults', 'socialStudioEnsureLoaded']) sandbox[quiet] = () => {};
     for (const empty of ['renderAdsStudioWallet', 'renderAdsStudioConnections', 'renderSocialStudioOverviewSection', 'renderAdsStudioResultsCard']) sandbox[empty] = () => '';
-    const tabs = () => Array.from(String(run('renderAdsStudioTabBar()')).matchAll(/role="tab" aria-selected="(true|false)" onclick="setAdsStudioTab\('([a-z]+)'\)" class="sc-tab"><i data-lucide="[a-z-]+"><\/i><span>([^<]+)<\/span>/g), m => `${m[3]}${m[1] === 'true' ? '*' : ''} ${m[2]}`);
-    assert.deepEqual(tabs(), ['Home* dashboard', 'My ads campaigns', 'New request builder', 'Posts posts', 'Replies replies']);
+    // Redesign round 4: the sections are one navigation; "New request" is the main button of Home and My ads, not a section.
+    const tabs = () => Array.from(String(run('renderAdsStudioTabBar()')).matchAll(/<button type="button" aria-current="(page|false)" onclick="setAdsStudioTab\('([a-z]+)'\)" class="sc-tab"><i data-lucide="[a-z-]+"><\/i><span>([^<]+)<\/span>/g), m => `${m[3]}${m[1] === 'page' ? '*' : ''} ${m[2]}`);
+    assert.deepEqual(tabs(), ['Home* dashboard', 'My ads campaigns', 'Posts posts', 'Replies replies']);
     state.language = 'ar';
-    assert.deepEqual(tabs().slice(0, 3), ['الرئيسية* dashboard', 'إعلاناتي campaigns', 'طلب جديد builder'], 'the words of the new layout');
+    assert.deepEqual(tabs().slice(0, 2), ['الرئيسية* dashboard', 'إعلاناتي campaigns'], 'the words of the new layout');
+    assert.ok(String(run('renderAdsStudioDashboard()')).includes('<i data-lucide="plus"></i>طلب جديد</button>'), 'the third name is on the main button');
     state.language = 'en';
     const soon = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10), past = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
     const request = (id, status, more = {}) => ({ id, name: `Ad ${id}`, status, createdBy: 'cust1', objective: 'messages', platforms: ['facebook'], budgetType: 'lifetime', budgetMinorUSD: 3500, totalBudgetMinorUSD: 3500, durationDays: 7, startDate: soon, endDate: soon, _lastModified: 5, ...more });
@@ -1971,6 +1973,98 @@ async function main() {
     html = String(run('renderAdsStudioReviewStep()'));
     assert.deepEqual(changes(), ['Campaign -2', 'Objective none', 'Platforms none', 'Page -2', 'Post -2', 'Destination -2', 'Audience none', 'Budget -1', 'Schedule -1', 'Special category none'], 'a boost has its own three steps');
   });
+  // Redesign round 4 (ROUND3.md section 4, item 2; wireframe 14): the row (on phones: the grid) of section buttons is
+  // one navigation, a list beside the page on a computer and a bar at the bottom of a phone, as the new layout has.
+  await test('round 4 classic Studio navigation: the sections are one navigation without "New request", it steps aside while a request is written, and a request left unsent is found again under "Not sent yet"', async () => {
+    const f = studioFixture();
+    const { sandbox, state, run } = f;
+    state.language = 'en';
+    state.currentUser.permissions = { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn', 'deleteOwn', 'stopOwn'] };
+    sandbox.hasSubscription = () => true;
+    sandbox.renderStudioV2View = () => '';
+    for (const quiet of ['refreshAdsStudioLimits', 'refreshAdsStudioWallet', 'adsStudioLoadResults', 'socialStudioEnsureLoaded']) sandbox[quiet] = () => {};
+    for (const empty of ['renderAdsStudioWallet', 'renderAdsStudioConnections', 'renderSocialStudioOverviewSection', 'renderAdsStudioResultsCard', 'adsStudioClassicWhatsapp']) sandbox[empty] = () => '';
+    const nav = () => String(run('renderAdsStudioTabBar()'));
+    const names = () => Array.from(nav().matchAll(/<button type="button" aria-current="(page|false)" onclick="setAdsStudioTab\('([a-z]+)'\)" class="sc-tab"><i data-lucide="[a-z-]+"><\/i><span>([^<]+)<\/span>(?:<b>(\d+)<\/b>)?<\/button>/g),
+      m => `${m[3]}${m[1] === 'page' ? '*' : ''}${m[4] === undefined ? '' : ` (${m[4]})`}`);
+    // A customer: four sections (five with Help), no "New request", and it is a navigation, not a set of tabs.
+    assert.ok(/^\s*<nav class="studio-section-tabs sc-nav" aria-label="Ads Studio sections">/.test(nav()) && !/role="tab/.test(nav()) && !nav().includes('aria-selected'));
+    assert.deepEqual(names(), ['Home*', 'My ads', 'Posts', 'Replies']);
+    run("_adsStudioActiveTab = 'campaigns'");
+    assert.deepEqual(names(), ['Home', 'My ads*', 'Posts', 'Replies']);
+    state.language = 'ar';
+    assert.ok(nav().includes('aria-label="أقسام استوديو الإعلانات"'));
+    assert.deepEqual(names(), ['الرئيسية', 'إعلاناتي*', 'المنشورات', 'الردود']);
+    state.language = 'en';
+    // Staff: the review queue with its count, last.
+    state.currentUser.permissions.adCampaignRequests.push('review');
+    state.adCampaignRequests = [{ id: 'q1', name: 'Waiting', status: 'Submitted', createdBy: 'someone', submittedAt: '2026-11-20T08:00:00Z' }];
+    assert.deepEqual(names().slice(-1), [`Review Queue (${run('adsStudioReviewQueue().length')})`]);
+    assert.equal(names().length, 5, 'the four sections and the queue');
+    state.currentUser.permissions.adCampaignRequests.pop();
+    state.adCampaignRequests = [];
+    // "New request" stays an address of the Studio (a link, a reload), and it is the main button of Home and My ads.
+    assert.ok(run("adsStudioTabsForUser().some(tab => tab.id === 'builder')"));
+    const newRequest = `<button type="button" onclick="beginAdsStudioCampaign(); setAdsStudioTab('builder')" class="studio-v2-action is-primary"><i data-lucide="plus"></i>New request</button>`;
+    assert.ok(String(run('renderAdsStudioDashboard()')).includes(newRequest) && String(run('renderAdsStudioCampaigns()')).includes(newRequest));
+    // The page: the navigation and the section share one body; while a request is written the navigation steps aside.
+    run("_adsStudioActiveTab = 'dashboard'");
+    let page = String(run('renderAdsStudioView()'));
+    assert.ok(/<div class="sc-body">\s*<nav class="studio-section-tabs sc-nav"[\s\S]*<\/nav>\s*<div class="sc-main">/.test(page), 'navigation, then the section');
+    run("beginAdsStudioCampaign(); _adsStudioActiveTab = 'builder'");
+    assert.equal(nav(), '');
+    page = String(run('renderAdsStudioView()'));
+    assert.ok(page.includes('<div class="sc-body is-focus">') && !page.includes('sc-nav') && page.includes(`onclick="setAdsStudioTab('campaigns')"`) && page.includes('Close'), 'the request has the page to itself, with its own Close');
+
+    // A request left unsent. Nothing typed: nothing to come back to.
+    const open = alone => String(run(`renderAdsStudioOpenDraft(${alone ? 'true' : ''})`));
+    run("_adsStudioActiveTab = 'campaigns'");
+    assert.equal(open(true), '');
+    // A name typed, then another section: one line, in the words of "Needs you", that opens the same request again.
+    run("_adsStudioDraft.name = 'Winter & co'");
+    assert.equal(open(), `<div class="sc-need" data-ads-studio-open-draft="1"><p><b>Not sent yet: Winter &amp; co</b></p><button type="button" onclick="setAdsStudioTab('builder')" class="studio-v2-action">Continue</button></div>`);
+    assert.equal(open(true), `<div class="glass-panel sc-needs mb-4">${open()}</div>`);
+    assert.ok(String(run('renderAdsStudioCampaigns()')).includes(`<section>\n      ${open(true)}<div class="glass-panel sc-find">`), 'My ads, where Close leads, shows it first');
+    let home = String(run('renderAdsStudioDashboard()'));
+    assert.ok(home.includes(`<h2>Needs you</h2>\n        ${open()}`), 'Home lists it first under "Needs you"');
+    state.language = 'ar';
+    assert.ok(open().includes('<b>لم يُرسل بعد: Winter &amp; co</b>') && open().includes('>أكمله</button>'));
+    state.language = 'en';
+    run("setAdsStudioTab('builder')");
+    assert.deepEqual([run('_adsStudioActiveTab'), run('_adsStudioDraft.name')], ['builder', 'Winter & co'], 'Continue opens it with nothing lost');
+    assert.equal(open(true), '', 'not while it is on screen');
+    // No name yet, but past the first step: still a request to come back to.
+    run("_adsStudioDraft.name = ''; _adsStudioWizardStep = 2; _adsStudioActiveTab = 'dashboard'");
+    assert.ok(open().includes('<b>Not sent yet: Untitled campaign</b>'));
+    // A saved draft that is open with changes is listed once: the open one, which keeps the changes.
+    const draft = { id: 'd1', name: 'Saved name', status: 'Draft', createdBy: 'cust1', objective: 'messages', platforms: ['facebook'], budgetType: 'lifetime', budgetMinorUSD: 3500, durationDays: 7, _lastModified: 5 };
+    state.adCampaignRequests = [draft];
+    run("_adsStudioWizardStep = 1; _adsStudioEditingId = 'd1'; _adsStudioDraft.name = 'Saved name, changed'");
+    const needs = () => { const all = String(run('renderAdsStudioDashboard()')); const at = all.indexOf('data-ads-studio-needs="1"'); return at < 0 ? '' : all.slice(at, all.indexOf('class="sc-start"', at)); };
+    assert.equal((needs().match(/class="sc-need/g) || []).length, 1);
+    assert.ok(needs().includes('Not sent yet: Saved name, changed') && !needs().includes("startAdsStudioCampaign('d1')"));
+    run("_adsStudioDraft = null; _adsStudioEditingId = ''");
+    assert.ok(needs().includes('Not sent yet: Saved name</b>') && needs().includes("startAdsStudioCampaign('d1')") && !needs().includes('data-ads-studio-open-draft'), 'with nothing open, the saved draft is the line');
+    state.adCampaignRequests = [];
+    assert.equal(needs(), '', 'nothing waiting: no "Needs you"');
+
+    // The styles: a bar fixed at the bottom of a phone (inside the safe areas, away while the keyboard is open),
+    // a list beside the page from 901 px, names that wrap between words only, items at least 44 px tall.
+    const root = path.join(__dirname, '..');
+    const css = fs.readFileSync(path.join(root, 'assets', 'ads-workspace.css'), 'utf8');
+    assert.equal(fs.readFileSync(path.join(root, 'www', 'assets', 'ads-workspace.css'), 'utf8'), css, 'the phone apps carry the same styles');
+    assert.ok(/\.ui-workspace \.studio-classic \.sc-nav \{ position: fixed; right: 0; bottom: 0; left: 0; z-index: 38; display: grid; grid-auto-flow: column; grid-auto-columns: minmax\(0, 1fr\);[^}]*padding: 6px max\(6px, var\(--app-safe-right, 0px\)\) max\(6px, var\(--app-safe-bottom, 0px\)\) max\(6px, var\(--app-safe-left, 0px\)\);/.test(css));
+    assert.ok(css.includes('body.keyboard-open .sc-nav { display: none !important; }'));
+    assert.ok(/\.ui-workspace \.studio-classic \.sc-tab \{[^}]*min-height: 56px;[^}]*font-size: 11px;/.test(css) && css.includes('.sc-tab > span { display: block; max-width: 100%; overflow-wrap: normal; word-break: normal; hyphens: none; }'));
+    assert.ok(css.includes('@media (max-width: 359px) { .ui-workspace .studio-classic .sc-tab:first-child:nth-last-child(n+6), .ui-workspace .studio-classic .sc-tab:first-child:nth-last-child(n+6) ~ .sc-tab { font-size: 9.5px; } }'), 'six names fit the narrowest phones in both languages (the browser test measures them)');
+    // The page itself keeps the room of a bottom bar free on phones, safe area included: the last line of a section is never under the bar.
+    assert.ok(/\.app-content \{\s*padding-bottom: calc\(5\.25rem \+ var\(--app-safe-bottom\)\) !important;/.test(fs.readFileSync(path.join(root, 'style.css'), 'utf8')) && !/\.sc-body[^{]*\{[^}]*padding-bottom/.test(css));
+    const wide = css.slice(css.indexOf('@media (min-width: 901px) {\n  .sc-body {'));
+    assert.ok(wide.startsWith('@media (min-width: 901px) {\n  .sc-body { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; align-items: start; }\n  .sc-body.is-focus { grid-template-columns: minmax(0, 1fr); }\n  .ui-workspace .studio-classic .sc-nav { position: sticky; top: 16px; right: auto; bottom: auto; left: auto;'));
+    assert.ok(/\.ui-workspace \.studio-classic \.sc-tab \{ flex-direction: row;[^}]*min-height: 46px;/.test(wide.slice(0, 900)));
+    assert.ok(!fs.readFileSync(path.join(root, 'style.css'), 'utf8').includes('.studio-section-tabs'), 'the old grid of section buttons has no rule left');
+  });
+
 
   await test('round 3 classic Studio: the Facebook and Instagram bar is drawn only when a comment was answered in the last 24 hours (never 50% and 50% of nothing)', async () => {
     const f = socialFixture();

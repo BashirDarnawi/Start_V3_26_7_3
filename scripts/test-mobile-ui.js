@@ -784,8 +784,10 @@ check('clothes line items use responsive named grids',
   ['clothes-variant-row', 'clothes-shipment-subgrid', 'clothes-order-subgrid']
     .every(token => clothes.includes(token) && css.includes(`.${token}`)));
 check('Ads Studio wizard is mobile-first and touch accessible',
-  adsStudio.includes('studio-section-tabs flex flex-wrap gap-2') &&
-  css.includes('.ui-workspace .studio-section-tabs { display: grid;') &&
+  // Redesign round 4: the classic sections are one navigation (a bar at the bottom of a phone, a list beside the page
+  // on a computer); the grid of section buttons and its rules in style.css are gone.
+  adsStudio.includes('<nav class="studio-section-tabs sc-nav" aria-label=') && !css.includes('.studio-section-tabs') &&
+  read('assets/ads-workspace.css').includes('.ui-workspace .studio-classic .sc-nav { position: fixed; right: 0; bottom: 0; left: 0;') &&
   adsStudio.includes('touch-target min-h-12') &&
   adsStudio.includes('grid gap-3 sm:grid-cols-2') &&
   adsStudio.includes('max-w-4xl mx-auto') &&
