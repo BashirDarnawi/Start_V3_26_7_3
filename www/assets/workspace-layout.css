@@ -456,11 +456,14 @@ pre.font-sans { font-family: inherit; }
   .ui-workspace .workspace-filter-toggle > :is(i, svg):last-child { display: none; }
   .ui-workspace .smart-filter-chip > :is(i, svg) { display: none; }
 
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > .col-span-2 { grid-column: auto; }
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { height: 100%; padding: 10px; }
+  /* The three Customers totals share a row while they fit. A tile is never narrower than its amount (one line, by
+     the project's rule) or than the longest word of its label, so nothing is cut: with longer amounts or on a
+     narrower phone the row becomes two rows, then three. (Three fixed thirds cut "12,350.00 LYD" at 360 px.) */
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > * { flex: 1 1 0; min-width: min-content; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { height: 100%; padding: 10px 8px; }
   .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-layout > :last-child { display: none; }
-  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-label { font-size: 10px; line-height: 1.35; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-label { font-size: 10px; line-height: 1.35; overflow-wrap: normal; }
   .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-value { margin-top: 4px; font-size: 15px; line-height: 1.35; }
 
   /* (.ops-workspace.ops-deliveries: one class more than the rules in operations-workspace.css, which load later.) */
@@ -793,6 +796,18 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
 @media (max-width: 900px) {
   .ui-workspace .page-header.has-note { grid-template-columns: minmax(0, 1fr); }
   .ui-workspace .page-header.has-note > div { justify-self: stretch; min-width: 0; }
+}
+
+/* The narrowest phones (under 360 px; found by the round-3 scan at 320 px). The four Deliveries tiles that share a
+   row on phones cut "Assignment" and "Completed" in two: there they take two rows of two. */
+@media (max-width: 359px) {
+  .ops-workspace.ops-deliveries > .ops-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 389px) {
+  /* Phones of 360 and 375 px keep the three Customers totals in one row for amounts up to five digits. */
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { gap: 4px; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-card { padding-inline: 6px; }
+  .ui-workspace [data-view="customers"] .page-header + .grid-cols-2 .workspace-stat-value { font-size: 14px; }
 }
 
 /* Home, "Delivery Tracking": the three small tiles keep their label in one piece. At 1,100 px "Completed" was

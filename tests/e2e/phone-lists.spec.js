@@ -53,7 +53,12 @@ test('on a phone the Filters button shares a row with the search and the first c
   await expect(filters).toHaveAccessibleName(/Hide filters/);
   await filters.click();
   await expect(page.locator('#customers-advanced-filters')).toBeHidden();
-  // The three totals share one row.
+  // The three totals share one row while their amounts fit (the test below covers amounts that do not). What they
+  // hold depends on the records other tests have saved, up to eight digits in a full run, so the two money totals
+  // are first given an ordinary amount (the page's text only): the positions below are those of an ordinary day.
+  await page.evaluate(() => document.querySelectorAll('#workspace-view-content .workspace-stat-card .workspace-stat-value').forEach((value, index) => {
+    if (index) document.createTreeWalker(value, NodeFilter.SHOW_TEXT).nextNode().nodeValue = '12,350.00 LYD';
+  }));
   const tiles = await page.locator('#workspace-view-content .workspace-stat-card').evaluateAll(cards => cards.map(card => Math.round(card.getBoundingClientRect().top)));
   expect(tiles.length).toBe(3);
   expect(Math.max(...tiles) - Math.min(...tiles)).toBeLessThanOrEqual(1);
@@ -117,6 +122,126 @@ test('on a phone the Pages title and its count keep their own row above the acti
     expect(facts.header, `${language}: the header is no taller than a third of the screen`).toBeLessThan(Math.round(page.viewportSize().height / 3));
     await expect(page.locator('.page-header .workspace-paused')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+  }
+  await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
+  expect(errors).toEqual([]);
+});
+
+// Redesign round 3, the final check. Two things a phone must never do to a total: cut an amount off at the edge
+// of its tile, or cut a label inside a word. With three fixed thirds, "12,350.00 LYD" lost its currency behind
+// the tile's edge at 360 and 390 px, and "Outstanding" was drawn on two lines at 320 px. The tiles now share a
+// row only while their amounts fit, and take more rows when they do not.
+test('on a phone the Customers totals are never cut: an amount of any length stays whole on one line, and the tiles take more rows when they must', async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  await page.evaluate(() => navigateTo('customers'));
+  await expect.poll(() => page.evaluate(() => state.currentView)).toBe('customers');
+  await expect(page.locator('#workspace-view-content .workspace-stat-card')).toHaveCount(3);
+  // Writes the amount into the two money totals (the page's text only; nothing is saved), then measures each tile.
+  const measure = amount => page.evaluate(text => {
+    const found = [];
+    const cards = [...document.querySelectorAll('#workspace-view-content .workspace-stat-card')];
+    const rows = cards.map((card, index) => {
+      const value = card.querySelector('.workspace-stat-value');
+      const leaf = document.createTreeWalker(value, NodeFilter.SHOW_TEXT).nextNode();
+      if (text && index > 0) leaf.nodeValue = /د\.ل/.test(leaf.nodeValue) ? `${text} د.ل` : `${text} LYD`;
+      const range = document.createRange();
+      range.selectNodeContents(value);
+      const rects = [...range.getClientRects()].filter(rect => rect.width > 0);
+      const box = card.getBoundingClientRect();
+      const name = `"${value.textContent.trim()}"`;
+      if (Math.max(...rects.map(rect => rect.right)) > box.right - 0.5 || Math.min(...rects.map(rect => rect.left)) < box.left + 0.5) found.push(`${name} is cut by the edge of its tile`);
+      if (new Set(rects.map(rect => Math.round(rect.top))).size > 1) found.push(`${name} is on two lines`);
+      const label = card.querySelector('.workspace-stat-label');
+      const words = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+      for (let node = words.nextNode(); node; node = words.nextNode()) {
+        let at = 0;
+        for (const piece of node.nodeValue.split(/(\s+)/)) {
+          if (piece.trim()) {
+            const word = document.createRange();
+            word.setStart(node, at);
+            word.setEnd(node, at + piece.length);
+            if (new Set([...word.getClientRects()].map(rect => Math.round(rect.top))).size > 1) found.push(`the label word "${piece}" is cut in two`);
+          }
+          at += piece.length;
+        }
+      }
+      return Math.round(box.top);
+    });
+    return { found, rows: new Set(rows).size, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  }, amount);
+
+  for (const language of ['en', 'ar']) {
+    await page.evaluate(lang => { if (state.language !== lang) toggleLanguage(); }, language);
+    await expect(page.locator('html')).toHaveAttribute('dir', language === 'ar' ? 'rtl' : 'ltr');
+    // First as the page drew them (the language change has just drawn them again), then longer and longer.
+    for (const amount of ['', '12,350.00', '123,456.00', '1,234,567.89']) {
+      for (const width of [320, 344, 360, 375, 390, 412, 430]) {
+        await page.setViewportSize({ width, height: 844 });
+        const tiles = await measure(amount);
+        const where = `${width}px, ${language}, ${amount || 'as drawn'}`;
+        expect(tiles.found, where).toEqual([]);
+        expect(tiles.sideways, `${where}: the page does not scroll sideways`).toBe(0);
+        // The reason the three share a row at all (the first record sooner): they still do for five-digit amounts.
+        // (As drawn they hold whatever other tests have saved, so nothing is expected of the rows then.)
+        if (width >= 360 && amount === '12,350.00') expect(tiles.rows, `${where}: the three totals share one row`).toBe(1);
+        // And they give the row up when the amounts need the room (certain in English at 320 px; Arabic is shorter).
+        if (width === 320 && language === 'en' && amount === '1,234,567.89') expect(tiles.rows, `${where}: the totals take more than one row`).toBeGreaterThan(1);
+      }
+    }
+  }
+  await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
+  expect(errors).toEqual([]);
+});
+
+// The same check for the short labels of other tiles that share a row on a phone. At 320 px four of them cut a
+// word in two: "Deliveries" on the dashboard, "Assignment" and "Completed" on Deliveries, "Creates", "Updates"
+// and "Deletes" on Audit logs.
+test('on the narrowest phones no tile label is cut inside a word: the dashboard, Deliveries and Audit logs at 320 and 360 px, in English and Arabic', async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 360, height: 740 });
+  await signIn(page);
+  const cutWords = selector => page.evaluate(labels => {
+    const found = [];
+    const shown = [...document.querySelectorAll(labels)].filter(label => label.getClientRects().length);
+    for (const label of shown) {
+      const words = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+      for (let node = words.nextNode(); node; node = words.nextNode()) {
+        let at = 0;
+        for (const piece of node.nodeValue.split(/(\s+)/)) {
+          if (piece.trim().length > 2) {
+            const word = document.createRange();
+            word.setStart(node, at);
+            word.setEnd(node, at + piece.length);
+            if (new Set([...word.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size > 1) found.push(piece);
+          }
+          at += piece.length;
+        }
+      }
+    }
+    return { labels: shown.length, found, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  }, selector);
+  const screens = [['control-center', '.management-door strong'], ['deliveries', '.ops-pipeline > div > span:not(.ops-step)'], ['audit', '.audit-facts dt']];
+  for (const language of ['en', 'ar']) {
+    for (const [view, labels] of screens) {
+      await page.evaluate(name => navigateTo(name), view);
+      await expect.poll(() => page.evaluate(() => state.currentView)).toBe(view);
+      await page.evaluate(lang => { if (state.language !== lang) toggleLanguage(); }, language);
+      await expect(page.locator('html')).toHaveAttribute('dir', language === 'ar' ? 'rtl' : 'ltr');
+      await expect(page.locator(labels).first()).toBeVisible();
+      for (const width of [320, 360]) {
+        await page.setViewportSize({ width, height: 740 });
+        const result = await cutWords(labels);
+        expect(result.labels, `${view} shows its labels at ${width}px`).toBeGreaterThan(2);
+        expect(result.found, `${view} at ${width}px in ${language}`).toEqual([]);
+        expect(result.sideways, `${view} at ${width}px in ${language}: the page does not scroll sideways`).toBe(0);
+      }
+    }
   }
   await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
   expect(errors).toEqual([]);

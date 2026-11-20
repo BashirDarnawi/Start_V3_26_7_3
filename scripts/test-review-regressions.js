@@ -2606,14 +2606,14 @@ async function main() {
     assert.ok(/@media \(max-width: 900px\) \{[^@]*\.ui-workspace \.page-header \{ display: grid; grid-template-columns: minmax\(0, 1fr\) auto;/.test(style));
   });
 
-  await test('round 3 Studio names under circles: a stage name and a step name wrap between words and are never cut inside one (before: "Approved" was drawn "Approve / d" on phones), and the current stage\'s name is larger only where six names have the room', async () => {
+  await test('round 3 Studio names under circles: a stage name and a step name (new layout and classic builder) wrap between words and are never cut inside one (before: "Approved" was drawn "Approve / d" on phones), and the current stage\'s name is larger only where six names have the room', async () => {
     const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'ads-workspace.css'), 'utf8');
     const rule = selector => {
       const at = css.indexOf(`\n${selector} {`);
       assert.ok(at >= 0, `${selector} has its own rule`);
       return css.slice(at, css.indexOf('}', at) + 1);
     };
-    for (const selector of ['.studio-ads-track-name', '.studio-v2-step-name']) {
+    for (const selector of ['.studio-ads-track-name', '.studio-v2-step-name', '.studio-wizard-step-label']) {
       const own = rule(selector);
       assert.ok(own.includes('overflow-wrap: normal;') && own.includes('word-break: normal;') && own.includes('hyphens: none;'), `${selector}: a word is not cut in two`);
       assert.ok(own.includes('width: 100%;') && own.includes('min-width: min-content;') && !own.includes('max-width'), `${selector}: one word wider than its column reaches into the gaps on both sides`);
@@ -2624,10 +2624,47 @@ async function main() {
     // Their rows centre a name that is wider than its column (so it leaves the column on both sides equally).
     assert.ok(/\n\.studio-ads-track-step \{[^}]*display: flex; flex-direction: column; align-items: center;/.test(css));
     assert.ok(/\n\.studio-v2-step \{[^}]*display: flex; flex-direction: column; align-items: center;/.test(css));
+    assert.ok(/\n\.studio-wizard-step \{[^}]*display: flex; flex-direction: column; align-items: center;/.test(css));
+    // The classic builder shows its labels on phones (round 3), with the same rule; where they stay hidden they take no room.
+    assert.ok(css.includes('.studio-classic .studio-wizard-step-label { position: static; width: 100%; min-width: min-content;'));
+    assert.ok(css.includes('.studio-wizard-step-label { position: absolute; width: 1px; min-width: 0; height: 1px;'));
     // The larger current name: from 600 px only.
     const larger = '.studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-name { font-size: 12px; }';
     assert.equal(css.split(larger).length - 1, 1);
     assert.ok(css.includes(`@media (min-width: 600px) {\n  ${larger}\n}`), 'on a phone the current name keeps the size of the others');
+  });
+
+  await test('round 3 narrow phones: the three Customers totals share a row only while their amounts fit, so an amount is never cut by the edge of its tile (before: "12,350.00 LYD" lost its currency at 360 px); and under 360 px the tiles and buttons that cut a word in two give it room', async () => {
+    const read = name => fs.readFileSync(path.join(__dirname, '..', ...name.split('/')), 'utf8');
+    const layout = read('assets/workspace-layout.css'), management = read('assets/management-workspace.css'), studio = read('assets/ads-workspace.css');
+    // The media query a rule sits in (the nearest "@media" line above it).
+    const within = (css, rule) => {
+      const at = css.indexOf(rule);
+      assert.ok(at >= 0, `missing: ${rule}`);
+      assert.equal(css.indexOf(rule, at + 1), -1, `written twice: ${rule}`);
+      const media = css.lastIndexOf('\n@media', at);
+      return css.slice(media + 1, css.indexOf('{', media) + 1);
+    };
+    const row = '.ui-workspace [data-view="customers"] .page-header + .grid-cols-2';
+    // A wrapping row whose tiles are at least as wide as what they hold: the amount (one line, by the project's own
+    // rule) and the longest word of the label (which therefore may not be told to break anywhere).
+    assert.equal(within(layout, `  ${row} { display: flex; flex-wrap: wrap; gap: 6px; }`), '@media (max-width: 600px) {');
+    assert.equal(within(layout, `  ${row} > * { flex: 1 1 0; min-width: min-content; }`), '@media (max-width: 600px) {');
+    assert.equal(within(layout, `  ${row} .workspace-stat-label { font-size: 10px; line-height: 1.35; overflow-wrap: normal; }`), '@media (max-width: 600px) {');
+    assert.ok(!layout.includes(`${row} { grid-template-columns`), 'no fixed thirds: they cut the amount that did not fit');
+    assert.ok(read('style.css').includes('.workspace-stat-value, .workspace-stat-value bdi { white-space: nowrap; overflow-wrap: normal; }'), 'the amount stays on one line');
+    // 360 and 375 px phones: a little less padding and a 14px amount keep five-digit totals in one row.
+    for (const rule of [`  ${row} { gap: 4px; }`, `  ${row} .workspace-stat-card { padding-inline: 6px; }`, `  ${row} .workspace-stat-value { font-size: 14px; }`]) {
+      assert.equal(within(layout, rule), '@media (max-width: 389px) {');
+    }
+    // Under 360 px: four Deliveries tiles and four Audit tiles take two rows of two; a dashboard door and a classic
+    // payment method give up side padding.
+    assert.equal(within(layout, '  .ops-workspace.ops-deliveries > .ops-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }'), '@media (max-width: 359px) {');
+    assert.equal(within(management, '  .audit-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }'), '@media (max-width: 359px) {');
+    assert.equal(within(management, '  .management-door { padding: 12px 9px; gap: 7px; }'), '@media (max-width: 359px) {');
+    assert.equal(within(studio, '  .ads-studio-method-label { gap: 8px; padding-inline: 8px; }'), '@media (max-width: 359px) {');
+    // The two Health buttons that share a row from 360 px.
+    assert.ok(studio.includes('\n.studio-desk-actions > .studio-v2-action { flex: 1 1 10rem; gap: 8px; padding-inline: 14px; }'));
   });
 
   await test('round 3 Escape: the key closes the details panel beside a list only when nothing lies over the page and the focus is not in a field; the command palette, a dialog and an open menu keep their turn before it', async () => {

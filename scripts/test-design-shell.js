@@ -401,7 +401,7 @@ check('round 3: filters in force are chips above the folded panel, and Home offe
   // It must not reach the panel's own Close button (hidden below 1280 px) or a button with a word.
   assert(!/\.shell-row-body button:has\(> (svg|i):only-child\)/.test(icons));
 });
-check('phones: the Filters button sits beside the search, Customers totals share one row, and the delivery log comes before the money summary', () => {
+check('phones: the Filters button sits beside the search, Customers totals share one row while they fit, and the delivery log comes before the money summary', () => {
   const start = layoutCss.indexOf('Phones: the first record sooner (redesign round 2');
   const rule = layoutCss.slice(start, layoutCss.indexOf('/* Home (finding B-17)', start));
   assert(start > 0 && /\*\/\n@media \(max-width: 600px\) \{/.test(rule), 'the rules apply up to 600 px only');
@@ -411,8 +411,11 @@ check('phones: the Filters button sits beside the search, Customers totals share
   assert(rule.includes('.ui-workspace .smart-filter-primary > .smart-filter-chips { order: 3; }'));
   // "& sort" stays in the button's name for screen readers: clipped, never display:none.
   assert(rule.includes('.ui-workspace .workspace-filter-toggle > span > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }'));
-  // Customers: three totals in one row.
-  assert(rule.includes('.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }'));
+  // Customers: the three totals share one row while their amounts fit. Three fixed thirds cut an amount that did
+  // not fit ("12,350.00 LY" at 360 px), so the row wraps and a tile is never narrower than what it holds (round 3).
+  assert(rule.includes('.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 { display: flex; flex-wrap: wrap; gap: 6px; }'));
+  assert(rule.includes('.ui-workspace [data-view="customers"] .page-header + .grid-cols-2 > * { flex: 1 1 0; min-width: min-content; }'));
+  assert(!rule.includes('.page-header + .grid-cols-2 { grid-template-columns'));
   // Deliveries: heading, the four stage counters, the log, then the money summary. Nothing is hidden but the step numbers.
   const order = name => Number((rule.match(new RegExp(`\\.ops-workspace\\.ops-deliveries > ${name} \\{ order: (\\d)`)) || [])[1]);
   assert.deepEqual([order('\\.ops-hero'), order('\\.ops-pipeline'), order('\\.ops-board'), order(':is\\(\\.ops-kpi-rail, \\.ops-fee-strip\\)')], [1, 2, 3, 4]);

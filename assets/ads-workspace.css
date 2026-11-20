@@ -35,7 +35,8 @@
 .studio-wizard-step:first-child::before { inset-inline-start: 50%; }
 .studio-wizard-step:last-child::before { inset-inline-end: 50%; }
 .studio-wizard-step-number { display: grid; place-items: center; z-index: 1; width: 36px; height: 36px; border-radius: 50%; border: 2px solid var(--ui-line, #e2e7f1); background: var(--ui-surface, #fff); font-size: 13px; font-weight: 750; }
-.studio-wizard-step-label { font-size: 11px; font-weight: 650; text-align: center; overflow-wrap: anywhere; line-height: 1.5; }
+/* As for the names under the new layout's circles: a label wraps between words and is never cut inside one. */
+.studio-wizard-step-label { width: 100%; min-width: min-content; font-size: 11px; font-weight: 650; text-align: center; overflow-wrap: normal; word-break: normal; hyphens: none; line-height: 1.5; }
 .studio-wizard-step.is-current { color: var(--ui-accent, #0649ed); }
 .studio-wizard-step.is-current .studio-wizard-step-number { background: #0649ed; border-color: #0649ed; color: white; }
 .studio-wizard-step.is-complete .studio-wizard-step-number { background: var(--ui-accent-soft, #eaf0ff); border-color: var(--ui-accent, #0649ed); color: var(--ui-accent, #0649ed); }
@@ -57,8 +58,13 @@
 .studio-wallet-request-actions :is(button, label) { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .studio-wallet-charge-preview > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .studio-wallet-charge-preview > input { flex: 0 1 144px; }
+@media (max-width: 359px) {
+  /* Classic "Add money" on the narrowest phones: two payment methods share a row, and the bank's name under each
+     ("Jumhouria bank mobile wallet") was 3 px too wide for its place and was cut in two. */
+  .ads-studio-method-label { gap: 8px; padding-inline: 8px; }
+}
 @media (max-width: 599px) {
-  .studio-wizard-step-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .studio-wizard-step-label { position: absolute; width: 1px; min-width: 0; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .workspace-wallet-row, .workspace-subscription-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .workspace-wallet-amount { text-align: start; }
   .workspace-subscription-actions { justify-content: space-between; }
@@ -713,7 +719,8 @@ textarea.studio-help-input { resize: vertical; }
 .studio-desk-meta-icon { width: 16px; height: 16px; flex-shrink: 0; }
 .studio-desk-stage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0; }
 .studio-desk-actions { display: flex; flex-wrap: wrap; gap: 8px; max-width: 100%; }
-.studio-desk-actions > .studio-v2-action { flex: 1 1 10rem; gap: 8px; }
+/* Two of these share a row from 360 px: with 22 px at each side "Diagnostics" was 3 px too wide there and was cut in two. */
+.studio-desk-actions > .studio-v2-action { flex: 1 1 10rem; gap: 8px; padding-inline: 14px; }
 .studio-desk-decision-actions > .studio-v2-action { flex-basis: 8rem; }
 .studio-v2-action.studio-desk-small { flex: 0 1 auto; min-height: 44px; padding: 8px 14px; font-size: 14px; gap: 6px; }
 .studio-v2-action.studio-desk-more { align-self: center; }
@@ -1070,7 +1077,7 @@ html.dark .studio-classic { --studio-slate-fg: #cbd5e1; --studio-amber-fg: #fcd3
   .sc-icon { min-width: 40px; height: 40px; }
   .sc-need > p { flex-basis: 9rem; }
   .sc-review { grid-template-columns: minmax(0, 1fr); }
-  .studio-classic .studio-wizard-step-label { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; font-size: 10.5px; }
+  .studio-classic .studio-wizard-step-label { position: static; width: 100%; min-width: min-content; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; font-size: 10.5px; }
   .sc-card { padding: 14px; }
   .sc-actions { flex: 1 1 100%; }
   .sc-actions > .studio-v2-action { flex: 1 1 auto; }

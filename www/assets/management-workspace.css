@@ -288,3 +288,9 @@ html.dark .management-alert { border-color: #6b2a3a; background: #3a1b25; }
   .management-doors { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
   .management-door { padding: 12px; gap: 9px; }
 }
+@media (max-width: 359px) {
+  /* The narrowest phones (found by the round-3 scan at 320 px): "Deliveries" was 4 px wider than its place in a
+     door and was cut in two; four audit tiles in a row cut "Creates", "Updates" and "Deletes". */
+  .management-door { padding: 12px 9px; gap: 7px; }
+  .audit-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
