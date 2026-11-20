@@ -1712,7 +1712,8 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   read('src/systems/ads_studio/15c-ads-studio.js').includes("_adsStudioEditingBaseline || current._lastModified") &&
   read('src/systems/ads_studio/15c-ads-studio.js').includes("Math.round(rate * 10000) / 10000) / 100") &&
   clothes.includes("clothes-shipment-editing-version") &&
-  read('src/16-actions-io.js').includes("if (e?.status === 405 && /coverage/i.test(String(e?.message || ''))) throw new Error(String(e.message));") &&
+  // The server-import path that had to pass a "coverage" refusal on was removed in November 2026: it must stay gone.
+  !read('src/16-actions-io.js').includes('importDataToServer') &&
   read('src/01c-native-services.js').includes('androidBiometryStrength: 1') &&
   read('src/09-api-auth.js').includes('consumeSession: !!consumeSession') &&
   read('src/10-live-sync.js').includes('maybeCompleteAppLoginHandoff(user, true)') &&

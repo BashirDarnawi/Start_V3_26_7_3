@@ -3306,7 +3306,10 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   assert(built.includes('await handleServerAuthExpired(requestSessionIdentity);'), 'authenticated 401 responses do not trigger a secure local wipe');
   assert(built.includes('await wipeAuthenticatedServerDataFromClient();'), 'session expiry does not await the current cache-namespace wipe');
   assert(built.includes("backupScope: serverPartialSnapshot ? 'client-cache-partial' : 'full-local'"), 'server export is still mislabeled as a full backup');
-  assert(built.includes('Users, wallet/subscription history, and audit logs were not restored.'), 'server import still claims a false full restore');
+  // The server-import path was removed in November 2026 (it could not run: importData() stops first
+  // with a server). If one comes back it must be reviewed again: it may not claim a full restore.
+  assert(!built.includes('importDataToServer') && built.split('apiAdminBulkImport(').length - 1 === 1, 'a server import path is back in the bundle (the bulk-import request is defined once and called nowhere)');
+  assert(built.includes("isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled'") && /function importData\(\) \{\s+const isAr = state\.language === 'ar';\s+if \(isServerModeEnabled\(\)\) \{/.test(built), 'importData() no longer stops first when there is a server');
   assert(!built.includes('Server does not support atomic import yet — importing record by record'), 'unsafe non-transactional server import fallback remains');
   assert(built.includes("isAr ? 'استيراد الخادم معطّل' : 'Server Import Disabled'"), 'server-mode import is not explicitly disabled');
   assert(built.includes('delete exportState.clothesOrders;'), 'server report still exports transaction-controlled clothes orders');
