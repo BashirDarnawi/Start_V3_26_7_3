@@ -30,6 +30,8 @@
     "test:render-performance": "node scripts/test-render-performance.js",
     "test:indexeddb-snapshot": "node scripts/test-indexeddb-snapshot.js",
     "test:legacy-data": "node scripts/test-legacy-data.js",
+    "texts": "node scripts/list-texts.js",
+    "test:texts": "node scripts/list-texts.js --check",
     "test:design-shell": "node scripts/test-design-shell.js",
     "test:modal-presentation": "node scripts/test-modal-presentation.js",
     "test:modal-keyboard-stability": "node scripts/test-modal-keyboard-stability.js",

@@ -5637,6 +5637,115 @@ async function main() {
     assert.ok(notes.length === 1 && notes[0].type === 'success' && notes[0].title === 'All reminded', JSON.stringify(notes));
   });
 
+  // Redesign round 4 (ROUND3.md section 4, item 8; finding B-14): every English/Arabic text of the app in one list,
+  // written from the source by scripts/list-texts.js. The words stay where they are used; the list is for reading
+  // them in one place; this check (and `npm run test:texts`) fails when it is out of date.
+  await test('round 4 text list: the reader pairs every shape the code uses, reads a choice inside a choice first, leaves no Arabic text out, and the two files on disk are current', async () => {
+    const texts = require('./list-texts.js');
+    const read = source => { const found = texts.proveComplete(texts.scanSource(source)); return { pairs: found.pairs.map(pair => `${pair.en} = ${pair.ar}`), alone: found.alone.map(item => item.ar) }; };
+    const only = (source, pairs, alone = []) => assert.deepEqual(read(source), { pairs, alone }, source);
+    // 1. a choice, either way round
+    only("const a = isAr ? 'مرحبا' : 'Hello';", ['Hello = مرحبا']);
+    only("const a = state.language === 'en' ? 'Bye' : 'وداعا';", ['Bye = وداعا']);
+    // 2. a text function, and a list whose Arabic follows its English
+    only("x = hubText('Save', 'حفظ');", ['Save = حفظ']);
+    only("const TABS = [['home', 'house', 'Home', 'الرئيسية', 'nav']];", ['Home = الرئيسية']);
+    // 3. a property and its ...Ar partner; en / ar
+    only("const tab = { id: 'posts', icon: 'send', label: 'Posts', labelAr: 'المنشورات' };", ['Posts = المنشورات']);
+    only("const name = { en: 'Bank transfer', ar: 'حوالة مصرفية' };", ['Bank transfer = حوالة مصرفية']);
+    // 4. a table of translations
+    only("const METHODS_AR = { 'Cash (LYD)': 'نقدي (د.ل)', Transfer: 'تحويل' };", ['Cash (LYD) = نقدي (د.ل)', 'Transfer = تحويل']);
+    // 5. the dictionary, joined by key
+    only("const translations = { en: { save: 'Save', back: 'Back' }, ar: { save: 'حفظ', back: 'رجوع' } };", ['Save = حفظ', 'Back = رجوع']);
+    only("const translations = { en: { save: 'Save', gap: '' }, ar: { save: 'حفظ', gap: 'فراغ', extra: 'هنا فقط' } };", ['Save = حفظ', '(gap) = فراغ', '(extra) = هنا فقط']);
+    // a choice written inside a template
+    only("el.innerHTML = `<b>${isAr ? 'نعم' : 'Yes'}</b>`;", ['Yes = نعم']);
+    // two templates paired as a whole, and the choices inside them part by part
+    only("t(`${one ? 'One' : 'Two'} left`, `بقي ${one ? 'واحد' : 'اثنان'}`);", ['${…} left = بقي ${…}', 'One = واحد', 'Two = اثنان']);
+    // …but only where both templates are built the same way
+    only("t(`${late ? 'Late' : 'On time'} now`, `الآن ${late ? 'متأخر' : hubText('On time', 'في وقته')}`);", ['${…} now = الآن ${…}', 'On time = في وقته'], ['متأخر']);
+    // a choice inside a choice is read first: the outer one is not a language choice
+    only("const note = ok ? (isAr ? 'تم' : 'Done') : '';", ['Done = تم']);
+    only("const why = failure ? (failure.status ? ` (${failure.status})` : (isAr ? ' (الشبكة)' : ' (network)')) : '';", [' (network) =  (الشبكة)']);
+    only("const mark = done ? (isAr ? 'نعم' : '✓') : 'No';", ['✓ = نعم']);
+    // a text function inside a choice is read as itself; a branch that holds both languages is not a language's side
+    only("const unit = usd ? '$' : hubText('LYD', 'د.ل');", ['LYD = د.ل']);
+    only("const label = short ? 'Qty' : pickText('Quantity', count, 'الكمية');", [], ['الكمية']);
+    // an empty English side is no English: the Arabic is listed on its own
+    only("const tail = isAr ? ' هاتف' : '';", [], [' هاتف']);
+    only("const why = !isAr ? '' : busy ? 'محاولات كثيرة.' : gone ? 'تغيّر الحساب.' : '';", [], ['محاولات كثيرة.', 'تغيّر الحساب.']);
+    only("x = hubText('', 'فقط');", [], ['فقط']);
+    only("const s = ok ? (isAr ? 'تم' : '') : 'Failed';", [], ['تم']);
+    // a call whose first text is the Arabic one is a title and a message, not a pair
+    only("showNotification('تنبيه', 'Saved ' + count);", [], ['تنبيه']);
+    // both sides built the same way: text by text, and what is the same on both sides is no pair
+    only("const s = isAr ? (n === 1 ? 'عنصر' : 'عناصر') : (n === 1 ? 'item' : 'items');", ['item = عنصر', 'items = عناصر']);
+    only("const h = isAr ? '<b>' + 'نص' + '</b>' : '<b>' + 'Text' + '</b>';", ['Text = نص']);
+    // the server's own words: the English shown instead, or the pattern when the row has none
+    only("const ROWS = [[/^Too many/, 'كثير جداً', '', 'Too many requests.'], [/^Financial period (\\S+) is closed/, 'الشهر $1 مُقفل']];",
+      ['Too many requests. = كثير جداً', "(the server's words: /^Financial period (\\S+) is closed/) = الشهر $1 مُقفل"]);
+    // Arabic with no English beside it is listed on its own, never dropped
+    only("function days(n) { if (!isAr()) return `${n} days`; if (n === 2) return 'يومان'; return `${n} أيام`; }", [], ['يومان', '${n} أيام']);
+    // what is not a text is not read as one: a comment (one line or several), a regular expression, a division
+    only("// isAr ? 'تعليق' : 'comment'\n/*\n * isAr ? 'شرح' : 'note'\n */ const t = isAr ? 'نصف' : 'half';", ['half = نصف']);
+    only("const re = /['\"`\\/]+/g; const t = isAr ? 'نصف' : 'half';", ['half = نصف']);
+    only("const half = total / 2; const t = isAr ? 'نصف' : 'half'; const quarter = total / 4;", ['half = نصف']);
+    only("const v = a?.b ?? (isAr ? 'لا' : 'No'); const w = x ?? y;", ['No = لا']);
+    // "?." is not the start of a choice
+    only("const t = isAr ? 'الاسم: ' + row?.nameAr : 'Name: ' + row?.name;", ['Name:  = الاسم: ']);
+    only("const q = isAr ? 'قال \\'نعم\\'' : 'It\\'s \"yes\"';", ["It's \"yes\" = قال 'نعم'"]);
+    // a template's own ${...} never becomes a text; a long one is shortened
+    only("const m = isAr ? `عدد ${rows.length}` : `Count ${rows.length}`;", ['Count ${rows.length} = عدد ${rows.length}']);
+    only("const m = isAr ? `عدد ${rows.filter(row => row.done && !row.gone).length}` : `Count ${rows.filter(row => row.done && !row.gone).length}`;", ['Count ${…} = عدد ${…}']);
+
+    // the safety net itself: an Arabic text that is in no pair and not listed on its own stops the script
+    assert.throws(() => texts.proveComplete({ pairs: [{ en: 'A', ar: 'أ' }], alone: [{ ar: 'ب' }], seen: ['أ', 'ب', 'ج'], arabic: 3 }), /left out 1 Arabic text\(s\), for example: ج/);
+    assert.doesNotThrow(() => texts.proveComplete({ pairs: [{ en: 'A … B', ar: 'أ … ج' }], alone: [{ ar: 'ب' }], seen: ['أ', 'ب', 'ج'], arabic: 3 }));
+
+    // The real source: every file of the manifest is read, nothing is left out (scan() throws if it were), and
+    // the two files on disk are what the script writes now.
+    const root = path.join(__dirname, '..');
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, 'src', 'manifest.json'), 'utf8'));
+    const built = texts.build();
+    assert.equal(built.found.files, manifest.files.length + Object.values(manifest.lazy).flat().length);
+    assert.equal(built.found.seen.length, built.found.arabic);
+    assert.ok(built.found.pairs.length > 7500 && built.rows.length > 5500, `pairs ${built.found.pairs.length}, different ${built.rows.length}`);
+    assert.ok(built.found.alone.length < built.found.pairs.length / 40, `Arabic on its own: ${built.found.alone.length}`);
+    assert.ok(built.found.pairs.filter(pair => pair.kind === 'permissions').length >= 240, 'the permission texts of the two files are joined by key');
+    assert.equal(fs.readFileSync(path.join(root, 'docs', 'app-texts.csv'), 'utf8'), built.csv, 'docs/app-texts.csv is out of date: npm run texts');
+    assert.equal(fs.readFileSync(path.join(root, 'docs', 'APP_TEXTS.md'), 'utf8'), built.md, 'docs/APP_TEXTS.md is out of date: npm run texts');
+    assert.equal(texts.build().csv, built.csv, 'the same source gives the same list');
+    assert.ok(built.csv.startsWith('﻿English,Arabic,Times used,Files\r\n'), 'opens in a spreadsheet with its Arabic intact');
+    for (const heading of ['## Numbers', '## The same English, more than one Arabic', '## Arabic texts with no English beside them']) assert.ok(built.md.includes(heading), heading);
+    // A pair known to be in the app, and one known inconsistency the list is there to show.
+    const line = (en, ar) => built.rows.find(row => row.en === en && row.ar === ar);
+    assert.ok(line('Classic view', 'العرض القديم') && line('Remind all overdue (${overdueCount})', 'تذكير كل المتأخرين (${overdueCount})'));
+    assert.ok(built.drift.some(list => list[0].en.toLowerCase() === 'back'), '"Back" is written with more than one Arabic');
+    // --check: 1 and two lines saying what to run when a file is missing or differs; it never writes
+    const folder = fs.mkdtempSync(path.join(require('os').tmpdir(), 'app-texts-'));
+    const files = { csv: path.join(folder, 'a.csv'), md: path.join(folder, 'a.md') };
+    const said = [];
+    const say = { log: line => said.push(`log ${line}`), error: line => said.push(`error ${line}`) };
+    assert.equal(texts.main(['--check'], files, say), 1);
+    assert.ok(!fs.existsSync(files.csv) && !fs.existsSync(files.md), '--check writes nothing');
+    assert.ok(said.length === 2 && /^error .*out of date/.test(said[0]) && /^error Run: {2}npm run texts /.test(said[1]), said.join(' | '));
+    assert.equal(texts.main([], files, say), 0);
+    assert.equal(fs.readFileSync(files.csv, 'utf8'), built.csv);
+    assert.equal(fs.readFileSync(files.md, 'utf8'), built.md);
+    assert.equal(texts.main(['--check'], files, say), 0);
+    assert.ok(/^log App texts list is up to date: \d+ places, \d+ different pairs, \d+ Arabic texts on their own, \d+ English texts with more than one Arabic\.$/.test(said[said.length - 1]), said[said.length - 1]);
+    fs.writeFileSync(files.md, `${built.md} `);
+    assert.equal(texts.main(['--check'], files, say), 1, 'one changed character is out of date');
+    fs.unlinkSync(files.csv); fs.unlinkSync(files.md); fs.rmdirSync(folder);
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    assert.equal(pkg.scripts.texts, 'node scripts/list-texts.js');
+    assert.equal(pkg.scripts['test:texts'], 'node scripts/list-texts.js --check');
+    // This check is what keeps the list current in `npm test` and in CI (it compares the two files above), so the
+    // list needs no step of its own in the release checks.
+    assert.ok(/npm run test:review-regressions/.test(pkg.scripts.test) && !/test:texts/.test(pkg.scripts.test));
+    assert.ok(/npm run texts/.test(fs.readFileSync(path.join(root, 'CONTRIBUTING.md'), 'utf8')), 'the editing guide says when to run it');
+  });
+
   // Redesign round 4 (ROUND3.md section 4, item 6; DESIGN.md section 9, wireframe 09): on a phone the one main action
   // of a screen stays in view above the bottom bar. Reminders is the screen the drawings show it on. The browser
   // test in tests/e2e/phone-lists.spec.js measures it; this one holds the markup and the rules it depends on.

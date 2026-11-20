@@ -25,6 +25,11 @@ npm run verify:mobile # 4. verify every web and native bundle matches source
 If you add/change Tailwind classes built from data (like `bg-${color}-50`),
 also update the safelist in `tailwind.config.js` and run `npm run build:css`.
 
+If you added, changed or removed a text the app shows, also run `npm run texts`.
+It rewrites `docs/app-texts.csv` and `docs/APP_TEXTS.md`: the one list of every
+English/Arabic text, made from `src/` (never edit those two files by hand).
+`npm test` fails while the list is out of date.
+
 See `docs/RELEASE_AND_SAFETY.md` for mandatory validation and the actual deployment
 path. Do not publish or migrate live records as an incidental part of a code fix.
 
