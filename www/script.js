@@ -16352,7 +16352,7 @@ function renderLogin() {
 
             <div class="flex items-center justify-between pt-1">
               ${isServerModeEnabled()
-                ? `<span class="text-xs text-slate-500">${isRTL ? 'نسيت كلمة المرور؟ تواصل مع المدير.' : 'Forgot your password? Contact an administrator.'}</span>`
+                ? `<span id="login-forgot-note" class="text-xs text-slate-500">${isRTL ? 'نسيت كلمة المرور؟ تواصل مع المدير.' : 'Forgot your password? Contact an administrator.'}</span>`
                 : `<button type="button" onclick="showPasswordResetModal()" class="text-sm font-medium alb-link">${t('forgotPassword')}</button>`}
               <button type="button" onclick="toggleLanguage()" class="text-sm font-bold text-slate-500 alb-hover-brand">
                 ${state.language === 'en' ? 'العربية' : 'English'}

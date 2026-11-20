@@ -2246,6 +2246,16 @@ function studioBuilderSendBlocked(session) {
     || ['conflict', 'locked'].includes(session.status) || !adsStudioCanUse();
 }
 
+// "What happens next", in the same words in both layouts (the classic wizard's last step shows them too, 15c).
+function studioBuilderNextLines(total, days) {
+  return [
+    studioBuilderT(`We hold ${studioLtr(studioUsd(total))} in your wallet. It is not charged yet.`, `نحجز ${studioLtr(studioUsd(total))} في محفظتك، ولا تُخصم بعد.`),
+    studioEsc(studioBuilderT('The Albayan team checks your request on working days.', 'يراجع فريق البيان طلبك في أيام العمل.')),
+    studioEsc(studioBuilderT('If it is approved we charge it and set the ad up in Meta; Meta reviews it too, usually within a day.', 'إذا وافقنا نخصم المبلغ ونجهّز الإعلان في ميتا، وتراجعه ميتا أيضاً عادةً خلال يوم.')),
+    studioEsc(studioBuilderT(`It runs ${adsStudioDaysText(days)}. What Meta does not use comes back to your wallet.`, `يعمل ${adsStudioDaysText(days)}، وما لا تصرفه ميتا يعود إلى محفظتك.`))
+  ];
+}
+
 function studioBuilderReviewStep(session) {
   const d = session.draft;
   if (typeof studioLoadMe === 'function') studioLoadMe(60000);  // the intake switch can change while the form is open
@@ -2264,12 +2274,7 @@ function studioBuilderReviewStep(session) {
   const total = studioBuilderTotalMinor(d);
   const days = Number(d.durationDays) || 0;
   const paused = studioBuilderIntakePaused();
-  const next = [
-    studioBuilderT(`We hold ${studioLtr(studioUsd(total))} in your wallet. It is not charged yet.`, `نحجز ${studioLtr(studioUsd(total))} في محفظتك، ولا تُخصم بعد.`),
-    studioEsc(studioBuilderT('The Albayan team checks your request on working days.', 'يراجع فريق البيان طلبك في أيام العمل.')),
-    studioEsc(studioBuilderT('If it is approved we charge it and set the ad up in Meta; Meta reviews it too, usually within a day.', 'إذا وافقنا نخصم المبلغ ونجهّز الإعلان في ميتا، وتراجعه ميتا أيضاً عادةً خلال يوم.')),
-    studioEsc(studioBuilderT(`It runs ${adsStudioDaysText(days)}. What Meta does not use comes back to your wallet.`, `يعمل ${adsStudioDaysText(days)}، وما لا تصرفه ميتا يعود إلى محفظتك.`))
-  ];
+  const next = studioBuilderNextLines(total, days);
   return `
           <h2 class="studio-b-title">${studioEsc(studioBuilderT('Check and send', 'راجع وأرسل'))}</h2>
           ${list}

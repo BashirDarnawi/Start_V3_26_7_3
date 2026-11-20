@@ -734,3 +734,9 @@ html.dark .ui-workspace .delivery-canceled { background: #4a2434; color: #ffa3b6
 .driver-cash > :is(i, svg) { flex: none; width: 18px; height: 18px; color: var(--ui-accent); }
 .ui-workspace #driver-job-tabs { display: flex; grid-template-columns: none; flex-wrap: wrap; }
 .ui-workspace #driver-job-tabs > .smart-filter-chip { width: auto; flex: 1 1 auto; }
+
+/* The Studio's door, round 3 (FEATURE_PRESERVATION.md section 8, item 20): one help line.
+   Once the Studio's own line is on the page ("New customer or forgot your password? …", with the
+   team's contact when one is set), the general "Contact an administrator" note under the form is
+   not shown a second time. It keeps its place so the language link stays at the end of the row. */
+body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hidden; }

@@ -319,11 +319,11 @@ function renderSocialStudioOverviewSection() {
         <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
           ${statCards.map(([value, label]) => `<div class="rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4"><div class="text-2xl font-black text-slate-900 dark:text-white" dir="ltr">${Number(value) || 0}</div><div class="text-xs text-slate-500 dark:text-slate-400">${label}</div></div>`).join('')}
         </div>
-        <div class="mt-3 flex items-center gap-3 text-xs font-bold text-slate-500" dir="ltr">
+        ${Number(stats24.commentsAnswered) > 0 ? `<div class="mt-3 flex items-center gap-3 text-xs font-bold text-slate-500" dir="ltr">
           <span class="text-blue-600">Facebook · ${Number(stats24.fbShare ?? 50)}%</span>
           <span class="flex-1 h-1.5 rounded-full bg-pink-200 dark:bg-pink-900/40 overflow-hidden"><span class="block h-full bg-blue-500" style="width:${Math.max(0, Math.min(100, Number(stats24.fbShare ?? 50)))}%"></span></span>
           <span class="text-pink-600">Instagram · ${Number(stats24.igShare ?? 50)}%</span>
-        </div>
+        </div>` : ''}
       </div>
 
       <div class="grid gap-4 lg:grid-cols-2">

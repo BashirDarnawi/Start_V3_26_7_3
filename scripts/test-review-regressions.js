@@ -1867,6 +1867,141 @@ async function main() {
     assert.ok(!shown().includes('l06') && !shown().includes('l14') && !shown().includes('l02') && shown().includes('l03') && shown().length === 15, shown().join());
     assert.ok(html.includes('Your own activity only.') && !html.includes('exportAuditLogs') && !html.includes('cleanupAuditLogs') && !html.includes('<strong>Owner</strong>'));
   });
+  await test('round 3 classic Studio: the sections are named Home, My ads and New request; a card shows one or two buttons that fit its state and keeps every other action behind "More"; the last step has Change and What happens next', async () => {
+    const f = studioFixture();
+    const { sandbox, state, run } = f;
+    state.language = 'en';
+    state.currentUser.permissions = { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn', 'deleteOwn', 'stopOwn'] };
+    sandbox.hasSubscription = () => true;
+    for (const quiet of ['refreshAdsStudioLimits', 'refreshAdsStudioWallet', 'adsStudioLoadResults', 'socialStudioEnsureLoaded']) sandbox[quiet] = () => {};
+    for (const empty of ['renderAdsStudioWallet', 'renderAdsStudioConnections', 'renderSocialStudioOverviewSection', 'renderAdsStudioResultsCard']) sandbox[empty] = () => '';
+    const tabs = () => Array.from(String(run('renderAdsStudioTabBar()')).matchAll(/role="tab" aria-selected="(true|false)" onclick="setAdsStudioTab\('([a-z]+)'\)" class="sc-tab"><i data-lucide="[a-z-]+"><\/i><span>([^<]+)<\/span>/g), m => `${m[3]}${m[1] === 'true' ? '*' : ''} ${m[2]}`);
+    assert.deepEqual(tabs(), ['Home* dashboard', 'My ads campaigns', 'New request builder', 'Posts posts', 'Replies replies']);
+    state.language = 'ar';
+    assert.deepEqual(tabs().slice(0, 3), ['الرئيسية* dashboard', 'إعلاناتي campaigns', 'طلب جديد builder'], 'the words of the new layout');
+    state.language = 'en';
+    const soon = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10), past = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+    const request = (id, status, more = {}) => ({ id, name: `Ad ${id}`, status, createdBy: 'cust1', objective: 'messages', platforms: ['facebook'], budgetType: 'lifetime', budgetMinorUSD: 3500, totalBudgetMinorUSD: 3500, durationDays: 7, startDate: soon, endDate: soon, _lastModified: 5, ...more });
+    const card = row => String(run(`renderAdsStudioCampaignCard(${JSON.stringify(row)})`));
+    const zone = (html, cls) => { const at = html.indexOf(`class="${cls}"`); return at < 0 ? '' : html.slice(at, html.indexOf(cls === 'sc-actions' ? '<details class="frame-menu row-menu">' : '</details>', at) < 0 ? html.indexOf('</div>\n      </div>', at) : html.indexOf(cls === 'sc-actions' ? '<details class="frame-menu row-menu">' : '</details>', at)); };
+    const words = part => Array.from(part.matchAll(/<button type="button" ([^>]*)><i data-lucide="[a-z0-9-]+"><\/i>([^<]+)<\/button>/g), m => `${m[2]}${/class="studio-v2-action is-primary"/.test(m[1]) ? '!' : ''}${/studio-ads-danger|frame-danger/.test(m[1]) ? ' (red)' : ''}`);
+    const shown = html => words(zone(html, 'sc-actions'));
+    const menu = html => words(zone(html, 'frame-menu-list'));
+    // A draft: send it or edit it; the rest in the menu.
+    let html = card(request('d1', 'Draft'));
+    assert.deepEqual([shown(html), menu(html)], [['Submit!', 'Edit'], ['Duplicate', 'Delete (red)']]);
+    assert.ok(/data-ads-studio-submit="1" onclick="submitAdsStudioCampaign\('d1', this\)" class="studio-v2-action is-primary"/.test(html) && !html.includes('sc-money'));
+    // Sent back: fixing it is the one main button; sending it again unchanged stays possible from the menu.
+    html = card(request('b1', 'Changes Requested', { reviewReasonCode: 'creative_quality' }));
+    assert.deepEqual([shown(html), menu(html)], [['Fix and resend!'], ['Submit', 'Duplicate', 'Delete (red)']]);
+    assert.ok(/onclick="startAdsStudioCampaign\('b1'\)" class="studio-v2-action is-primary"/.test(html) && /data-ads-studio-submit="1" onclick="submitAdsStudioCampaign\('b1', this\)">/.test(html));
+    // Waiting for review: what the money is doing, and the way to take it back.
+    html = card(request('s1', 'Submitted'));
+    assert.deepEqual([shown(html), menu(html)], [['Withdraw'], ['Duplicate']]);
+    assert.ok(html.includes('<p class="sc-money">We hold <bdi dir="ltr">$35.00</bdi> in your wallet. It is not charged yet.</p>'), html.slice(0, 900));
+    // Approved and not started: the customer can stop it and get the payment back; nothing to archive while money is in it.
+    html = card(request('a1', 'Approved', { paidMinorUSD: 3500 }));
+    assert.deepEqual([shown(html), menu(html)], [['Stop & refund (red)'], ['Extend', 'Duplicate']]);
+    assert.ok(html.includes('<p class="sc-money">Not started yet. Stopping now returns <bdi dir="ltr">$35.00</bdi> to your wallet.</p>'));
+    // Approved and started: no instant stop for the customer (the old "message us" button while the stop sheet is off), and no money sentence.
+    html = card(request('a2', 'Approved', { paidMinorUSD: 3500, startDate: past, publishStatus: 'live', metaCampaignId: '123' }));
+    assert.deepEqual([shown(html), menu(html)], [['Ask us to stop it'], ['Extend', 'Duplicate']]);
+    assert.ok(!html.includes('sc-money'));
+    // With the stop-request sheet on and an instant stop possible, both stay: the instant one in front, the request in the menu.
+    sandbox.studioStopSheetAvailable = () => true;
+    html = card(request('a1', 'Approved', { paidMinorUSD: 3500 }));
+    assert.deepEqual([shown(html), menu(html)], [['Stop & refund (red)'], ['Ask to stop', 'Extend', 'Duplicate']]);
+    html = card(request('a2', 'Approved', { paidMinorUSD: 3500, startDate: past, publishStatus: 'live', metaCampaignId: '123' }));
+    assert.deepEqual([shown(html), menu(html)], [['Ask to stop'], ['Extend', 'Duplicate']]);
+    sandbox.studioStopSheetAvailable = () => false;
+    // Rejected and stopped requests have nothing to press but the menu.
+    html = card(request('r1', 'Rejected'));
+    assert.deepEqual([shown(html), menu(html)], [[], ['Duplicate', 'Archive (red)']]);
+    html = card(request('x1', 'Stopped', { paidMinorUSD: 3500, refundMinorUSD: 3500 }));
+    assert.deepEqual([shown(html), menu(html)], [[], ['Extend', 'Duplicate', 'Archive (red)']]);
+    // Someone who may only look gets no button and no menu.
+    state.currentUser.permissions = { adCampaignRequests: ['viewOwn'] };
+    html = card(request('d1', 'Draft'));
+    assert.ok(!html.includes('row-menu') && shown(html).length === 0);
+    // The team: linking is the main step on an approved request of a customer; closing it stays beside; unlinking is in the menu once linked.
+    state.currentUser = { id: 'rev1', name: 'Reem', role: 'Employee', permissions: { adCampaignRequests: ['view', 'review'] } };
+    state.users = [state.currentUser, { id: 'cust1', name: 'Customer One', role: 'Employee', permissions: {} }];
+    html = card(request('a1', 'Approved', { paidMinorUSD: 3500 }));
+    assert.deepEqual([shown(html), menu(html)], [['Link Meta campaign!', 'Stop & refund (red)'], []]);
+    assert.ok(!html.includes('sc-money') && !card(request('s1', 'Submitted')).includes('sc-money'), 'the money sentences speak to the owner of the request only');
+    html = card(request('a2', 'Approved', { paidMinorUSD: 3500, startDate: past, publishStatus: 'live', metaCampaignId: '123' }));
+    assert.deepEqual([shown(html), menu(html)], [['Close campaign (red)'], ['Unlink Meta campaign']]);
+    assert.ok(/data-ads-studio-unlink="1" onclick="openAdsStudioUnlinkSheet\('a2'\)">/.test(html) && !html.includes('sc-money'), 'the money sentences are for the owner of the request');
+    // Arabic: the amount stays one left-to-right piece.
+    state.currentUser = { id: 'cust1', name: 'Customer One', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn', 'deleteOwn', 'stopOwn'] } };
+    state.users = [state.currentUser];
+    state.language = 'ar';
+    assert.ok(card(request('s1', 'Submitted')).includes('<p class="sc-money">نحجز <bdi dir="ltr">$35.00</bdi> في محفظتك، ولا تُخصم بعد.</p>'));
+    state.language = 'en';
+    // Home: what needs the customer comes first (sent back before drafts, three at most), then the ways to start, then four figures.
+    state.adCampaignRequests = [request('d1', 'Draft'), request('s1', 'Submitted'), request('b1', 'Changes Requested', { reviewReasonCode: 'creative_quality' }), request('d2', 'Draft'), request('d3', 'Draft'), request('a1', 'Approved', { paidMinorUSD: 3500 })];
+    html = String(run('renderAdsStudioDashboard()'));
+    const needs = Array.from(html.matchAll(/<div class="sc-need( is-back)?"><p><b>([^<]+)<\/b>(?:<small>([^<]*)<\/small>)?<\/p><button type="button" onclick="startAdsStudioCampaign\('([a-z0-9]+)'\)" class="studio-v2-action">([^<]+)<\/button>/g), m => [m[2], m[3] || '', m[4], m[5]].join(' | '));
+    assert.deepEqual(needs, ['Needs your changes: Ad b1 | Photo or video quality | b1 | Fix it', 'Not sent yet: Ad d1 |  | d1 | Continue', 'Not sent yet: Ad d2 |  | d2 | Continue']);
+    assert.ok(html.indexOf('data-ads-studio-needs') < html.indexOf('class="sc-start"') && html.indexOf('class="sc-start"') < html.indexOf('class="sc-stats"'));
+    assert.deepEqual(Array.from((html.split('class="sc-start">')[1] || '').split('<p>')[0].matchAll(/onclick="([^"]+)" class="studio-v2-action( is-primary)?"><i data-lucide="[a-z-]+"><\/i>([^<]+)</g), m => `${m[3]}${m[2] ? '!' : ''} ${m[1]}`),
+      ["New request! beginAdsStudioCampaign(); setAdsStudioTab('builder')", "Boost a post beginAdsStudioBoost('boost_post')", "Boost my Page beginAdsStudioBoost('boost_page')"]);
+    assert.deepEqual(Array.from((html.split('class="sc-stats">')[1] || '').matchAll(/<b>(\d+)<\/b><span>([^<]+)<\/span>/g), m => `${m[2]} ${m[1]}`), ['All campaigns 6', 'Needs work 4', 'Under review 1', 'Approved 1']);
+    assert.ok(!html.includes('studio-dashboard-hero') && html.includes('Submitting holds the budget; approval charges it.'));
+    state.adCampaignRequests = [request('a1', 'Approved', { paidMinorUSD: 3500 })];
+    assert.ok(!String(run('renderAdsStudioDashboard()')).includes('data-ads-studio-needs'), 'nothing waits: no empty "Needs you"');
+    // The last step: each row can be changed at the step that holds it, and the four lines of the new layout say what happens next.
+    run("beginAdsStudioCampaign(); Object.assign(_adsStudioDraft, { name: 'Eid', budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7 }); _adsStudioWizardStep = 5;");
+    html = String(run('renderAdsStudioReviewStep()'));
+    const changes = () => Array.from(html.matchAll(/<dt>([^<]+)<\/dt><dd>[^<]*<\/dd>(?:<button type="button" onclick="moveAdsStudioWizard\((-?\d+)\)" aria-label="Change: [^"]+">Change<\/button>)?/g), m => `${m[1]} ${m[2] || 'none'}`);
+    assert.deepEqual(changes(), ['Campaign -4', 'Objective -4', 'Platforms -4', 'Page -4', 'Destination -3', 'Audience -2', 'Budget -1', 'Schedule -1', 'Special category -2']);
+    const next = Array.from((html.split('What happens next</b><ol>')[1] || '').split('</ol>')[0].matchAll(/<li>(.*?)<\/li>/g), m => m[1]);
+    assert.deepEqual(next, ['We hold <bdi dir="ltr">$70.00</bdi> in your wallet. It is not charged yet.', 'The Albayan team checks your request on working days.',
+      'If it is approved we charge it and set the ad up in Meta; Meta reviews it too, usually within a day.', 'It runs 7 days. What Meta does not use comes back to your wallet.']);
+    run("beginAdsStudioBoost('boost_post'); _adsStudioWizardStep = 3;");
+    html = String(run('renderAdsStudioReviewStep()'));
+    assert.deepEqual(changes(), ['Campaign -2', 'Objective none', 'Platforms none', 'Page -2', 'Post -2', 'Destination -2', 'Audience none', 'Budget -1', 'Schedule -1', 'Special category none'], 'a boost has its own three steps');
+  });
+
+  await test('round 3 classic Studio: the Facebook and Instagram bar is drawn only when a comment was answered in the last 24 hours (never 50% and 50% of nothing)', async () => {
+    const f = socialFixture();
+    f.sandbox.socialStudioEnsureLoaded = () => {};
+    const draw = stats => { f.run(`_social.pages = []; _social.stats = ${JSON.stringify({ last24h: stats })};`); return String(f.run('renderSocialStudioOverviewSection()')); };
+    let html = draw({ commentsAnswered: 0, dmsSent: 0, postsPublished: 0, scheduledInQueue: 0, fbShare: 50, igShare: 50 });
+    assert.ok(html.includes('Last 24 hours') && !html.includes('Facebook ·') && !html.includes('Instagram ·') && !html.includes('50%'), 'before: "Facebook · 50%" and "Instagram · 50%" over four zeros');
+    html = draw({ commentsAnswered: 4, dmsSent: 1, postsPublished: 0, scheduledInQueue: 0, fbShare: 75, igShare: 25 });
+    assert.ok(html.includes('Facebook · 75%') && html.includes('Instagram · 25%') && html.includes('style="width:75%"'));
+  });
+  await test('round 3 Studio wallet: a payment request never reads "Pay — LYD" (a figure it does not carry leaves the method\'s sentence out), and its code sits on one line with Copy', async () => {
+    const f = studioFixture();
+    f.state.language = 'en';
+    f.run(`_studioWallet.methods = [
+      { id: 'adfali', name: { en: 'Adfali', ar: 'ادفع لي' }, instructions: { en: 'Pay {amountLYD} LYD via Adfali and keep the code {reference} in the payment note.', ar: 'ادفع {amountLYD} د.ل عبر ادفع لي واكتب الرمز {reference} في ملاحظة الدفع.' } },
+      { id: 'office', name: { en: 'At the office', ar: 'في المكتب' }, instructions: { en: 'Bring the code {reference} to the office.', ar: 'أحضر الرمز {reference} إلى المكتب.' } },
+      { id: 'rate', name: { en: 'Bank', ar: 'مصرف' }, instructions: { en: 'Send {amountUSD} USD at {rate} with {reference}.', ar: 'أرسل {amountUSD} دولار بسعر {rate} مع {reference}.' } }];`);
+    const say = request => String(f.run(`studioWalletInstruction(${JSON.stringify(request)}, 'PAY-AAAA1111')`));
+    const plain = 'Pay with the code PAY-AAAA1111. Your wallet is filled as soon as we confirm the payment.';
+    assert.equal(say({ method: 'adfali', currency: 'USD', amountMinor: 5000, amountMinorLYD: 34500 }), 'Pay 345.00 LYD via Adfali and keep the code PAY-AAAA1111 in the payment note.');
+    assert.equal(say({ method: 'adfali', currency: 'LYD', amountMinor: 12000, amountMinorLYD: null }), 'Pay 120.00 LYD via Adfali and keep the code PAY-AAAA1111 in the payment note.', 'a dinar request carries its own amount');
+    assert.equal(say({ method: 'adfali', currency: 'USD', amountMinor: 5000, amountMinorLYD: null }), plain, 'before: "Pay — LYD via Adfali and keep the code …"');
+    assert.equal(say({ method: 'office', currency: 'USD', amountMinor: 5000, amountMinorLYD: null }), 'Bring the code PAY-AAAA1111 to the office.', 'a sentence that names no missing figure is used as it is');
+    assert.equal(say({ method: 'rate', currency: 'USD', amountMinor: 5000, amountMinorLYD: null, lydRate: 6.9 }), 'Send 50.00 USD at 6.9 with PAY-AAAA1111.');
+    assert.equal(say({ method: 'rate', currency: 'USD', amountMinor: 5000, amountMinorLYD: null, lydRate: 0 }), plain, 'the rate is a figure too');
+    assert.equal(say({ method: 'gone', currency: 'USD', amountMinor: 5000, amountMinorLYD: null }), plain);
+    assert.ok(![say({ method: 'adfali', currency: 'USD', amountMinor: 5000, amountMinorLYD: null }), say({ method: 'rate', currency: 'USD', amountMinor: null, amountMinorLYD: null, lydRate: 0 })].some(text => text.includes('—')));
+    // The card: the code and its Copy button on one line; the other buttons under the sentence, as before.
+    f.run(`_studioWallet.list = [{ id: 'wpr_1', reference: 'PAY-AAAA1111', status: 'pending', method: 'adfali', currency: 'USD', amountMinor: 5000, amountMinorLYD: null, hasReceipt: false }];`);
+    f.sandbox.studioWalletRequestByReference = () => ({ id: 'wpr_1', reference: 'PAY-AAAA1111', status: 'pending', method: 'adfali', currency: 'USD', amountMinor: 5000, amountMinorLYD: null });
+    const draw = () => String(f.run(`renderStudioWalletPending({ pending: [{ reference: 'PAY-AAAA1111', amountMinor: 5000, currency: 'USD' }] })`));
+    let card = draw();
+    assert.ok(/<div class="studio-v2-wallet-coderow"><p class="studio-v2-wallet-code" data-testid="studio-wallet-reference"><bdi dir="ltr">PAY-AAAA1111<\/bdi><\/p><button type="button" class="studio-v2-action studio-v2-wallet-small" data-testid="studio-wallet-copy" onclick="studioWalletCopy\('PAY-AAAA1111'\)">/.test(card), card.slice(0, 1200));
+    assert.equal((card.match(/studioWalletCopy\(/g) || []).length, 1, 'one Copy button, beside the code');
+    assert.ok(card.includes(`data-testid="studio-wallet-instruction">Pay with the code <bdi dir="ltr" class="studio-v2-wallet-nowrap">PAY-AAAA1111</bdi>. Your wallet is filled`) && card.includes(`onclick="studioWalletAskCancel('wpr_1')"`) && !card.includes('—'));
+    // The iPhone app shows the request and Cancel, never how to pay it: no Copy there, as before.
+    f.sandbox.adsStudioBuyingHidden = () => true;
+    card = draw();
+    assert.ok(card.includes('data-testid="studio-wallet-reference"') && !card.includes('studioWalletCopy') && !card.includes('studio-wallet-instruction') && card.includes('studioWalletAskCancel'));
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {

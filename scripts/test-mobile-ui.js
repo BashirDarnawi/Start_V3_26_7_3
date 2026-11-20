@@ -8016,11 +8016,13 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && helpWithGuides.indexOf('data-testid="studio-guides"') > helpWithGuides.indexOf('data-testid="studio-help-contact"') && !helpWithGuides.includes('studio-pages-bundle-loading'),
     detailWithGuides.includes('data-testid="studio-ad-detail"') && detailWithGuides.includes('data-testid="studio-ad-guides"')
       && detailWithGuides.includes('data-testid="studio-guide-link-stages" onclick="studioGuideOpen(\'stages\', this)"') && detailWithGuides.includes('data-testid="studio-guide-link-settle"')
-      && detailWithGuides.indexOf('data-testid="studio-ad-guides"') > detailWithGuides.indexOf('class="studio-ads-tracker') && detailWithGuides.indexOf('data-testid="studio-ad-guides"') < detailWithGuides.indexOf('class="studio-ads-next"'),
+      // Round 3 (DESIGN.md template T14): the two guide links follow the buttons, still inside the head of the request.
+      && detailWithGuides.indexOf('data-testid="studio-ad-guides"') > detailWithGuides.indexOf('class="studio-ads-tracker') && detailWithGuides.indexOf('data-testid="studio-ad-guides"') > detailWithGuides.indexOf('class="studio-ads-next"')
+      && detailWithGuides.indexOf('data-testid="studio-ad-guides"') < detailWithGuides.indexOf('</header>'),
     walletGuides.includes('data-testid="studio-wallet-guides"') && walletGuides.includes('data-testid="studio-guide-link-money" onclick="studioGuideOpen(\'money\', this)"') && walletGuides.includes('data-testid="studio-guide-link-settle"'),
     helpSrc.includes('${renderStudioHelpContact()}${renderStudioHelpExtras()}') && helpSrc.includes("if (typeof renderStudioGuidesCard === 'function') guides = renderStudioGuidesCard();")
   ];
-  check('Studio v2 guides reach the screens (stage 15 hooks): the Help list draws the guides card after the contact card, the request detail links the stages and settle guides under its tracker, the wallet links money and settle; every link opens the sheet',
+  check('Studio v2 guides reach the screens (stage 15 hooks): the Help list draws the guides card after the contact card, the request detail links the stages and settle guides under its buttons, the wallet links money and settle; every link opens the sheet',
     !loadError && hookCases.every(Boolean), loadError || `cases ${failed(hookCases)}`);
 
   // Help guides (P5-03): seven bilingual guides, the hours guide reads /me, the card and the sheet handlers.

@@ -126,7 +126,8 @@ html.dark .studio-v2-row.is-danger { color: #fda4af; }
 @keyframes studio-v2-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .studio-v2-spinner { animation: none; } }
 @media (max-width: 599px) {
-  .studio-v2-step-name { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  /* Round 3 (DESIGN.md template T14): the steps keep their names under the circles on phones too. */
+  .studio-v2-step-name { font-size: 10.5px; }
   .studio-v2-builder-actions > .studio-v2-action { flex: 1 1 auto; }
 }
 @media (max-width: 359px) {
@@ -313,8 +314,20 @@ html.dark :is(.studio-v2-frame, .studio-ads-sheet) {
   .studio-home, .studio-ads, .studio-ads-detail { padding-bottom: calc(80px + var(--app-safe-bottom, 0px)); }
 }
 @media (max-width: 599px) {
-  .studio-ads-track-name { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-  .studio-ads-detail .studio-ads-track-text { display: block; }
+  /* Round 3 (DESIGN.md template T14): the six stages keep their names under the circles on phones too. */
+  .studio-ads-detail .studio-ads-track-name { font-size: 10.5px; }
+}
+.studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-dot { width: 34px; height: 34px; margin-top: -3px; }
+.studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-name { font-size: 12px; }
+/* Home on a wide screen (round 3): what needs you and your ads sit side by side under the money, so
+   the four blocks are on the first screen. One of the two alone takes the whole row. */
+@media (min-width: 1100px) {
+  .studio-home { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .studio-home > * { grid-column: 1 / -1; }
+  .studio-home > :is([aria-labelledby="studio-home-needs-title"], [aria-labelledby="studio-home-trackers-title"]) { grid-column: auto; }
+  .studio-home:not(:has(> [aria-labelledby="studio-home-needs-title"])) > [aria-labelledby="studio-home-trackers-title"],
+  .studio-home:not(:has(> [aria-labelledby="studio-home-trackers-title"])) > [aria-labelledby="studio-home-needs-title"] { grid-column: 1 / -1; }
+  .studio-home-money { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 @media (max-width: 359px) {
   .studio-home-money-value { font-size: 19px; }
@@ -497,6 +510,9 @@ html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {
 .studio-v2-wallet-pay, .studio-v2-wallet-ad, .studio-v2-wallet-created { display: flex; flex-direction: column; gap: 10px; }
 .studio-v2-wallet-code { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; font-weight: 800; letter-spacing: 0.04em; color: var(--ui-ink); overflow-wrap: anywhere; }
 .studio-v2-wallet-code.is-big { font-size: 26px; }
+/* Round 3: the code and its Copy button share a line, so the thing to copy and the way to copy it are together. */
+.studio-v2-wallet-coderow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border: 1px dashed var(--ui-line); border-radius: 12px; }
+.studio-v2-wallet-coderow > .studio-v2-action { flex: none; }
 .studio-v2-wallet-how { margin: 0; padding: 10px 12px; font-size: 14px; line-height: 1.7; color: var(--ui-ink); background: var(--ui-surface-soft); border-radius: 12px; overflow-wrap: anywhere; }
 .studio-v2-wallet-kv { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; }
 .studio-v2-wallet-kv-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 12px; min-width: 0; }
@@ -967,4 +983,95 @@ textarea.studio-pg-input { resize: vertical; }
 .studio-results-card .studio-ads-money-note { font-size: 12px; line-height: 1.6; color: var(--ui-muted); }
 @media (max-width: 359px) {
   .studio-results-card .studio-ads-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* The classic Studio layout, round 3 (DESIGN.md section 8, template T13, wireframe 14). The same
+   screens, actions and rules; the markup moved from long utility lists to these few classes so the
+   Studio bundle keeps its room. Header: title and three small buttons on one row. Sections: one
+   compact grid on phones (two rows where there were three). Overview: "Needs you", the ways to
+   start, four figures. Cards: one or two buttons and a "More" menu. */
+.studio-classic { max-width: 80rem; margin-inline: auto; min-width: 0;
+  /* the tones of the new layout that these screens use (the same values, light and dark) */
+  --studio-slate-fg: #475569; --studio-amber-fg: #92400e; --studio-amber-bg: #fef3c7; --studio-orange-fg: #9a3412;
+  --studio-slateblue-fg: #334e68; --studio-slateblue-bg: #e3ecf5; --studio-rose-fg: #be123c; }
+html.dark .studio-classic { --studio-slate-fg: #cbd5e1; --studio-amber-fg: #fcd34d; --studio-amber-bg: #422006; --studio-orange-fg: #fdba74;
+  --studio-slateblue-fg: #a5c0dc; --studio-slateblue-bg: #1b2a3b; --studio-rose-fg: #fda4af; }
+.sc-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; min-width: 0; }
+.sc-title { flex: 1; min-width: 0; }
+.sc-title h1 { margin: 0; font-size: clamp(20px, 2.4vw, 28px); font-weight: 800; line-height: 1.25; letter-spacing: -.02em; color: var(--ui-ink); overflow-wrap: anywhere; }
+.sc-title p { margin: 2px 0 0; font-size: 13.5px; line-height: 1.5; color: var(--ui-muted); }
+.sc-tools { display: flex; align-items: center; gap: 8px; flex: none; }
+.sc-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; height: 44px; padding: 0 10px; border: 1px solid var(--ui-line); border-radius: 12px; background: var(--ui-surface); color: var(--ui-ink); font-size: 13px; font-weight: 750; }
+.sc-icon:hover { background: var(--ui-surface-soft); }
+.sc-icon.is-danger { color: var(--ui-danger-text); }
+.sc-icon > :is(i, svg) { width: 20px; height: 20px; }
+.studio-classic .studio-section-navigation { margin-bottom: 20px; }
+.ui-workspace .studio-classic .sc-tab { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 8px 16px; border: 1px solid var(--ui-line); border-radius: 12px; background: var(--ui-surface); color: var(--ui-muted); font-size: 13.5px; font-weight: 750; }
+.ui-workspace .studio-classic .sc-tab[aria-selected="true"] { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); }
+.sc-tab > :is(i, svg) { flex: none; width: 16px; height: 16px; }
+.sc-tab > b { padding: 0 6px; border-radius: 99px; background: var(--ui-accent-soft); color: var(--ui-accent); font-size: 11px; }
+.sc-needs { display: grid; gap: 10px; padding: 16px; border-radius: var(--ui-radius); }
+.sc-needs > h2 { margin: 0; font-size: 16px; font-weight: 800; color: var(--ui-ink); }
+.sc-need { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border-radius: 14px; border-inline-start: 4px solid var(--studio-slate-fg); background: var(--ui-surface-soft); }
+.sc-need.is-back { border-inline-start-color: var(--studio-orange-fg); }
+.sc-need > p { display: grid; gap: 2px; flex: 1 1 14rem; min-width: 0; margin: 0; font-size: 14.5px; line-height: 1.5; color: var(--ui-ink); overflow-wrap: anywhere; }
+.sc-need small { font-size: 13px; color: var(--ui-muted); }
+.sc-need > .studio-v2-action { min-height: 44px; padding: 8px 18px; font-size: 14px; }
+.sc-start { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sc-start > .studio-v2-action { gap: 8px; min-height: 44px; padding: 8px 16px; font-size: 14px; }
+.sc-start > .studio-v2-action > :is(i, svg) { flex: none; width: 18px; height: 18px; }
+.sc-start > p { flex: 1 1 100%; margin: 0; font-size: 13px; line-height: 1.5; color: var(--ui-muted); }
+.sc-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.sc-stats > div { display: grid; gap: 2px; padding: 12px 14px; border-radius: 14px; }
+.sc-stats b { font-size: 22px; font-weight: 800; line-height: 1.2; color: var(--ui-ink); font-variant-numeric: tabular-nums; }
+.sc-stats span { font-size: 12.5px; line-height: 1.4; color: var(--ui-muted); }
+.sc-find { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 16px; padding: 14px; border-radius: var(--ui-radius); }
+.sc-find > .relative { flex: 1 1 14rem; }
+.sc-find > .studio-v2-action { gap: 8px; min-height: 48px; }
+.sc-find > .studio-v2-action > :is(i, svg) { width: 18px; height: 18px; }
+.sc-review { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.sc-review > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 12px 14px; border-radius: 14px; background: var(--ui-surface-soft); }
+.sc-review dt { grid-column: 1; font-size: 12px; font-weight: 700; color: var(--ui-muted); }
+.sc-review dd { grid-column: 1; margin: 0; font-size: 14.5px; font-weight: 700; line-height: 1.5; color: var(--ui-ink); overflow-wrap: anywhere; }
+.sc-review button { grid-column: 2; grid-row: 1 / span 2; min-height: 44px; padding: 0 8px; border: 0; background: none; color: var(--ui-accent); font-size: 13.5px; font-weight: 750; }
+.sc-review button:hover { text-decoration: underline; }
+.sc-box { padding: 14px 16px; border: 1px solid var(--ui-line); border-radius: 14px; }
+.sc-box > b { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 800; color: var(--ui-ink); }
+.sc-box > p { margin: 0; font-size: 14.5px; line-height: 1.6; color: var(--ui-ink); }
+.sc-box > ol { margin: 0; padding-inline-start: 20px; list-style: decimal; font-size: 14px; line-height: 1.65; color: var(--ui-ink); }
+.sc-card { min-width: 0; padding: 16px 18px; border: 1px solid var(--ui-line); border-radius: var(--ui-radius); background: var(--ui-surface); }
+.sc-card-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 16px; }
+.sc-card-top > .min-w-0 { flex: 1 1 18rem; }
+.sc-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.sc-chips > h3 { margin: 0; font-size: 16px; font-weight: 800; line-height: 1.4; color: var(--ui-ink); overflow-wrap: anywhere; }
+.sc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 99px; background: var(--studio-slateblue-bg); color: var(--studio-slateblue-fg); font-size: 11.5px; font-weight: 700; line-height: 1.5; }
+.sc-chip.is-amber { background: var(--studio-amber-bg); color: var(--studio-amber-fg); }
+.sc-chip > :is(i, svg), .sc-meta :is(i, svg) { flex: none; width: 14px; height: 14px; }
+.sc-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12.5px; line-height: 1.5; color: var(--ui-muted); }
+.sc-meta > span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.sc-money { margin: 8px 0 0; font-size: 13.5px; line-height: 1.55; color: var(--ui-ink); }
+.sc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sc-actions > .studio-v2-action, .sc-actions > .row-menu > summary { gap: 6px; min-height: 44px; padding: 8px 14px; border-radius: 12px; font-size: 14px; font-weight: 750; }
+.sc-actions > .studio-v2-action > :is(i, svg) { flex: none; width: 16px; height: 16px; }
+.sc-actions .studio-v2-action[disabled] { opacity: .6; }
+.sc-actions > .row-menu > .frame-menu-list .studio-help-ask { border: 0; background: none; color: var(--ui-ink); }
+@media (max-width: 599px) {
+  .sc-header { flex-wrap: wrap; gap: 6px 10px; margin-bottom: 14px; }
+  .sc-title { display: contents; }
+  .sc-title h1 { flex: 1 1 auto; min-width: 0; order: 1; }
+  .sc-tools { order: 2; margin-inline-start: auto; }
+  .sc-title p { flex: 1 1 100%; order: 3; margin: 0; }
+  .sc-icon { min-width: 40px; height: 40px; }
+  .sc-need > p { flex-basis: 9rem; }
+  .sc-review { grid-template-columns: minmax(0, 1fr); }
+  .studio-classic .studio-wizard-step-label { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; font-size: 10.5px; }
+  .sc-card { padding: 14px; }
+  .sc-actions { flex: 1 1 100%; }
+  .sc-actions > .studio-v2-action { flex: 1 1 auto; }
+  .ui-workspace .studio-classic .studio-section-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .ui-workspace .studio-classic .sc-tab { padding: 6px 4px; font-size: 13px; white-space: normal; }
+  .sc-tab > :is(i, svg) { display: none; }
+  .sc-start > .studio-v2-action { flex: 1 1 calc(50% - 4px); }
+  .sc-start > .studio-v2-action.is-primary { flex-basis: 100%; }
+  .sc-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

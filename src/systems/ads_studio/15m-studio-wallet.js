@@ -496,20 +496,19 @@ function renderStudioWalletActions(summary) {
             ${full ? `<p id="studio-wallet-full" class="studio-v2-wallet-note">${studioEsc(adsStudioText(`You have ${STUDIO_WALLET_MAX_OPEN} payment requests waiting. Pay or cancel one of them to add more money.`, `لديك ${STUDIO_WALLET_MAX_OPEN} طلبات دفع تنتظر. ادفع أحدها أو ألغِه لتضيف مالاً آخر.`))}</p>` : ''}${noBuy ? adsStudioNoBuyLine('studio-v2-wallet-note') : ''}`;
 }
 
-// How to pay: the method's own instruction with the request's code and dinar amount filled in.
+// How to pay: the method's own instruction with the request's code and dinar amount filled in. A
+// figure the request does not carry is never written as a dash ("Pay — LYD via …", round 3): the
+// plain sentence says how to pay without it.
 function studioWalletInstruction(request, reference) {
   const method = request ? studioWalletMethod(request.method) : null;
   const template = method ? studioPickText(method.instructions, 400) : '';
-  if (!template || !request) {
+  const lyd = request ? (request.currency === 'LYD' ? request.amountMinor : request.amountMinorLYD) : null;
+  const fill = { reference, amountLYD: lyd !== null ? studioMinorText(lyd) : '', amountUSD: request && request.currency === 'USD' && request.amountMinor !== null ? studioMinorText(request.amountMinor) : '', rate: request && request.lydRate ? String(request.lydRate) : '' };
+  if (!template || !request || Object.keys(fill).some(key => !fill[key] && template.includes(`{${key}}`))) {
     return adsStudioText(`Pay with the code ${reference}. Your wallet is filled as soon as we confirm the payment.`,
       `ادفع مع ذكر الرمز ${reference}. تُضاف الأموال إلى محفظتك فور تأكيدنا للدفعة.`);
   }
-  const lyd = request.currency === 'LYD' ? request.amountMinor : request.amountMinorLYD;
-  return template
-    .split('{reference}').join(reference)
-    .split('{amountLYD}').join(lyd !== null ? studioMinorText(lyd) : '—')
-    .split('{amountUSD}').join(request.currency === 'USD' && request.amountMinor !== null ? studioMinorText(request.amountMinor) : '—')
-    .split('{rate}').join(request.lydRate ? String(request.lydRate) : '—');
+  return Object.keys(fill).reduce((text, key) => text.split(`{${key}}`).join(fill[key]), template);
 }
 
 // The same words as HTML: the code stays one left-to-right piece (never split at its dash in Arabic).
@@ -558,7 +557,7 @@ function renderStudioWalletPending(summary) {
                   <span class="studio-v2-wallet-chip is-warn">${studioWalletIcon('clock')}<span>${studioEsc(adsStudioText('Waiting for our confirmation', 'بانتظار تأكيدنا'))}</span></span>
                   <span class="studio-v2-wallet-chip">${studioEsc(purpose)}</span>
                 </div>
-                <p class="studio-v2-wallet-code" data-testid="studio-wallet-reference">${studioLtr(item.reference)}</p>
+                <div class="studio-v2-wallet-coderow"><p class="studio-v2-wallet-code" data-testid="studio-wallet-reference">${studioLtr(item.reference)}</p>${noBuy ? '' : renderStudioWalletCopy(item.reference)}</div>
                 <dl class="studio-v2-wallet-kv">
                   <div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('Amount', 'المبلغ'))}</dt><dd data-testid="studio-wallet-pending-amount">${studioLtr(studioWalletMoney(item.amountMinor, item.currency))}</dd></div>
                   ${noBuy ? '' : dinars + method}
@@ -566,7 +565,7 @@ function renderStudioWalletPending(summary) {
                 ${noBuy ? '' : `<p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${renderStudioWalletInstruction(request, item.reference)}</p>`}
                 <p class="studio-v2-wallet-note">${studioWalletIcon('calendar-clock')} ${studioEsc(due)}</p>
                 <div class="studio-v2-wallet-actions is-compact">
-                  ${noBuy ? '' : renderStudioWalletCopy(item.reference) + renderStudioWalletReceipt(request)}${cancel}
+                  ${noBuy ? '' : renderStudioWalletReceipt(request)}${cancel}
                 </div>
               </article>`;
   };

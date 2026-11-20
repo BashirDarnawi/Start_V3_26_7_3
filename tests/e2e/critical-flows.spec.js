@@ -370,7 +370,9 @@ test('lazy Clothes and Studio features load with their responsive styles', async
   await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
   const columns = await page.evaluate(() => {
     const probe = document.createElement('div');
-    probe.className = 'grid md:grid-cols-[1fr_auto]';
+    // A responsive class the Studio's own screens use (15f). Round 3 removed the Overview's blue block,
+    // which was the only user of the md: variant probed here before.
+    probe.className = 'grid sm:grid-cols-[1fr_auto]';
     probe.innerHTML = '<span>Primary content</span><span>Action</span>';
     document.body.appendChild(probe);
     const count = getComputedStyle(probe).gridTemplateColumns.split(' ').length;

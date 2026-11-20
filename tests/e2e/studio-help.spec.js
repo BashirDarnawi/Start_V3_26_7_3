@@ -393,15 +393,17 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
       await expectFits(page, 'Classic ticket thread', '.studio-help');
 
       // The campaign card: "Ask about this" pre-fills the request; "Ask to stop" opens the sheet and the card shows the marker.
-      await page.getByRole('tab', { name: /My Campaigns/ }).click();
+      await page.getByRole('tab', { name: /My ads/ }).click();
       const card = page.locator(`[data-ads-studio-campaign="${seeded.requestId}"]`);
       await expect(card).toBeVisible();
-      await card.getByTestId(`studio-ask-campaign-${seeded.requestId}`).click();
+      // Round 3: "Ask about this" sits in the card's "More" menu; an action in the menu is reached by opening it first.
+      const pressOnCard = async target => { if (!(await target.isVisible())) await card.locator('details.row-menu > summary').click(); await target.click(); };
+      await pressOnCard(card.getByTestId(`studio-ask-campaign-${seeded.requestId}`));
       await expect(page.getByTestId('studio-help-related')).toHaveValue(`campaign:${seeded.requestId}`);
       await page.getByTestId('studio-help-cancel').click();
       await expect(page.getByTestId('studio-help-tickets')).toBeVisible();
-      await page.getByRole('tab', { name: /My Campaigns/ }).click();
-      await card.locator('[data-ads-studio-ask-stop]').click();
+      await page.getByRole('tab', { name: /My ads/ }).click();
+      await pressOnCard(card.locator('[data-ads-studio-ask-stop]'));
       const sheet = page.getByTestId('studio-sheet-ask-stop');
       await expect(sheet).toHaveAttribute('data-state', 'ask');
       await page.getByTestId('studio-sheet-confirm').click();
