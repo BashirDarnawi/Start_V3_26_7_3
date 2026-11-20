@@ -113,7 +113,7 @@ html.dark .studio-v2-row.is-danger { color: #fda4af; }
 .studio-v2-steps { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; margin: 0; padding: 0; list-style: none; }
 .studio-v2-step { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; color: var(--ui-muted); }
 .studio-v2-step-dot { display: grid; place-items: center; width: 32px; height: 32px; border: 2px solid var(--ui-line); border-radius: 50%; background: var(--ui-surface); font-size: 13px; font-weight: 750; }
-.studio-v2-step-name { max-width: 100%; font-size: 11px; font-weight: 650; line-height: 1.4; text-align: center; overflow-wrap: anywhere; }
+.studio-v2-step-name { width: 100%; min-width: min-content; font-size: 11px; font-weight: 650; line-height: 1.4; text-align: center; overflow-wrap: normal; word-break: normal; hyphens: none; }
 .studio-v2-step.is-current { color: var(--ui-accent); }
 .studio-v2-step.is-current .studio-v2-step-dot { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); }
 .studio-v2-step.is-done .studio-v2-step-dot { border-color: var(--ui-accent); background: var(--ui-accent-soft); color: var(--ui-accent); }
@@ -131,6 +131,7 @@ html.dark .studio-v2-row.is-danger { color: #fda4af; }
   .studio-v2-builder-actions > .studio-v2-action { flex: 1 1 auto; }
 }
 @media (max-width: 359px) {
+  .studio-v2-step-name { font-size: 10px; }
   .studio-v2-header { gap: 6px; }
   .studio-v2-header-actions { gap: 4px; }
   .studio-v2-title { font-size: 18px; }
@@ -251,7 +252,9 @@ html.dark :is(.studio-v2-frame, .studio-ads-sheet) {
 .studio-ads-track-step.is-current { color: var(--ui-ink); font-weight: 750; }
 .studio-ads-track-step.is-current .studio-ads-track-dot { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); }
 .studio-ads-track-step.is-side .studio-ads-track-dot { border-color: var(--studio-fg); background: var(--studio-bg); color: var(--studio-fg); }
-.studio-ads-track-name { max-width: 100%; font-size: 11px; line-height: 1.4; text-align: center; overflow-wrap: anywhere; }
+/* A stage name is never broken inside a word: it wraps between words, and one word wider than its column
+   reaches into the gap on both sides (the step centres it) instead of being cut in two. */
+.studio-ads-track-name { width: 100%; min-width: min-content; font-size: 11px; line-height: 1.4; text-align: center; overflow-wrap: normal; word-break: normal; hyphens: none; }
 .studio-ads-track-none { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; color: var(--ui-muted); }
 .studio-ads-detail .studio-ads-track-text { display: none; font-size: 13px; font-weight: 700; color: var(--ui-ink); }
 .studio-ads-actions { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
@@ -318,7 +321,10 @@ html.dark :is(.studio-v2-frame, .studio-ads-sheet) {
   .studio-ads-detail .studio-ads-track-name { font-size: 10.5px; }
 }
 .studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-dot { width: 34px; height: 34px; margin-top: -3px; }
-.studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-name { font-size: 12px; }
+/* The current stage's name is larger only where six names have the room: on a phone "Approved" at 12px was cut in two. */
+@media (min-width: 600px) {
+  .studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-name { font-size: 12px; }
+}
 /* Home on a wide screen (round 3): what needs you and your ads sit side by side under the money, so
    the four blocks are on the first screen. One of the two alone takes the whole row. */
 @media (min-width: 1100px) {
@@ -332,7 +338,7 @@ html.dark :is(.studio-v2-frame, .studio-ads-sheet) {
 @media (max-width: 359px) {
   .studio-home-money-value { font-size: 19px; }
   .studio-home-block, .studio-ads-box { padding: 14px 12px; }
-  .studio-ads-track-name { font-size: 10px; }
+  .studio-ads-track-name, .studio-ads-detail .studio-ads-track-name { font-size: 10px; }
 }
 /* Albayan Studio v2 request builder (P2-05; src/systems/ads_studio/15l-studio-builder.js).
    The frame's --ui-* tokens plus four local tones that follow the theme (declared as custom

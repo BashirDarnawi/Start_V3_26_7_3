@@ -418,6 +418,93 @@ test.describe('Albayan Studio v2 Home and My ads (pilot)', () => {
     expect(errors).toEqual([]);
   });
 
+  // Redesign round 3: on a phone the six stage names of a request and the six step names of the builder sit in
+  // columns of 40 to 60 px. A name may wrap between its words; a word is never cut in two. "overflow-wrap:
+  // anywhere" did exactly that to "Approved" ("Approve / d"), "Running" and "Audience" from 320 to 430 px.
+  test('stage and step names keep every word whole from 320 to 430 px, in English and Arabic', async ({ page, playwright, baseURL }, testInfo) => {
+    const seed = await seedCustomer(playwright, baseURL, testInfo, 'names');
+    const errors = collectPageErrors(page);
+    await page.setViewportSize(PHONE);
+    await openHome(page, seed.user);
+
+    // What is wrong in a row of names: a word drawn on two lines, a name that does not sit under its own circle,
+    // or two names with less than 2 px between them (they would read as one word).
+    const faults = (selector, circle) => page.evaluate(([names, dot]) => {
+      const found = [];
+      const boxes = [...document.querySelectorAll(names)].filter(name => name.getClientRects().length).map(name => {
+        const node = [...name.childNodes].find(child => child.nodeType === 3 && child.textContent.trim());
+        let at = 0;
+        for (const piece of (node ? node.textContent : '').split(/(\s+)/)) {
+          if (piece.trim()) {
+            const word = document.createRange();
+            word.setStart(node, at);
+            word.setEnd(node, at + piece.length);
+            if (new Set([...word.getClientRects()].map(rect => Math.round(rect.top))).size > 1) found.push(`"${piece}" is cut in two`);
+          }
+          at += piece.length;
+        }
+        const whole = document.createRange();
+        whole.selectNodeContents(name);
+        const rects = [...whole.getClientRects()];
+        const box = { text: name.textContent.trim(), left: Math.min(...rects.map(rect => rect.left)), right: Math.max(...rects.map(rect => rect.right)) };
+        const ring = name.parentElement.querySelector(dot).getBoundingClientRect();
+        const off = Math.abs((box.left + box.right) / 2 - (ring.left + ring.right) / 2);
+        if (off > 1) found.push(`"${box.text}" sits ${off.toFixed(1)}px beside its circle`);
+        return box;
+      });
+      boxes.sort((a, b) => a.left - b.left);
+      boxes.forEach((box, index) => {
+        const gap = index ? box.left - boxes[index - 1].right : 99;
+        if (gap < 2) found.push(`"${boxes[index - 1].text}" and "${box.text}" are ${gap.toFixed(1)}px apart`);
+      });
+      return { count: boxes.length, found };
+    }, [selector, circle]);
+    const widths = [320, 360, 375, 390, 412, 430];
+
+    // A request's stages. Each stage in turn is given the look of the current one (a class on the page only).
+    await page.getByTestId('studio-nav-campaigns').click();
+    await expectCustomerTab(page, 'campaigns');
+    await page.getByTestId(`studio-ad-${seed.ids.approved}`).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('id')).toBe(seed.ids.approved);
+    for (const language of ['en', 'ar']) {
+      await setLanguage(page, language);
+      for (const width of widths) {
+        await page.setViewportSize({ width, height: 844 });
+        await expect(page.locator('.studio-ads-detail .studio-ads-track-step')).toHaveCount(6);
+        for (let current = 0; current < 6; current++) {
+          await page.evaluate(index => document.querySelectorAll('.studio-ads-detail .studio-ads-track-step').forEach((step, at) => {
+            step.classList.toggle('is-current', at === index);
+            step.classList.toggle('is-done', at < index);
+          }), current);
+          const row = await faults('.studio-ads-detail .studio-ads-track-name', '.studio-ads-track-dot');
+          expect(row.count, `six stage names show at ${width}px`).toBe(6);
+          expect(row.found, `stage names at ${width}px in ${language}, stage ${current + 1} as the current one`).toEqual([]);
+        }
+        await expectNoPageOverflow(page, `request stages at ${width}px in ${language}`);
+      }
+    }
+
+    // The builder's steps.
+    await setLanguage(page, 'en');
+    await page.setViewportSize(PHONE);
+    await page.getByTestId('studio-nav-home').click();
+    await expectCustomerTab(page, 'home');
+    await page.getByTestId('studio-goal-messages').click();
+    await expect.poll(() => tabParam(page)).toBe('builder');
+    await expect(page.getByTestId('studio-builder')).toHaveAttribute('data-kind', 'full');
+    for (const language of ['en', 'ar']) {
+      await setLanguage(page, language);
+      for (const width of widths) {
+        await page.setViewportSize({ width, height: 844 });
+        const row = await faults('.studio-v2-step-name', '.studio-v2-step-dot');
+        expect(row.count, `six step names show at ${width}px`).toBe(6);
+        expect(row.found, `builder step names at ${width}px in ${language}`).toEqual([]);
+        await expectNoPageOverflow(page, `builder steps at ${width}px in ${language}`);
+      }
+    }
+    expect(errors).toEqual([]);
+  });
+
   test('smoke: Home shows the server numbers on this browser', async ({ page, playwright, baseURL }, testInfo) => {
     test.skip(testInfo.project.name === FULL_MATRIX_PROJECT, 'mobile-chromium runs the full matrix above');
     const seed = await seedCustomer(playwright, baseURL, testInfo, 'smoke');

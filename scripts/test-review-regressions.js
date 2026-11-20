@@ -2606,6 +2606,30 @@ async function main() {
     assert.ok(/@media \(max-width: 900px\) \{[^@]*\.ui-workspace \.page-header \{ display: grid; grid-template-columns: minmax\(0, 1fr\) auto;/.test(style));
   });
 
+  await test('round 3 Studio names under circles: a stage name and a step name wrap between words and are never cut inside one (before: "Approved" was drawn "Approve / d" on phones), and the current stage\'s name is larger only where six names have the room', async () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'ads-workspace.css'), 'utf8');
+    const rule = selector => {
+      const at = css.indexOf(`\n${selector} {`);
+      assert.ok(at >= 0, `${selector} has its own rule`);
+      return css.slice(at, css.indexOf('}', at) + 1);
+    };
+    for (const selector of ['.studio-ads-track-name', '.studio-v2-step-name']) {
+      const own = rule(selector);
+      assert.ok(own.includes('overflow-wrap: normal;') && own.includes('word-break: normal;') && own.includes('hyphens: none;'), `${selector}: a word is not cut in two`);
+      assert.ok(own.includes('width: 100%;') && own.includes('min-width: min-content;') && !own.includes('max-width'), `${selector}: one word wider than its column reaches into the gaps on both sides`);
+      // Nowhere else may the names be told to break anywhere again.
+      const again = css.split('\n').filter(line => line.includes(selector) && /overflow-wrap: anywhere|word-break: break-all/.test(line));
+      assert.deepEqual(again, [], selector);
+    }
+    // Their rows centre a name that is wider than its column (so it leaves the column on both sides equally).
+    assert.ok(/\n\.studio-ads-track-step \{[^}]*display: flex; flex-direction: column; align-items: center;/.test(css));
+    assert.ok(/\n\.studio-v2-step \{[^}]*display: flex; flex-direction: column; align-items: center;/.test(css));
+    // The larger current name: from 600 px only.
+    const larger = '.studio-ads-detail .studio-ads-track-step.is-current .studio-ads-track-name { font-size: 12px; }';
+    assert.equal(css.split(larger).length - 1, 1);
+    assert.ok(css.includes(`@media (min-width: 600px) {\n  ${larger}\n}`), 'on a phone the current name keeps the size of the others');
+  });
+
   await test('round 3 Escape: the key closes the details panel beside a list only when nothing lies over the page and the focus is not in a field; the command palette, a dialog and an open menu keep their turn before it', async () => {
     // The app's key handlers are registered on the page as it loads: collect them from the real source.
     const routing = fs.readFileSync(path.join(__dirname, '..', 'src', '11-routing-cloud.js'), 'utf8');
