@@ -1593,6 +1593,7 @@ async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
   const shipment = getVisibleClothesShipments().find(s => s.id === shipmentId);
   if (!shipment || shipment.status === newStatus) return;
 
+  const before = shipment.status;
   const receiving = newStatus === 'Received' && !shipment.stockApplied;
   const unreceiving = shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied;
   if (receiving) {
@@ -1670,7 +1671,9 @@ async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
     isAr ? `حالة الشحنة الآن: ${meta.labelAr}` : `Shipment status is now: ${meta.label}`,
-    'success'
+    'success',
+    // "Undo" for a step that moved no stock: the way back "More" already offers. Receiving and un-receiving ask first.
+    receiving || unreceiving ? null : undoAction(() => setClothesShipmentStatus(shipmentId, before))
   );
   updateClothesShipmentsFiltered();
 }
@@ -2515,8 +2518,10 @@ async function setClothesOrderStatus(orderId, newStatus, sure) {
   const order = getVisibleClothesOrders().find(o => o.id === orderId);
   if (!order || order.status === newStatus) return;
 
+  const before = order.status;
   const wasActive = clothesOrderIsActiveStatus(order.status);
   const willBeActive = clothesOrderIsActiveStatus(newStatus);
+  const movesStock = (wasActive && !willBeActive && !!order.stockDeducted) || (!wasActive && willBeActive && !order.stockDeducted);
   const updates = { status: newStatus };
 
   if (wasActive && !willBeActive && order.stockDeducted) {
@@ -2573,7 +2578,9 @@ async function setClothesOrderStatus(orderId, newStatus, sure) {
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
     isAr ? `حالة الطلب الآن: ${meta.labelAr}` : `Order status is now: ${meta.label}`,
-    'success'
+    'success',
+    // "Undo" for a step that moved no stock: the way back "More" already offers. Cancelling and returning ask first.
+    movesStock ? null : undoAction(() => setClothesOrderStatus(orderId, before))
   );
   updateClothesOrdersFiltered();
 }

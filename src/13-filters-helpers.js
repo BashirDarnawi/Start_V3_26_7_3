@@ -5822,7 +5822,8 @@ async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceip
   showNotification(
     isAr ? 'تم التحصيل' : 'Collected',
     (isAr ? `تم تسجيل ${fmtLyd(totalLYD)}` : `Recorded ${fmtLyd(totalLYD)}`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${fmtLyd(leftLYD)}` : ` — ${fmtLyd(leftLYD)} left`) : ''),
-    'success'
+    'success',
+    undoAction(() => uncollectReceipt(receipt.id))  // the way back the receipt's own "not collected" button already takes
   );
   render();
   if (window.lucide) lucide.createIcons();

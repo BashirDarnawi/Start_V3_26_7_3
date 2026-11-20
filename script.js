@@ -7053,7 +7053,9 @@ function notifyInAppBrowserLimitation(kind) {
   );
 }
 
-function showNotification(title, message, type = 'info') {
+// A message may offer one action, for the thing that was just done: { label, run }. Today that is "Undo",
+// only where the app already had a way back (see undoAction).
+function showNotification(title, message, type = 'info', action = null) {
   // #region agent log
   // Hypothesis H-NOLOG: user can reproduce issue but we see no NDJSON logs; capture error/warn toasts to pinpoint.
   try {
@@ -7075,7 +7077,13 @@ function showNotification(title, message, type = 'info') {
   // blocked save were piling up the same error toast many times over.
   const notifKey = `${type}|${title}|${message}`.slice(0, 400);
   const existing = Array.from(container.children).find(el => el.dataset && el.dataset.notifKey === notifKey);
-  if (existing) {
+  const act = action && action.label && typeof action.run === 'function' ? action : null;
+  // An action belongs to the record of THIS message: an identical message still on screen (the same amount
+  // collected on another receipt a moment ago) is replaced, never reused with its earlier action.
+  if (existing && act) {
+    if (existing._hideTimer) clearTimeout(existing._hideTimer);
+    existing.remove();
+  } else if (existing) {
     if (existing._hideTimer) clearTimeout(existing._hideTimer);
     existing.classList.remove('notification-enter', 'notification-exit', 'notification-pulse');
     void existing.offsetWidth; // restart the CSS animation
@@ -7117,19 +7125,34 @@ function showNotification(title, message, type = 'info') {
       <div class="font-bold text-sm truncate">${safeTitle}</div>
       <div class="text-xs opacity-80 break-words">${safeMessage}</div>
     </div>
+    ${act ? `<button type="button" class="notification-action">${Security.escapeHtml(act.label)}</button>` : ''}
     <button onclick="this.parentElement.remove()" aria-label="${state.language === 'ar' ? 'إغلاق الإشعار' : 'Close notification'}" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
       <i data-lucide="x" class="w-4 h-4"></i>
     </button>
   `;
-  
+  if (act) {
+    notification.querySelector('.notification-action')?.addEventListener('click', () => {
+      if (notification._hideTimer) clearTimeout(notification._hideTimer);
+      notification.remove();
+      act.run();
+    });
+  }
+
   container.appendChild(notification);
   IconQueue.schedule(notification);
 
+  // A message that offers an action stays a little longer, so there is time to read it and press.
   notification._hideTimer = setTimeout(() => {
     notification.classList.remove('notification-enter');
     notification.classList.add('notification-exit');
     setTimeout(() => notification.remove(), 300);
-  }, 5000);
+  }, act ? 8000 : 5000);
+}
+
+// "Undo" for a message, where the app already has a way back: the action runs that same way back, with its
+// own checks and its own message. No new undo logic lives here.
+function undoAction(run) {
+  return { label: state.language === 'ar' ? 'تراجع' : 'Undo', run };
 }
 
 // The app's own question box, in place of the browser's confirm and prompt boxes: the same question
@@ -9381,9 +9404,11 @@ async function apiJson(path, options = {}, timeout = {}) {
   }
   
   if (!resp.ok) {
+    let rid = '';
+    try { rid = resp.headers.get('X-Request-ID') || resp.albayanRequestId || ''; } catch (_) {}
     const msg = apiDetailMessage(data, _httpFailureText(resp.status, data, resp.statusText));
+    const fault = resp.status === 500 ? _serverFaultText(data, rid) : '';  // an unexpected failure: ordinary words and a reference
     try {
-      const rid = resp.headers.get('X-Request-ID') || resp.albayanRequestId || '';
       console.warn(`[apiJson] ${resp.status} ${options.method || 'GET'} ${path} rid=${rid} ${String(text || '').slice(0, 160).replace(/\s+/g, ' ')}`);
     } catch (_) {}
     // A definitive 401 during an authenticated request means cached business
@@ -9398,12 +9423,30 @@ async function apiJson(path, options = {}, timeout = {}) {
     ) {
       await handleServerAuthExpired(requestSessionIdentity);
     }
-    const err = new Error(msg);
+    const err = new Error(fault || msg);
     err.status = resp.status;
     err.payload = data;
     throw err;
   }
   return data;
+}
+
+// An unexpected failure on the server (HTTP 500), in ordinary words: what to do, and a reference to quote to
+// whoever looks after the server (redesign round 3, DESIGN.md 7.11). The reference is the id the server logged
+// the failure under when its reply names one ("Internal error (err_...). Please contact support."), else the id
+// this request carried, which every line of the server's log has. Anything else the server said is its own
+// message (also its longer debug text) and is shown as it is: this returns '' for it.
+function _serverFaultText(data, requestId) {
+  const detail = data && typeof data === 'object' && typeof data.detail === 'string' ? data.detail : '';
+  const named = /^Internal error \(([A-Za-z0-9_-]{4,40})\)\. Please contact support\.$/.exec(detail);
+  if (detail && !named) return '';
+  if (data && typeof data === 'object' && !detail && data.detail) return '';  // a structured answer: left to apiDetailMessage
+  const reference = named ? named[1] : String(requestId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+  const ar = typeof state !== 'undefined' && state.language === 'ar';
+  if (!reference) return ar ? 'تعذّر على الخادم إتمام الطلب. حاول مرة أخرى.' : 'The server could not finish this. Try again.';
+  return ar
+    ? `تعذّر على الخادم إتمام الطلب (المرجع ${reference}). حاول مرة أخرى، وإذا تكرّر ذلك فاذكر هذا المرجع.`
+    : `The server could not finish this (reference ${reference}). Try again; if it happens again, quote the reference.`;
 }
 
 // The native client reports no status text, so without this every non-JSON
@@ -19911,7 +19954,8 @@ async function setOfficeHandover(itemId, received) {
   if (!saved) return;
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
-  showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
+  showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success',
+    next ? undoAction(() => undoOfficeHandover(id)) : null);  // the way back the row's own Undo button already takes
   // render() already schedules scoped icon creation (IconQueue.schedule(app)),
   // so the old follow-up full-document lucide.createIcons() was pure waste.
   render();
@@ -29922,7 +29966,8 @@ async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceip
   showNotification(
     isAr ? 'تم التحصيل' : 'Collected',
     (isAr ? `تم تسجيل ${fmtLyd(totalLYD)}` : `Recorded ${fmtLyd(totalLYD)}`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${fmtLyd(leftLYD)}` : ` — ${fmtLyd(leftLYD)} left`) : ''),
-    'success'
+    'success',
+    undoAction(() => uncollectReceipt(receipt.id))  // the way back the receipt's own "not collected" button already takes
   );
   render();
   if (window.lucide) lucide.createIcons();

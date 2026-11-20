@@ -327,9 +327,11 @@ async function apiJson(path, options = {}, timeout = {}) {
   }
   
   if (!resp.ok) {
+    let rid = '';
+    try { rid = resp.headers.get('X-Request-ID') || resp.albayanRequestId || ''; } catch (_) {}
     const msg = apiDetailMessage(data, _httpFailureText(resp.status, data, resp.statusText));
+    const fault = resp.status === 500 ? _serverFaultText(data, rid) : '';  // an unexpected failure: ordinary words and a reference
     try {
-      const rid = resp.headers.get('X-Request-ID') || resp.albayanRequestId || '';
       console.warn(`[apiJson] ${resp.status} ${options.method || 'GET'} ${path} rid=${rid} ${String(text || '').slice(0, 160).replace(/\s+/g, ' ')}`);
     } catch (_) {}
     // A definitive 401 during an authenticated request means cached business
@@ -344,12 +346,30 @@ async function apiJson(path, options = {}, timeout = {}) {
     ) {
       await handleServerAuthExpired(requestSessionIdentity);
     }
-    const err = new Error(msg);
+    const err = new Error(fault || msg);
     err.status = resp.status;
     err.payload = data;
     throw err;
   }
   return data;
+}
+
+// An unexpected failure on the server (HTTP 500), in ordinary words: what to do, and a reference to quote to
+// whoever looks after the server (redesign round 3, DESIGN.md 7.11). The reference is the id the server logged
+// the failure under when its reply names one ("Internal error (err_...). Please contact support."), else the id
+// this request carried, which every line of the server's log has. Anything else the server said is its own
+// message (also its longer debug text) and is shown as it is: this returns '' for it.
+function _serverFaultText(data, requestId) {
+  const detail = data && typeof data === 'object' && typeof data.detail === 'string' ? data.detail : '';
+  const named = /^Internal error \(([A-Za-z0-9_-]{4,40})\)\. Please contact support\.$/.exec(detail);
+  if (detail && !named) return '';
+  if (data && typeof data === 'object' && !detail && data.detail) return '';  // a structured answer: left to apiDetailMessage
+  const reference = named ? named[1] : String(requestId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+  const ar = typeof state !== 'undefined' && state.language === 'ar';
+  if (!reference) return ar ? 'تعذّر على الخادم إتمام الطلب. حاول مرة أخرى.' : 'The server could not finish this. Try again.';
+  return ar
+    ? `تعذّر على الخادم إتمام الطلب (المرجع ${reference}). حاول مرة أخرى، وإذا تكرّر ذلك فاذكر هذا المرجع.`
+    : `The server could not finish this (reference ${reference}). Try again; if it happens again, quote the reference.`;
 }
 
 // The native client reports no status text, so without this every non-JSON

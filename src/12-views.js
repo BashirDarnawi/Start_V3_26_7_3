@@ -4553,7 +4553,8 @@ async function setOfficeHandover(itemId, received) {
   if (!saved) return;
 
   addAuditLog('update', id, next ? 'Office handover marked as received' : 'Office handover undone', { isReceipt: !!receipt });
-  showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success');
+  showNotification(isAr ? 'نجاح' : 'Success', next ? (isAr ? 'تم استلام النقد في المكتب' : 'Cash received at office') : (isAr ? 'تم التراجع عن التسليم للمكتب' : 'Office handover undone'), 'success',
+    next ? undoAction(() => undoOfficeHandover(id)) : null);  // the way back the row's own Undo button already takes
   // render() already schedules scoped icon creation (IconQueue.schedule(app)),
   // so the old follow-up full-document lucide.createIcons() was pure waste.
   render();

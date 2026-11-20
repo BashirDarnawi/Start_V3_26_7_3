@@ -2366,6 +2366,195 @@ async function main() {
     assert.deepEqual(box, [['تسجيل دفعة #0007', 'الإجمالي 150.00 د.ل · المدفوع حتى الآن 0.00 د.ل',
       'اكتب المبلغ المدفوع حتى الآن. الإجمالي كاملاً يجعل الطلب «مدفوع»، وصفر يجعله «غير مدفوع»، وما بينهما «مدفوع جزئياً».'], '0.00', 'حفظ الدفعة']);
   });
+  await test('round 3 messages: a message can offer "Undo" where the app already has a way back (a receipt marked collected, cash received at the office, a Clothes step that moved no stock); pressing it takes that same way back, and a repeated message never keeps an earlier record\'s Undo', async () => {
+    // The message itself, drawn by the real function into a stand-in page.
+    const page = () => {
+      const { sandbox, state, run } = loadBrowserSource();
+      run('Security').escapeHtml = plainEscape;
+      delete sandbox.showNotification;  // the helper's stub hides the real one; the context still holds it
+      const timers = [], shown = [];
+      sandbox.setTimeout = (fn, ms) => { if (ms >= 1000) timers.push(ms); return 1; };  // the message's own timer (icons are drawn on a 16 ms one)
+      const container = { children: shown, appendChild(node) { shown.push(node); node.remove = () => { const at = shown.indexOf(node); if (at >= 0) shown.splice(at, 1); node.removed = true; }; } };
+      sandbox.document.getElementById = id => (id === 'notification-container' ? container : null);
+      sandbox.document.createElement = () => {
+        const node = { dataset: {}, attrs: {}, classes: new Set(), innerHTML: '', pressed: null, removed: false, offsetWidth: 0,
+          setAttribute(key, value) { this.attrs[key] = value; }, remove() { this.removed = true; },
+          querySelector(selector) { return selector === '.notification-action' && this.innerHTML.includes('class="notification-action"') ? { addEventListener: (name, fn) => { if (name === 'click') node.pressed = fn; } } : null; } };
+        node.classList = { add: (...names) => names.forEach(name => node.classes.add(name)), remove: (...names) => names.forEach(name => node.classes.delete(name)), contains: name => node.classes.has(name) };
+        Object.defineProperty(node, 'className', { set(value) { node.classes = new Set(String(value).split(/\s+/).filter(Boolean)); }, get() { return [...node.classes].join(' '); } });
+        return node;
+      };
+      return { sandbox, state, timers, shown, show: (...args) => run('showNotification')(...args) };  // the real function, by its name inside the page
+    };
+    const plainPage = page();
+    plainPage.show('Saved', 'Receipt saved', 'success');
+    assert.equal(plainPage.shown.length, 1);
+    assert.ok(!plainPage.shown[0].innerHTML.includes('notification-action') && plainPage.shown[0].pressed === null, 'a message without an action has no extra button');
+    assert.deepEqual(plainPage.timers, [5000], 'and leaves after five seconds, as before');
+    plainPage.show('Saved', 'Receipt saved', 'success');
+    assert.equal(plainPage.shown.length, 1, 'the same message again is not stacked (as before)');
+
+    for (const language of ['en', 'ar']) {
+      const { sandbox, state, timers, shown, show } = page();
+      state.language = language;
+      const ran = [];
+      const undo = sandbox.undoAction(() => ran.push('first'));
+      assert.equal(undo.label, language === 'ar' ? 'تراجع' : 'Undo');
+      show('Collected', 'Recorded 700.00 LYD', 'success', undo);
+      assert.equal(shown.length, 1);
+      assert.ok(shown[0].innerHTML.includes(`<button type="button" class="notification-action">${language === 'ar' ? 'تراجع' : 'Undo'}</button>`), shown[0].innerHTML);
+      assert.ok(shown[0].innerHTML.indexOf('notification-action') < shown[0].innerHTML.indexOf('this.parentElement.remove()'), 'the action comes before the close button');
+      assert.deepEqual(timers, [8000], 'a message with an action stays eight seconds');
+      assert.equal(shown[0].attrs.role, 'status');
+      // The same words for another record: the earlier message is replaced, so "Undo" is the newer record's.
+      const first = shown[0];
+      show('Collected', 'Recorded 700.00 LYD', 'success', sandbox.undoAction(() => ran.push('second')));
+      assert.ok(first.removed && shown.length === 1 && shown[0] !== first, 'one message, the new one');
+      shown[0].pressed();
+      assert.deepEqual(ran, ['second'], 'pressing runs the newer action, once');
+      assert.equal(shown.length, 0, 'and the message leaves');
+      // Not an action: no button, nothing to run.
+      show('Collected', 'Recorded 5.00 LYD', 'success', { label: 'Undo' });
+      assert.ok(!shown[0].innerHTML.includes('notification-action'));
+      // A label is text, never markup.
+      show('A', 'B', 'info', { label: '<img src=x onerror=alert(1)>', run() {} });
+      assert.ok(shown[1].innerHTML.includes('&lt;img src=x onerror=alert(1)&gt;') && !shown[1].innerHTML.includes('<img'));
+    }
+
+    // A receipt marked collected: "Undo" is the receipt's own way back.
+    {
+      const { sandbox, state } = loadBrowserSource();
+      state.language = 'en';
+      state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+      state.receipts = [{ id: 'r1', customerId: 'c1', amountUSD: 100, amountLocal: 700, exchangeRate: 7, paymentMethod: 'Cash (LYD)', serialNumber: '471300', status: 'Paid', isPaid: true }];
+      const notes = [], saved = [];
+      sandbox.showNotification = (title, message, type, action) => notes.push({ title, message, type, action });
+      sandbox.currentUserHasPermission = () => true;
+      sandbox.updateRecord = async (list, id, updates) => { saved.push({ id, ...updates }); Object.assign(list.find(row => row.id === id), updates); return true; };
+      Object.assign(sandbox, { render() {}, saveState() {}, _closeUrlTrackedOverlay() {}, _logReceiptCollection() {} });
+      assert.equal(await sandbox._saveReceiptCollection(state.receipts[0], [{ method: 'Cash (LYD)', amount: 700 }], 700, true), true);
+      assert.deepEqual([notes[0].title, notes[0].message, notes[0].type, notes[0].action && notes[0].action.label], ['Collected', 'Recorded 700.00 LYD', 'success', 'Undo']);
+      assert.equal(state.receipts[0].collected, true);
+      await notes[0].action.run();
+      assert.deepEqual(saved[1], { id: 'r1', collected: false, collectedAmount: null, collectedAt: null, collectedBy: null }, 'exactly what the "not collected" button saves');
+      assert.deepEqual([notes[1].title, notes[1].type, notes[1].action], ['Collection Removed', 'info', undefined], 'the way back says so itself and offers nothing further');
+      // Without the permission the way back refuses, as its button does.
+      sandbox.currentUserHasPermission = () => false;
+      await notes[0].action.run();
+      assert.equal(saved.length, 2);
+    }
+
+    // Cash received at the office: "Undo" is the row's own Undo.
+    {
+      const { sandbox, state } = loadBrowserSource();
+      state.language = 'ar';
+      state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+      state.receipts = [{ id: 'r9', customerId: 'c1', deliveryStatus: 'Delivered' }];
+      const notes = [], saved = [];
+      sandbox.showNotification = (title, message, type, action) => notes.push({ title, message, type, action });
+      sandbox.isCurrentUserAdmin = () => true;
+      sandbox.currentUserHasPermission = () => true;
+      sandbox.updateRecord = async (list, id, updates) => { saved.push(updates.isReceivedInOffice); Object.assign(list.find(row => row.id === id), updates); return true; };
+      Object.assign(sandbox, { render() {}, addAuditLog() {} });
+      await sandbox.setOfficeHandover('r9', true);
+      assert.deepEqual([notes[0].message, notes[0].action && notes[0].action.label], ['تم استلام النقد في المكتب', 'تراجع']);
+      await notes[0].action.run();
+      await new Promise(resolve => setImmediate(resolve));  // the row's Undo does not hand its promise back
+      assert.deepEqual(saved, [true, false]);
+      assert.deepEqual([notes[1].message, notes[1].action], ['تم التراجع عن التسليم للمكتب', null], 'taking it back offers no further Undo');
+    }
+
+    // Clothes: a step that moved no stock offers "Undo"; one that asked about stock does not.
+    {
+      const { sandbox, state } = clothesFixture();
+      state.language = 'en';
+      const notes = [];
+      sandbox.showNotification = (title, message, type, action) => notes.push({ title, message, type, action });
+      sandbox.updateClothesShipmentsFiltered = () => {};
+      sandbox.isServerModeEnabled = () => false;
+      sandbox.appConfirm = async () => true;
+      sandbox.applyClothesShipmentStockDelta = async () => true;
+      sandbox.applyClothesOrderStockDelta = async () => true;
+      sandbox.updateRecord = async (list, id, updates) => { Object.assign(list.find(row => row.id === id), updates); return true; };
+      state.clothesShipments = [{ id: 's1', ref: 'SHP-1', status: 'Ordered', stockApplied: false, items: [{ productId: 'p1', colorId: 'c1', size: 'M', qty: 2 }], createdBy: 'admin' }];
+      await sandbox.setClothesShipmentStatus('s1', 'Shipped');
+      assert.deepEqual([notes[0].message, notes[0].action && notes[0].action.label, state.clothesShipments[0].status], ['Shipment status is now: Shipped', 'Undo', 'Shipped']);
+      await notes[0].action.run();
+      assert.equal(state.clothesShipments[0].status, 'Ordered', 'back to the status it had');
+      assert.equal(notes[1].action && notes[1].action.label, 'Undo', 'the way back is a step too, and can be taken back');
+      await sandbox.setClothesShipmentStatus('s1', 'Received');
+      assert.equal(state.clothesShipments[0].status, 'Received');
+      assert.equal(notes[2].action, null, 'receiving moved stock: no Undo in the message');
+      await sandbox.setClothesShipmentStatus('s1', 'Arrived');
+      assert.equal(notes[3].action, null, 'un-receiving moved stock: no Undo in the message');
+
+      state.clothesOrders = [{ id: 'o1', orderNo: 3, customerName: 'Sara', status: 'New', stockDeducted: true, paymentStatus: 'Not Paid', lines: [{ productId: 'p1', qty: 1, priceLYD: 50 }], createdBy: 'admin' }];
+      notes.length = 0;
+      await sandbox.setClothesOrderStatus('o1', 'On the way');
+      assert.deepEqual([notes[0].message, notes[0].action && notes[0].action.label], ['Order status is now: On the way', 'Undo']);
+      await sandbox.setClothesOrderStatus('o1', 'Delivered');
+      assert.ok(state.clothesOrders[0].deliveredAt, 'delivered now');
+      await notes[1].action.run();
+      assert.deepEqual([state.clothesOrders[0].status, state.clothesOrders[0].deliveredAt], ['On the way', null], 'Undo is the same step back that "More" takes');
+      await sandbox.setClothesOrderStatus('o1', 'Canceled');
+      assert.equal(state.clothesOrders[0].status, 'Canceled');
+      assert.equal(notes[notes.length - 1].action, null, 'cancelling returned pieces to stock: no Undo in the message');
+    }
+    const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
+    assert.ok(/\.notification-action \{[^}]*min-height: 44px;/.test(css), 'the button is full height for a finger');
+  });
+
+  await test('round 3 server faults: an unexpected failure on the server (HTTP 500) is said in ordinary words in the screen language, with the reference the server logged it under (before: "Internal error (err_...). Please contact support.", in English on an Arabic screen); every other answer of the server keeps its own words', async () => {
+    const ask = async ({ status = 500, body, language = 'en', requestId = 'k3f9x2ab-1c', statusText = '' }) => {
+      const { sandbox, state } = loadBrowserSource();
+      state.language = language;
+      state.currentUser = null;  // no session handling in this check
+      sandbox.console = { warn() {}, log() {}, error() {} };
+      sandbox.apiFetch = async () => ({ ok: status >= 200 && status < 300, status, statusText, albayanRequestId: requestId,
+        headers: { get: name => (name === 'X-Request-ID' ? requestId : name === 'Retry-After' ? '30' : null) }, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
+      try { await sandbox.apiJson('/api/collections/receipts', { method: 'POST', body: {} }); } catch (error) { return { message: error.message, status: error.status, payload: error.payload }; }
+      return { message: 'no error' };
+    };
+    const production = { detail: 'Internal error (err_4f2a9c). Please contact support.' };
+    // The server's own "unexpected error" answer: ordinary words, and the id it logged the failure under.
+    let out = await ask({ body: production });
+    assert.equal(out.message, 'The server could not finish this (reference err_4f2a9c). Try again; if it happens again, quote the reference.');
+    assert.deepEqual([out.status, JSON.stringify(out.payload)], [500, JSON.stringify(production)], 'the status and the server\'s own answer stay on the error for the code that reads them');
+    out = await ask({ body: production, language: 'ar' });
+    assert.equal(out.message, 'تعذّر على الخادم إتمام الطلب (المرجع err_4f2a9c). حاول مرة أخرى، وإذا تكرّر ذلك فاذكر هذا المرجع.');
+    // A 500 that is not the app's own answer (a proxy's page, an empty body): the id this request carried.
+    out = await ask({ body: '<html><body>Internal Server Error</body></html>', statusText: 'Internal Server Error' });
+    assert.equal(out.message, 'The server could not finish this (reference k3f9x2ab-1c). Try again; if it happens again, quote the reference.');
+    out = await ask({ body: '', language: 'ar' });
+    assert.equal(out.message, 'تعذّر على الخادم إتمام الطلب (المرجع k3f9x2ab-1c). حاول مرة أخرى، وإذا تكرّر ذلك فاذكر هذا المرجع.');
+    out = await ask({ body: '', requestId: '' });
+    assert.equal(out.message, 'The server could not finish this. Try again.', 'no reference is invented');
+    out = await ask({ body: '', requestId: 'abc<script>"x' });
+    assert.equal(out.message, 'The server could not finish this (reference abcscriptx). Try again; if it happens again, quote the reference.', 'a reference is letters, digits, - and _ only');
+    // Anything else keeps its own words: the longer text of a server in debug mode, a 500 the server explains itself,
+    // the busy-server sentence, a refusal, a validation list.
+    out = await ask({ body: { detail: 'Internal error (err_4f2a9c): KeyError: boom' } });
+    assert.equal(out.message, 'Internal error (err_4f2a9c): KeyError: boom');
+    out = await ask({ body: { detail: 'Backup storage is not reachable' } });
+    assert.equal(out.message, 'Backup storage is not reachable');
+    out = await ask({ body: { detail: [{ loc: ['body', 'name'], msg: 'field required' }] } });
+    assert.equal(out.message, 'name: field required');
+    out = await ask({ status: 503, body: '<html>busy</html>' });
+    assert.equal(out.message, 'The server is busy or restarting (HTTP 503). Try again in a moment.');
+    out = await ask({ status: 409, body: { detail: 'Record was changed on another device' } });
+    assert.equal(out.message, 'Record was changed on another device');
+    out = await ask({ status: 400, body: production });
+    assert.equal(out.message, production.detail, 'only a 500 is an unexpected failure');
+    // On an Arabic screen the sentence is already Arabic, so the helper that never shows raw English keeps it (and its reference).
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'ar';
+    const arabic = 'تعذّر على الخادم إتمام الطلب (المرجع err_4f2a9c). حاول مرة أخرى، وإذا تكرّر ذلك فاذكر هذا المرجع.';
+    assert.equal(sandbox.errText({ message: arabic }, 'Save failed', 'فشل الحفظ'), arabic);
+    assert.equal(sandbox.errText({ message: production.detail }, 'Save failed', 'فشل الحفظ'), 'فشل الحفظ', 'before: the reference was dropped on an Arabic screen');
+    const toast = sandbox._serverRefusalToast('save', 'receipts', { message: arabic, status: 500 });
+    assert.deepEqual([...toast], ['خطأ في الخادم', `فشل حفظ الوصل: ${arabic} (500)`]);
+  });
+
   await test('round 3 first-run setup: the screen is titled by what it does, the "server did not answer" notice is a calm note that keeps its caution and its Retry button (before: a red alarm headed "Server unreachable"), every field is tied to its label, and the recovery-key line shows only where a key follows', async () => {
     const { sandbox, state } = loadBrowserSource();
     const draw = (language, { probeFailed = false, server = false } = {}) => {
