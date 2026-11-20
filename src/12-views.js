@@ -4075,8 +4075,8 @@ function renderDeliveriesView(logOnly) {
   const filterDriver = state.deliveryFilter?.driver || 'all';
   const searchTerm = state.deliveryFilter?.search || '';
 
+  // First what a status tab keeps (the driver and the search), so each tab can say how many jobs it would list.
   let filteredDeliveries = [...deliveryReceipts];
-  if (filterStatus !== 'all') filteredDeliveries = filteredDeliveries.filter(d => d.deliveryStatus === filterStatus);
   if (filterDriver !== 'all') filteredDeliveries = filteredDeliveries.filter(d => String(d.deliveryPersonId || '') === String(filterDriver || ''));
   if (searchTerm) {
     // foldSearchText on BOTH sides: the driver's primary phone lookup must
@@ -4096,7 +4096,23 @@ function renderDeliveriesView(logOnly) {
       return name.includes(term) || phone.includes(term) || phoneKeyHit || numberHit;
     });
   }
-  filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
+  const deliveryTabCounts = {};
+  filteredDeliveries.forEach(d => { deliveryTabCounts[d.deliveryStatus] = (deliveryTabCounts[d.deliveryStatus] || 0) + 1; });
+  const deliveryTabs = [['all', "filterDeliveries('status', 'all')", isAr ? 'الكل' : 'All', filteredDeliveries.length]]
+    .concat(DELIVERY_STATUSES.map(s => [s, `filterDeliveries('status', '${s}')`, trStatus(s), deliveryTabCounts[s] || 0]));
+  if (filterStatus !== 'all') filteredDeliveries = filteredDeliveries.filter(d => d.deliveryStatus === filterStatus);
+  // The order a dispatch desk works in: jobs with no driver yet, then each driver's open jobs, then
+  // the finished ones; the newest first inside each. A group key sorts as text: '0', '1<driver>', '2'.
+  const deliveryDriverNames = new Map(deliveryUsers.map(u => [String(u.id), String(u.name || '')]));
+  const deliveryGroupOf = d => (d.deliveryStatus !== 'Needs Delivery' && d.deliveryStatus !== 'In Progress') ? '2'
+    : d.deliveryPersonId ? `1${deliveryDriverNames.get(String(d.deliveryPersonId)) || ''}\n${d.deliveryPersonId}` : '0';
+  const deliveryGroups = new Map(filteredDeliveries.map(d => [d, [deliveryGroupOf(d), new Date(d.createdAt || d.date || 0).getTime() || 0]]));
+  filteredDeliveries.sort((a, b) => {
+    const x = deliveryGroups.get(a), y = deliveryGroups.get(b);
+    return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : y[1] - x[1];
+  });
+  const deliveryGroupSizes = {};
+  deliveryGroups.forEach(([group]) => { deliveryGroupSizes[group] = (deliveryGroupSizes[group] || 0) + 1; });
   const deliveryFilterFingerprint = JSON.stringify([filterStatus, filterDriver, searchTerm]);
   if (deliveryFilterFingerprint !== _deliveriesFilterFingerprint) {
     _deliveriesFilterFingerprint = deliveryFilterFingerprint;
@@ -4146,9 +4162,9 @@ function renderDeliveriesView(logOnly) {
         </header>
         ${isUrgent ? `<p class="ops-attention"><i data-lucide="alert-circle" class="w-4 h-4"></i>${isAr ? 'بانتظار تعيين سائق' : 'Waiting for a driver'}</p>` : ''}
         <div class="ops-delivery-money">
-          <div><span class="ops-field-label">${isAr ? 'المبلغ' : 'Amount'}</span><strong><bdi>${debtLocal.toLocaleString('en-US')} <small>LYD</small></bdi></strong><span class="ops-secondary-money"><bdi>$${debtUSD.toFixed(2)}</bdi></span></div>
+          <div><span class="ops-field-label">${isAr ? 'المبلغ' : 'Amount'}</span><strong><bdi>${fmt2(debtLocal)} <small>${isAr ? 'د.ل' : 'LYD'}</small></bdi></strong><span class="ops-secondary-money"><bdi>${fmtUsd(debtUSD)}</bdi></span></div>
           <div><span class="ops-field-label">${isAr ? 'التاريخ' : 'Date'}</span><span class="ops-date">${formatDateShort(ad.createdAt || ad.date)}</span>
-            ${String(ad.deliveryStatus || '') === 'Delivered' ? `<span class="ops-collected">${isAr ? 'المُحصَّل' : 'Collected'} <bdi>${collectedCash.toLocaleString('en-US')} LYD</bdi></span>` : ''}
+            ${String(ad.deliveryStatus || '') === 'Delivered' ? `<span class="ops-collected">${isAr ? 'المُحصَّل' : 'Collected'} <bdi>${fmtLyd(collectedCash)}</bdi></span>` : ''}
           </div>
         </div>
         <div class="ops-assignment">
@@ -4178,11 +4194,22 @@ function renderDeliveriesView(logOnly) {
   };
   // Keep the entire result region self-contained: the debounced search swaps
   // this exact node's contents without replacing the focused search field.
+  // A heading where the group changes, when the list holds more than one group.
+  let deliveryGroupShown = Object.keys(deliveryGroupSizes).length > 1 ? null : false;
+  const renderDeliveryGroupHeading = d => {
+    const group = deliveryGroups.get(d)[0];
+    if (deliveryGroupShown === false || group === deliveryGroupShown) return '';
+    deliveryGroupShown = group;
+    const name = group === '0' ? (isAr ? 'بلا سائق بعد' : 'No driver yet') : group === '2' ? (isAr ? 'منتهية' : 'Finished')
+      : esc(group.slice(1).split('\n')[0] || (isAr ? 'سائق غير معروف' : 'Unknown driver'));
+    return `<h3 class="ops-group${group === '0' ? ' is-urgent' : ''}">${name} <span>(${deliveryGroupSizes[group]})</span></h3>`;
+  };
   const resultsHtml = `
     <div id="delivery-log-results" class="ops-delivery-results">
+      ${renderQuickTabs('delivery-status-tabs', isAr ? 'حالة التوصيل' : 'Delivery status', filterStatus, deliveryTabs)}
       <p class="ops-result-count" role="status">${isAr ? `عرض ${visibleDeliveryRows.length} من ${filteredDeliveries.length} توصيلة` : `Showing ${visibleDeliveryRows.length} of ${filteredDeliveries.length} deliveries`}</p>
       <div class="ops-delivery-grid">
-        ${filteredDeliveries.length === 0 ? `<div class="ops-empty"><span class="ops-empty-icon"><i data-lucide="inbox" class="w-7 h-7"></i></span><h3>${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</h3><p>${isAr ? 'ستظهر مهام التوصيل هنا. يمكنك تعديل الفلاتر للبحث في السجل.' : 'Delivery missions appear here. Adjust your filters to search the log.'}</p></div>` : visibleDeliveryRows.map(renderDeliveryCard).join('')}
+        ${filteredDeliveries.length === 0 ? `<div class="ops-empty"><span class="ops-empty-icon"><i data-lucide="inbox" class="w-7 h-7"></i></span><h3>${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</h3><p>${isAr ? 'ستظهر مهام التوصيل هنا. يمكنك تعديل الفلاتر للبحث في السجل.' : 'Delivery missions appear here. Adjust your filters to search the log.'}</p></div>` : visibleDeliveryRows.map(d => renderDeliveryGroupHeading(d) + renderDeliveryCard(d)).join('')}
       </div>
       ${remainingDeliveryRows > 0 ? `<div class="ops-load-more"><button type="button" onclick="loadMoreDeliveries()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveryRows} متبقي)` : `Load more (${remainingDeliveryRows} remaining)`}</button></div>` : ''}
     </div>`;
@@ -4208,9 +4235,9 @@ function renderDeliveriesView(logOnly) {
       ${!canViewDeliveryStats ? '' : `
         <section class="ops-kpi-rail" aria-label="${isAr ? 'ملخص التوصيل' : 'Delivery summary'}">
           <div class="ops-kpi"><span class="ops-kpi-icon ops-status--waiting"><i data-lucide="clock-3" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'بانتظار التوصيل' : 'Pending Delivery'}</span><strong>${stats.pendingDelivery}</strong><small>${isAr ? 'وصولات لم تُوصَّل بعد' : 'Receipts not yet delivered'}</small></div>
-          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--done"><i data-lucide="wallet" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</span><strong><bdi>${stats.uncollectedLYD.toLocaleString('en-US')} <small>LYD</small></bdi></strong><small>${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</small></div>
+          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--done"><i data-lucide="wallet" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</span><strong><bdi>${fmt2(stats.uncollectedLYD)} <small>${isAr ? 'د.ل' : 'LYD'}</small></bdi></strong><small>${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</small></div>
           <div class="ops-kpi"><span class="ops-kpi-icon ops-status--active"><i data-lucide="package-check" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'بحوزة السائقين' : 'Held by Drivers'}</span><strong>${stats.heldByDrivers}</strong><small>${isAr ? 'تم توصيلها لكن ليست في المكتب' : 'Delivered but not in office'}</small></div>
-          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--active"><i data-lucide="banknote" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</span><strong><bdi>${stats.driverCashLYD.toLocaleString('en-US')} <small>LYD</small></bdi></strong><small>${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</small></div>
+          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--active"><i data-lucide="banknote" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</span><strong><bdi>${fmt2(stats.driverCashLYD)} <small>${isAr ? 'د.ل' : 'LYD'}</small></bdi></strong><small>${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</small></div>
         </section>
         <section class="ops-pipeline" aria-label="${isAr ? 'خط السير' : 'Pipeline'}">
           <div><span class="ops-step">1</span><span>${isAr ? 'بانتظار التعيين' : 'Pending Assignment'}</span><strong>${stats.pendingAssignment}</strong></div>
@@ -4220,9 +4247,9 @@ function renderDeliveriesView(logOnly) {
         </section>
         <section class="ops-fee-strip" aria-label="${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}">
           <h2><i data-lucide="coins" class="w-4 h-4"></i>${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</h2>
-          <div><span>${isAr ? 'المُحصَّل' : 'Collected'}</span><bdi>${stats.feesCollectedLYD.toLocaleString('en-US')} LYD</bdi></div>
-          <div class="${stats.feesShopPaidLYD > 0 ? 'ops-text-danger' : ''}"><span>${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'}</span><bdi>${stats.feesShopPaidLYD.toLocaleString('en-US')} LYD</bdi></div>
-          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')} LYD</bdi></div>
+          <div><span>${isAr ? 'المُحصَّل' : 'Collected'}</span><bdi>${fmtLyd(stats.feesCollectedLYD)}</bdi></div>
+          <div class="${stats.feesShopPaidLYD > 0 ? 'ops-text-danger' : ''}"><span>${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'}</span><bdi>${fmtLyd(stats.feesShopPaidLYD)}</bdi></div>
+          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${fmtLyd(Math.abs(stats.feeVarianceLYD))}</bdi></div>
         </section>
       `}
       <div class="ops-board ${canViewDeliveryStats ? 'has-driver-panel' : ''}">
@@ -4230,7 +4257,6 @@ function renderDeliveriesView(logOnly) {
           <div class="ops-section-heading"><div><p class="ops-eyebrow">${isAr ? 'كل المهام في مكان واحد' : 'Every mission in one place'}</p><h2>${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2></div><span class="ops-section-icon"><i data-lucide="list-checks" class="w-5 h-5"></i></span></div>
           <div class="ops-controls">
             <label class="ops-search" for="delivery-search-input"><span class="sr-only">${isAr ? 'بحث في التوصيلات' : 'Search deliveries'}</span><i data-lucide="search" class="w-5 h-5"></i><input id="delivery-search-input" type="search" placeholder="${isAr ? 'العميل، الهاتف أو رقم الوصل...' : 'Customer, phone or receipt number...'}" value="${esc(searchTerm)}" oninput="filterDeliveries('search', this.value)" autocomplete="off" /></label>
-            <label><span class="ops-field-label">${isAr ? 'الحالة' : 'Status'}</span><select onchange="filterDeliveries('status', this.value)" class="ops-select"><option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>${DELIVERY_STATUSES.map(s => `<option value="${esc(s)}" ${filterStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>
             <label><span class="ops-field-label">${isAr ? 'السائق' : 'Driver'}</span><select onchange="filterDeliveries('driver', this.value)" class="ops-select"><option value="all" ${filterDriver === 'all' ? 'selected' : ''}>${isAr ? 'كل السائقين' : 'All Drivers'}</option>${deliveryUsers.map(u => `<option value="${esc(u.id)}" ${filterDriver === u.id ? 'selected' : ''}>${esc(u.name || '')}</option>`).join('')}</select></label>
           </div>
           ${resultsHtml}
@@ -4243,7 +4269,7 @@ function renderDeliveriesView(logOnly) {
                 <article class="ops-driver-card">
                   <div class="ops-driver-heading"><span class="ops-driver-avatar" aria-hidden="true">${esc(String(driver.name || '?').charAt(0))}</span><div><h3>${esc(driver.name || '')}</h3><p>${driver.totalAssigned} ${isAr ? 'مُعيَّنة' : 'assigned'}</p></div><strong>${driver.successRate}%</strong></div>
                   <div class="ops-driver-metrics"><div><span>${isAr ? 'معلّقة' : 'Pending'}</span><b>${driver.pending}</b></div><div><span>${isAr ? 'نشطة' : 'Active'}</span><b>${driver.inProgress}</b></div><div><span>${isAr ? 'منجزة' : 'Done'}</span><b>${driver.completed}</b></div></div>
-                  <div class="ops-driver-held"><span>${isAr ? 'بحوزته' : 'Held'}</span><strong><bdi>${driver.heldCash.toLocaleString('en-US')} LYD</bdi></strong></div>
+                  <div class="ops-driver-held"><span>${isAr ? 'بحوزته' : 'Held'}</span><strong><bdi>${fmtLyd(driver.heldCash)}</bdi></strong></div>
                 </article>`).join('')}
             </div>
           </aside>`}
@@ -5409,6 +5435,8 @@ function renderReconciliationView() {
     .sort((a, b) => (done.get(a) - done.get(b))
       || ((getAdReconciliationTriggerDay(b)?.getTime() || 0) - (getAdReconciliationTriggerDay(a)?.getTime() || 0)));
   const pendingCount = visibleAds.filter(ad => !done.get(ad)).length;
+  // The ad's short number, as the Ads screen shows it with no filter on (the newest ad has the highest).
+  const adNumbers = new Map(getAdsVisibleToCurrentUser().map((ad, index, all) => [String(ad.id), all.length - index]));
   return `
     <div class="ops-workspace ops-reconciliation">
       <header class="ops-hero">
@@ -5461,6 +5489,8 @@ function renderReconciliationView() {
                       label: isAr ? 'انتهى' : 'Ended'
                     };
               const informedBy = state.users.find(u => String(u.id) === String(ad.remainingCustomerInformedBy || ''));
+              const reconCustomer = Security.escapeHtml(customer?.name || (isAr ? 'العميل' : 'the customer'));
+              const reconWords = reconciliationWords(remainingUSD, customer?.name || (isAr ? 'العميل' : 'the customer'), hasSavedSpend);
               const informedDetails = informed
                 ? [
                     informedBy?.name || '',
@@ -5471,7 +5501,7 @@ function renderReconciliationView() {
                 <header class="ops-reconciliation-header">
                   <span class="ops-record-icon" aria-hidden="true"><i data-lucide="megaphone" class="w-5 h-5"></i></span>
                   <div class="ops-record-identity">
-                    <p class="ops-eyebrow">${isAr ? 'إعلان' : 'Ad'} <bdi>#${Security.escapeHtml(ad.displayNumber || id)}</bdi></p>
+                    <p class="ops-eyebrow">${isAr ? 'إعلان' : 'Ad'} <bdi>#${Security.escapeHtml(String(ad.displayNumber || adNumbers.get(id) || id))}</bdi></p>
                     <h2>${Security.escapeHtml(customer?.name || (isAr ? 'عميل غير معروف' : 'Unknown customer'))}</h2>
                     <p>${Security.escapeHtml(page?.name || (isAr ? 'بدون صفحة' : 'No page'))}</p>
                     ${ad.metaAdName ? `<p class="ops-ad-name">${Security.escapeHtml(String(ad.metaAdName))}</p>` : ''}
@@ -5482,10 +5512,11 @@ function renderReconciliationView() {
                   <span><i data-lucide="calendar" class="w-4 h-4"></i>${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
                   <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
                 </div>
+                <p id="reconciliation-result-${safeId}" class="ops-reconciliation-result" data-customer="${reconCustomer}">${Security.escapeHtml(reconWords[0])}</p>
                 <div class="ops-reconciliation-money">
                   <div class="ops-reconciliation-budget">
                     <span class="ops-field-label">${isAr ? 'ميزانية الإعلان' : 'Ad budget'}</span>
-                    <strong><bdi>$${amountUSD.toFixed(2)}</bdi></strong>
+                    <strong><bdi>${fmtUsd(amountUSD)}</bdi></strong>
                     <small>${isAr ? 'المبلغ المخطط للإعلان' : 'Planned ad amount'}</small>
                   </div>
                   <div class="ops-reconciliation-spend">
@@ -5494,7 +5525,7 @@ function renderReconciliationView() {
                   </div>
                   <div class="ops-reconciliation-remaining">
                     <span class="ops-field-label">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</span>
-                    <strong id="reconciliation-remaining-${safeId}">${remainingUSD === null ? '—' : `$${remainingUSD.toFixed(2)}`}</strong>
+                    <strong id="reconciliation-remaining-${safeId}">${remainingUSD === null ? '—' : fmtUsd(remainingUSD)}</strong>
                   </div>
                 </div>
                 ${manualSpentOverride ? `<p class="ops-spend-source ops-spend-source--corrected"><i data-lucide="badge-check" class="h-4 w-4"></i><span>${isAr ? 'هذا هو المصروف النهائي المصحح والمحفوظ. يمكنك تعديله مرة أخرى.' : 'This is the saved corrected final spend. You can edit it again.'}</span></p>` : (metaSpendAuto ? `<p class="ops-spend-source"><i data-lucide="refresh-cw" class="h-4 w-4"></i><span>${isAr ? `معبأ من Meta (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). صححه قبل الحفظ إذا كان المبلغ النهائي مختلفاً.` : `Prefilled from Meta (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if the final amount is different.`}</span></p>` : '')}
@@ -5510,15 +5541,13 @@ function renderReconciliationView() {
                     <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
                     <span id="reconciliation-informed-help-${safeId}" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
                       ? (isAr
-                          ? `تغيّر المبلغ المتبقي${remainingUSD === null ? '' : ` إلى $${remainingUSD.toFixed(2)}`} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
-                          : `The remaining amount changed${remainingUSD === null ? '' : ` to $${remainingUSD.toFixed(2)}`} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                          ? `تغيّر المبلغ المتبقي${remainingUSD === null ? '' : ` إلى ${fmtUsd(remainingUSD)}`} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                          : `The remaining amount changed${remainingUSD === null ? '' : ` to ${fmtUsd(remainingUSD)}`} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
                       : (informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.'))}</span>
                   </span>
                 </label>
                 <div class="ops-reconciliation-save">
-                  <button id="reconciliation-submit-${safeId}" type="button" onclick="confirmStopAd('${safeId}', 'reconciliation')" class="ops-button ops-button--primary" ${canReconcile ? '' : 'disabled'}><i data-lucide="check" class="w-4 h-4"></i>
-                    ${hasSavedSpend ? (isAr ? 'تحديث التسوية' : 'Update reconciliation') : (isAr ? 'حفظ وإرجاع المتبقي' : 'Save & return remaining')}
-                  </button>
+                  <button id="reconciliation-submit-${safeId}" type="button" onclick="confirmStopAd('${safeId}', 'reconciliation')" class="ops-button ops-button--primary" ${canReconcile ? '' : 'disabled'}><i data-lucide="check" class="w-4 h-4"></i><span id="reconciliation-submit-label-${safeId}"${hasSavedSpend ? ' data-saved="1"' : ''}>${reconWords[1]}</span></button>
                 </div>
                 ${!canReconcile ? `<p class="mt-2 text-xs text-rose-600">${isAr ? 'ليس لديك صلاحية تسوية هذا الإعلان.' : 'You do not have permission to reconcile this ad.'}</p>` : ''}
               </section>`;

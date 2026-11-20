@@ -548,7 +548,7 @@ check('delivery cards paginate filtered records with bilingual labels and scoped
   deliveryWorkspaceSource.includes('_deliveriesShowLimit = DELIVERIES_PAGE_SIZE;') &&
   deliveryWorkspaceSource.includes('const visibleDeliveryRows = filteredDeliveries.slice(0, _deliveriesShowLimit);') &&
   deliveryWorkspaceSource.includes('const remainingDeliveryRows = filteredDeliveries.length - visibleDeliveryRows.length;') &&
-  deliveryWorkspaceSource.includes('visibleDeliveryRows.map(renderDeliveryCard)') &&
+  deliveryWorkspaceSource.includes('visibleDeliveryRows.map(d => renderDeliveryGroupHeading(d) + renderDeliveryCard(d))') &&
   deliveryWorkspaceSource.includes('data-delivery-record="${safeId}"') &&
   deliveryWorkspaceSource.includes('onclick="loadMoreDeliveries()"') &&
   ['Driver', 'Amount', 'Status', 'Office handover', 'Date', 'Actions']

@@ -257,6 +257,20 @@ function stopAd(id) {
   }
 }
 
+// A reconciliation card says its result first, as one sentence, and its button repeats the amount
+// (DESIGN.md section 8, T7). remaining: null while no spend is entered. Returns [sentence, button].
+function reconciliationWords(remaining, customerName, saved) {
+  const isAr = state.language === 'ar';
+  const back = remaining > 0 ? fmtUsd(remaining) : '';
+  return [
+    remaining === null ? (isAr ? 'أدخل ما صرفته ميتا ليظهر هنا المبلغ الذي يعود للعميل.' : 'Enter what Meta spent to see what goes back to the customer.')
+      : back ? (isAr ? `يعود إلى ${customerName} مبلغ ${back}.` : `${back} goes back to ${customerName}.`)
+      : (isAr ? 'لا شيء يعود: صُرفت الميزانية كاملة.' : 'Nothing goes back: the whole budget was spent.'),
+    back ? (isAr ? `${saved ? 'تحديث' : 'حفظ'} وإرجاع ${back}` : `${saved ? 'Update' : 'Save'} and return ${back}`)
+      : saved ? (isAr ? 'تحديث التسوية' : 'Update reconciliation') : (isAr ? 'حفظ وإرجاع المتبقي' : 'Save & return remaining')
+  ];
+}
+
 function updateReconciliationPreview(id) {
   const ad = state.ads.find(a => String(a.id) === String(id));
   if (!ad) return;
@@ -267,14 +281,21 @@ function updateReconciliationPreview(id) {
   if (!input || !remainingDisplay) return;
   const raw = String(input.value || '').trim();
   const spent = Number(raw);
-  if (!raw || !Number.isFinite(spent)) {
+  const typed = !!raw && Number.isFinite(spent);
+  const amount = Math.max(Number(ad.amountUSD) || 0, 0);
+  const remaining = Math.max(amount - spent, 0);
+  // The sentence and the button follow the typed spend (a preview: nothing is saved).
+  const result = document.getElementById(`reconciliation-result-${id}`);
+  const label = document.getElementById(`reconciliation-submit-label-${id}`);
+  const words = reconciliationWords(typed ? remaining : null, result?.dataset.customer || '', !!label?.dataset.saved);
+  if (result) result.textContent = words[0];
+  if (label) label.textContent = words[1];
+  if (!typed) {
     remainingDisplay.textContent = '—';
     syncAdCustomerInformedControl(ad, informedInput, NaN);
     return;
   }
-  const amount = Math.max(Number(ad.amountUSD) || 0, 0);
-  const remaining = Math.max(amount - spent, 0);
-  remainingDisplay.textContent = '$' + remaining.toFixed(2);
+  remainingDisplay.textContent = fmtUsd(remaining);
   const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, amount);
   if (informedInput && !canActOnRecord('ads', 'stopAd', ad.creatorId || ad.createdBy)) {
     informedInput.disabled = true;

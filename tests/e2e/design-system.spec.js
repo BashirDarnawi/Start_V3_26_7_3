@@ -247,7 +247,10 @@ test(`Ads retain the classic table and phone rows while other operations keep ca
         await expect(spend).toBeEditable();
         // Preview only: changing a field must not send a financial mutation.
         await spend.fill('5000.25');
-        await expect(page.locator(`#reconciliation-remaining-${ids.ad}`)).toHaveText('$7345.42');
+        await expect(page.locator(`#reconciliation-remaining-${ids.ad}`)).toHaveText('$7,345.42');
+        // The result is said first, as a sentence, and the button repeats the amount (redesign round 3).
+        await expect(page.locator(`#reconciliation-result-${ids.ad}`)).toContainText('$7,345.42');
+        await expect(page.locator(`#reconciliation-submit-label-${ids.ad}`)).toContainText('$7,345.42');
       }
       await assertPageAndCardsFit(page, `${view} structural layout ${width}`);
       await captureDesign(page, testInfo, `${view}-workspace`);

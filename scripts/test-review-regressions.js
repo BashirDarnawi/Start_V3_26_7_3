@@ -1514,6 +1514,102 @@ async function main() {
     draw();
     assert.deepEqual(words('a1'), ['Details', 'Top-ups (1)', 'Refund', 'History (2)'], 'as before the redesign: these four open read-only or permission-checked dialogs');
   });
+  await test('round 3 Deliveries: the status filter is tabs with counts, jobs with no driver lead the list, then each driver\'s open jobs, then the finished ones, and amounts are written one way', async () => {
+    const f = frameFixture(frameAdmin, 'deliveries');
+    f.sandbox.render = () => {};
+    const ali = { id: 'drvA', name: 'Ali', role: 'Delivery', permissions: {} }, basma = { id: 'drvB', name: 'Basma', role: 'Delivery', permissions: {} };
+    f.state.users = [frameAdmin, basma, ali];
+    f.state.defaultExchangeRate = 7;
+    f.state.customers = [{ id: 'c1', name: 'Medina Coffee', phones: ['0911111111'] }, { id: 'c2', name: 'Tripoli Sweets', phones: ['0922222222'] }];
+    const job = (n, status, driver, extra = {}) => ({ id: 'r' + n, customerId: n === 7 ? 'c2' : 'c1', amountUSD: 100 + n, amountLocal: 1234.5 + n, exchangeRate: 7, status: 'Not Paid', isPaid: false, needsDelivery: true, receiptType: 'DELIVERY', tempReceiptNo: 'D' + n, deliveryStatus: status, deliveryPersonId: driver, createdAt: `2026-11-${String(10 + n).padStart(2, '0')}T10:00:00Z`, ...extra });
+    f.state.receipts = [
+      job(1, 'Needs Delivery', 'drvB'), job(2, 'Needs Delivery', ''), job(3, 'In Progress', 'drvA'), job(4, 'Delivered', 'drvA', { status: 'Paid', isPaid: true }),
+      job(5, 'Needs Delivery', ''), job(6, 'Canceled', ''), job(7, 'In Progress', 'drvB'), job(8, 'Needs Delivery', 'drvA')
+    ];
+    let html = '';
+    const draw = () => { html = String(f.run('renderDeliveriesView()')); return html; };
+    // Headings and cards in the order drawn; a heading reads [name (count)].
+    const order = () => Array.from(html.matchAll(/<h3 class="ops-group([^"]*)">(.*?)<\/h3>|data-delivery-record="([^"]+)"/g), m => m[3] || `[${m[2].replace(/<[^>]+>/g, '')}${m[1]}]`).join(' ');
+    const tabs = () => Array.from((html.split('id="delivery-status-tabs" class="smart-filter-chips" role="group"')[1] || '').split('</div>')[0].matchAll(/onclick="([^"]*)" aria-pressed="(true|false)"[^>]*>(.*?)<b>(\d+)<\/b>/g), m => ({ press: m[1], on: m[2] === 'true', words: m[3], count: Number(m[4]) }));
+    const shown = () => (html.match(/class="ops-result-count"[^>]*>Showing (\d+) of (\d+) deliveries</) || []).slice(1).map(Number);
+    draw();
+    assert.equal(order(), '[No driver yet (2) is-urgent] r5 r2 [Ali (2)] r8 r3 [Basma (2)] r7 r1 [Finished (2)] r6 r4', 'the dispatch order, the newest first inside each group');
+    assert.deepEqual(tabs().map(tab => `${tab.words} ${tab.count}${tab.on ? '*' : ''}`), ['All 8*', 'Needs Delivery 4', 'In Progress 2', 'Delivered 1', 'Canceled 1', 'Office 0']);
+    // Each tab lists exactly as many jobs as it says; the tabs are inside the part that is swapped while the search is typed in.
+    for (const tab of tabs()) {
+      f.run(tab.press); draw();
+      assert.deepEqual(shown(), [tab.count, tab.count], tab.words);
+      assert.deepEqual(tabs().filter(now => now.on).map(now => now.words), [tab.words]);
+    }
+    assert.ok(html.indexOf('id="delivery-log-results"') < html.indexOf('id="delivery-status-tabs"') && html.indexOf('id="delivery-status-tabs"') < html.indexOf('class="ops-result-count"'));
+    assert.ok(!/<select onchange="filterDeliveries\('status'/.test(html) && /<select onchange="filterDeliveries\('driver', this.value\)"/.test(html), 'the status dropdown gave way to the tabs; the driver filter stays');
+    // One group only: no heading (a status with finished jobs alone, or one driver's jobs).
+    f.run("filterDeliveries('status', 'Delivered')"); draw();
+    assert.equal(order(), 'r4');
+    f.run("filterDeliveries('status', 'all')"); f.run("filterDeliveries('driver', 'drvA')"); draw();
+    assert.equal(order(), '[Ali (2)] r8 r3 [Finished (1)] r4');
+    assert.deepEqual(tabs().map(tab => tab.count), [3, 1, 1, 1, 0, 0], 'the counts follow the driver filter');
+    f.run("filterDeliveries('driver', 'all')");
+    f.state.deliveryFilter.search = 'tripoli'; draw();
+    assert.equal(order(), 'r7');
+    assert.deepEqual(tabs().map(tab => tab.count), [1, 0, 1, 0, 0, 0], 'and the search');
+    f.state.deliveryFilter.search = '';
+    // Amounts: a thousands separator, two decimals, the currency shown; the Arabic word for the dinar in Arabic.
+    draw();
+    const money = () => (html.split('data-delivery-record="r2"')[1] || '').split('class="ops-delivery-money"')[1].split('</div>')[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    assert.ok(money().endsWith('Amount 1,236.50 LYD $102.00'), money());
+    f.state.language = 'ar'; draw();
+    assert.ok(money().endsWith('المبلغ 1,236.50 د.ل $102.00'), money());
+    assert.ok(order().startsWith('[بلا سائق بعد (2) is-urgent] r5 r2 [Ali (2)]') && order().includes('[منتهية (2)] r6 r4'), order());
+    assert.deepEqual(tabs().map(tab => tab.words), ['الكل', 'بحاجة توصيل', 'قيد التوصيل', 'تم التوصيل', 'ملغي', 'المكتب']);
+  });
+  await test('round 3 Reconciliation: the result is said first as one sentence and follows the typed spend, the button repeats the amount, and the ad carries its short number instead of its internal id', async () => {
+    const f = frameFixture(frameAdmin, 'reconciliation');
+    f.sandbox.render = () => {};
+    f.state.customers = [{ id: 'c1', name: 'Tripoli <Sweets>' }];
+    f.state.pages = [{ id: 'p1', name: 'Sweets Page', customerIds: ['c1'] }];
+    const ended = (id, extra) => ({ id, customerId: 'c1', pageId: 'p1', amountUSD: 1500, status: 'Active', paymentStatus: 'paid', isPaid: true, startDate: '2026-10-01', endDate: '2026-10-10', createdAt: '2026-10-01T09:00:00Z', ...extra });
+    f.state.ads = [ended('ad_1795084071646_new', { createdAt: '2026-10-03T09:00:00Z' }), ended('ad_1795084071646_old', { spentUSD: 1500, finalSpendUSD: 1500 })];
+    const html = String(f.run('renderReconciliationView()'));
+    const card = id => (html.split(`data-reconciliation-card="${id}"`)[1] || '').split('</section>')[0];
+    assert.equal(html.split('data-reconciliation-card="').length - 1, 2);
+    // The short number is the one the Ads screen shows with no filter on; the long internal id is not printed.
+    assert.ok(/<p class="ops-eyebrow">Ad <bdi>#2<\/bdi><\/p>/.test(card('ad_1795084071646_new')) && /<bdi>#1<\/bdi>/.test(card('ad_1795084071646_old')));
+    assert.ok(!/>#ad_1795084071646/.test(html));
+    // Before a spend is entered the sentence says what to do; it comes before the three sums, and the name in it is escaped by the real escaper.
+    const fresh = card('ad_1795084071646_new');
+    const sentence = (fresh.match(/<p id="reconciliation-result-ad_1795084071646_new" class="ops-reconciliation-result" data-customer="([^"]*)">([^<]*)<\/p>/) || []);
+    assert.equal(sentence[2], 'Enter what Meta spent to see what goes back to the customer.');
+    assert.ok(fresh.indexOf('class="ops-reconciliation-result"') < fresh.indexOf('class="ops-reconciliation-money"'));
+    assert.ok(/<span id="reconciliation-submit-label-ad_1795084071646_new">Save &amp; return remaining<\/span>|<span id="reconciliation-submit-label-ad_1795084071646_new">Save & return remaining<\/span>/.test(fresh));
+    assert.ok(fresh.includes('<strong><bdi>$1,500.00</bdi></strong>'), 'the budget with its thousands separator');
+    // The words for each case, in both languages.
+    const words = (remaining, saved) => Array.from(f.sandbox.reconciliationWords(remaining, 'Tripoli Sweets', saved));
+    assert.deepEqual(words(17.5, false), ['$17.50 goes back to Tripoli Sweets.', 'Save and return $17.50']);
+    assert.deepEqual(words(1017.5, true), ['$1,017.50 goes back to Tripoli Sweets.', 'Update and return $1,017.50']);
+    assert.deepEqual(words(0, false), ['Nothing goes back: the whole budget was spent.', 'Save & return remaining']);
+    assert.deepEqual(words(0, true), ['Nothing goes back: the whole budget was spent.', 'Update reconciliation']);
+    assert.deepEqual(words(null, true), ['Enter what Meta spent to see what goes back to the customer.', 'Update reconciliation']);
+    f.state.language = 'ar';
+    assert.deepEqual(words(17.5, false), ['يعود إلى Tripoli Sweets مبلغ $17.50.', 'حفظ وإرجاع $17.50']);
+    assert.deepEqual(words(0, true), ['لا شيء يعود: صُرفت الميزانية كاملة.', 'تحديث التسوية']);
+    f.state.language = 'en';
+    // Typing a spend moves the sentence, the button and the third sum together; clearing the field puts the first words back. Nothing is saved.
+    const element = () => ({ value: '', textContent: '', dataset: {}, checked: false, disabled: false });
+    const parts = { spent: element(), remaining: element(), result: element(), label: element(), informed: element(), help: element() };
+    parts.result.dataset.customer = 'Tripoli Sweets';
+    f.sandbox.document.getElementById = id => ({ 'reconciliation-spent-ad_1795084071646_new': parts.spent, 'reconciliation-remaining-ad_1795084071646_new': parts.remaining,
+      'reconciliation-result-ad_1795084071646_new': parts.result, 'reconciliation-submit-label-ad_1795084071646_new': parts.label,
+      'reconciliation-informed-ad_1795084071646_new': parts.informed, 'reconciliation-informed-help-ad_1795084071646_new': parts.help }[id] || null);
+    const type = value => { parts.spent.value = value; f.sandbox.updateReconciliationPreview('ad_1795084071646_new'); return [parts.result.textContent, parts.label.textContent, parts.remaining.textContent]; };
+    assert.deepEqual(type('250.25'), ['$1,249.75 goes back to Tripoli Sweets.', 'Save and return $1,249.75', '$1,249.75']);
+    assert.deepEqual(type('1500'), ['Nothing goes back: the whole budget was spent.', 'Save & return remaining', '$0.00']);
+    assert.deepEqual(type('1700'), ['Nothing goes back: the whole budget was spent.', 'Save & return remaining', '$0.00'], 'a spend above the budget returns nothing, as before');
+    assert.deepEqual(type(''), ['Enter what Meta spent to see what goes back to the customer.', 'Save & return remaining', '—']);
+    parts.label.dataset.saved = '1';
+    assert.equal(type('1000')[1], 'Update and return $500.00');
+    assert.equal(JSON.stringify(f.state.ads[0].spentUSD), undefined, 'a preview only');
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {

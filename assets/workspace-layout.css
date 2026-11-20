@@ -477,7 +477,7 @@ pre.font-sans { font-family: inherit; }
   .ops-workspace.ops-deliveries > .ops-board { order: 3; }
   .ops-workspace.ops-deliveries > :is(.ops-kpi-rail, .ops-fee-strip) { order: 4; }
   .ops-workspace.ops-deliveries .ops-controls { padding: 12px; gap: 8px; }
-  .ops-workspace.ops-deliveries .ops-controls > label:not(.ops-search) { grid-column: auto; }
+  .ops-workspace.ops-deliveries .ops-controls > label:not(.ops-search) { grid-column: 1 / -1; }  /* the driver filter; the status filter is tabs now */
   .ops-workspace.ops-deliveries .ops-controls > label > .ops-field-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .ops-workspace.ops-deliveries .ops-record-section > .ops-section-heading { margin-bottom: 10px; }
 }
@@ -612,3 +612,62 @@ html.dark .ads-columns > summary { border-color: var(--ui-line); color: var(--ui
   .ads-summary-table .row-actions > .frame-menu-list .frame-danger { border-color: var(--ui-danger-text); color: var(--ui-danger-text); }
   .ads-summary-table .row-actions > .frame-menu-list .frame-danger > :is(i, svg) { color: var(--ui-danger-text); }
 }
+
+/* ==========================================================================
+   Operations screens: jobs first (redesign round 3, DESIGN.md section 8, template T7).
+   Deliveries and Reconciliation start with a plain title row. The large blue block pushed the first
+   job below the first screen of a computer. Every figure and button of the block stays; only its
+   look changes. (.ui-workspace in front: operations-workspace.css loads later with two classes.)
+   ========================================================================== */
+.ui-workspace .ops-workspace > .ops-hero { padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; color: var(--ui-ink); }
+html.dark .ui-workspace .ops-workspace > .ops-hero { background: none; }
+.ui-workspace .ops-workspace > .ops-hero .ops-hero-copy { display: flex; flex-direction: column; max-width: none; }
+.ui-workspace .ops-workspace > .ops-hero h1 { order: 1; margin-top: 0; font-size: 28px; }
+.ui-workspace .ops-workspace > .ops-hero .ops-eyebrow { order: 2; margin-top: 2px; font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ui-muted); }
+.ui-workspace .ops-workspace > .ops-hero .ops-eyebrow > :is(i, svg) { display: none; }
+.ui-workspace .ops-workspace > .ops-hero p:not(.ops-eyebrow) { order: 3; margin-top: 2px; font-size: 13px; line-height: 1.55; color: var(--ui-muted); }
+.ui-workspace .ops-workspace.ops-deliveries > .ops-hero .ops-eyebrow { display: none; }  /* "Delivery workspace": the title and the frame already say it */
+.ui-workspace .ops-workspace > .ops-hero .ops-hero-count > strong { font-size: 22px; }
+.ui-workspace .ops-workspace > .ops-hero .ops-hero-count > span { color: var(--ui-muted); }
+.ui-workspace .ops-workspace > .ops-hero :is(.ops-button--hero, .ops-button--hero-primary) { background: var(--ui-surface); border-color: var(--ui-line); color: var(--ui-ink); }
+.ui-workspace .ops-workspace > .ops-hero :is(.ops-button--hero, .ops-button--hero-primary):hover { background: var(--ui-surface-soft); filter: none; }
+
+/* The delivery log: status tabs with counts (the driver filter and the search stay), and a heading
+   where the group changes: no driver yet, each driver's open jobs, finished. */
+.ui-workspace #delivery-status-tabs { display: flex; grid-template-columns: none; margin-bottom: 10px; overflow-x: auto; }
+.ui-workspace #delivery-status-tabs > .smart-filter-chip { width: auto; }
+.ui-workspace .ops-workspace .ops-group { grid-column: 1 / -1; margin: 6px 2px 0; font-size: 12px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; color: var(--ui-muted); }
+.ui-workspace .ops-workspace .ops-group:first-child { margin-top: 0; }
+.ui-workspace .ops-workspace .ops-group > span { font-variant-numeric: tabular-nums; }
+.ui-workspace .ops-workspace .ops-group.is-urgent { color: #9a4a04; }
+html.dark .ui-workspace .ops-workspace .ops-group.is-urgent { color: #fdba74; }
+
+@media (min-width: 601px) {
+  .ui-workspace .ops-workspace > .ops-hero { gap: 10px 20px; align-items: end; }
+  .ui-workspace .ops-workspace > .ops-hero .ops-hero-side { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px 16px; }
+  .ui-workspace .ops-workspace > .ops-hero .ops-hero-count { align-items: baseline; gap: 6px; }
+  .ui-workspace .ops-workspace > .ops-hero .ops-hero-count > span { max-width: none; font-size: 13px; }
+  /* The four figures as one strip: the picture beside the number instead of above it. */
+  .ui-workspace .ops-deliveries > .ops-kpi-rail .ops-kpi { grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; row-gap: 0; align-content: center; padding: 12px 14px; }
+  .ui-workspace .ops-deliveries > .ops-kpi-rail .ops-kpi-icon { grid-row: 1 / span 3; align-self: center; margin-bottom: 0; }
+  .ui-workspace .ops-deliveries > .ops-kpi-rail .ops-kpi > strong { font-size: 20px; }
+  /* The four stage counts as one line. */
+  .ui-workspace .ops-deliveries > .ops-pipeline { display: flex; flex-wrap: wrap; gap: 4px 20px; padding: 0 2px; }
+  .ui-workspace .ops-deliveries > .ops-pipeline > div { flex: none; gap: 6px; padding: 0; border: 0; border-radius: 0; background: none; font-size: 13px; color: var(--ui-muted); }
+  .ui-workspace .ops-deliveries > .ops-pipeline > div > .ops-step { display: none; }
+  .ui-workspace .ops-deliveries > .ops-pipeline > div > strong { margin-inline-start: 0; font-size: 13px; color: var(--ui-ink); }
+  .ui-workspace .ops-deliveries > .ops-fee-strip { padding: 10px 14px; }
+  /* Search and the driver filter share one row. */
+  .ui-workspace .ops-deliveries .ops-controls { grid-template-columns: minmax(0, 1fr) minmax(160px, 240px); align-items: end; padding: 12px; }
+  .ui-workspace .ops-deliveries .ops-controls .ops-search { grid-column: auto; }
+  .ui-workspace .ops-deliveries .ops-controls > label > .ops-field-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .ui-workspace .ops-deliveries .ops-record-section > .ops-section-heading { margin-bottom: 10px; }
+}
+
+/* Reconciliation: the result first, as one sentence (it follows the spend as it is typed). */
+.ui-workspace .ops-workspace .ops-reconciliation-result {
+  margin-top: 16px; padding: 10px 14px; border-radius: 12px; background: #e8f6ee; color: #0b5c3b;
+  font-size: 14px; font-weight: 700; line-height: 1.5; overflow-wrap: anywhere;
+}
+html.dark .ui-workspace .ops-workspace .ops-reconciliation-result { background: rgb(16 185 129 / 16%); color: #a7f3d0; }
+.ui-workspace .ops-workspace .ops-reconciliation-result + .ops-reconciliation-money { margin-top: 12px; }
