@@ -1764,9 +1764,12 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const studioFn = name => { const at = adsStudio.indexOf(`function ${name}(`); return at < 0 ? '' : adsStudio.slice(at, adsStudio.indexOf('\n}\n', at)); };
 
   // P1-08a: a wallet charge row is shown in its own currency; a row without a currency is USD.
-  const chargeRow = data => `_adsStudioWalletRequestRow(${JSON.stringify({ id: 'row-check', data })}, false)`;
-  const lydRow = { reference: 'PAY-LYDCHECK', amountMinor: 5000, amountMinorLYD: 5000, currency: 'LYD', method: 'bank_transfer', status: 'pending' };
-  const usdRow = { reference: 'PAY-USDCHECK', amountMinor: 2000, amountMinorLYD: 13000, method: 'bank_transfer', status: 'pending' };
+  // Redesign round 4: the customer's own WAITING request is the payment card of the new layout (15m draws it; the
+  // check 'F-iap … classic' in test-review-regressions.js looks at it). The line checked here is what stays a line:
+  // a request that is confirmed or cancelled, and every request in the admin's list of all customers.
+  const chargeRow = (data, admin = false) => `_adsStudioWalletRequestRow(${JSON.stringify({ id: 'row-check', data })}, ${admin})`;
+  const lydRow = { reference: 'PAY-LYDCHECK', amountMinor: 5000, amountMinorLYD: 5000, currency: 'LYD', method: 'bank_transfer', status: 'confirmed' };
+  const usdRow = { reference: 'PAY-USDCHECK', amountMinor: 2000, amountMinorLYD: 13000, method: 'bank_transfer', status: 'confirmed' };
   const lydEn = String(inLanguage('en', chargeRow(lydRow)));
   const lydAr = String(inLanguage('ar', chargeRow(lydRow)));
   const usdEn = String(inLanguage('en', chargeRow(usdRow)));
@@ -1779,7 +1782,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // code ('pending' / 'confirmed' / 'canceled'); a refusal of create / confirm-cancel / attach goes through the ONE
   // Arabic map (never raw English in Arabic, never a bare "Request failed").
   const statusWord = page => (String(page).match(/data-status="[^"]*">([^<]*)</) || [])[1] || '';
-  const rowIn = (language, status) => String(inLanguage(language, chargeRow({ ...usdRow, status })));
+  const rowIn = (language, status) => String(inLanguage(language, chargeRow({ ...usdRow, status }, status === 'pending')));  // a waiting line is the admin's
   const walletRefusal = (language, detail) => String(inLanguage(language, `adsStudioWalletRefusal(${detail === undefined ? "new Error('Failed to fetch')" : JSON.stringify({ status: 409, payload: { detail } })})`));
   const walletCases = [
     statusWord(rowIn('en', 'pending')) === 'Waiting for payment' && statusWord(rowIn('ar', 'pending')) === 'بانتظار الدفع'

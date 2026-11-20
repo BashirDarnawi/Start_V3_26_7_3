@@ -3989,6 +3989,26 @@ async function refreshAdsStudioWallet() {
 }
 
 let _adsStudioChargeBusy = false;
+// How to pay one charge request, in the catalog's own sentence: the message after creating it and, since
+// redesign round 4, the request's card (the sentence used to be gone once the message had faded).
+function adsStudioPayInstruction(d) {
+  const entry = _adsStudioPayMethod(d.method);
+  const template = entry && entry.instructions ? String(adsStudioIsAr() ? entry.instructions.ar : entry.instructions.en) : '';
+  const lyd = d.amountMinorLYD ? adsStudioAmount(d.amountMinorLYD / 100) : '';
+  // A dinar figure this request does not carry used to read "Pay — LYD": the plain sentence instead.
+  if (template && (lyd || !template.includes('{amountLYD}'))) {
+    return template
+      .split('{reference}').join(String(d.reference || ''))
+      .split('{amountLYD}').join(lyd)
+      .split('{amountUSD}').join(`${adsStudioAmount(Number(d.amountMinor || 0) / 100)}${String(d.currency || 'USD').toUpperCase() === 'LYD' ? ` ${adsStudioText('LYD', 'د.ل')}` : ''}`)
+      .split('{rate}').join(String(d.lydRate || ''));
+  }
+  return adsStudioText(
+    `Pay with reference ${d.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
+    `ادفع بذكر الرمز ${d.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
+  );
+}
+
 async function adsStudioCreateWalletCharge() {
   if (_adsStudioChargeBusy) return;
   const input = document.getElementById('ads-studio-charge-amount');
@@ -4009,25 +4029,7 @@ async function adsStudioCreateWalletCharge() {
     const created = await apiWalletPaymentRequestCreate(amountMinor, method, adsStudioChargeIdemKey(amountMinor, `${method}|${currency}`), currency);
     _adsStudioChargeIdem = { fingerprint: '', key: '' };
     adsStudioChargeDraft().amount = '';  // a later redraw never offers the same amount again
-    const d = created?.data || {};
-    const entry = _adsStudioPayMethod(d.method);
-    const template = entry && entry.instructions ? String(adsStudioIsAr() ? entry.instructions.ar : entry.instructions.en) : '';
-    const lyd = d.amountMinorLYD ? adsStudioAmount(d.amountMinorLYD / 100) : '';
-    let message;
-    // A dinar figure this request does not carry used to read "Pay — LYD": the plain sentence instead.
-    if (template && (lyd || !template.includes('{amountLYD}'))) {
-      message = template
-        .split('{reference}').join(String(d.reference || ''))
-        .split('{amountLYD}').join(lyd)
-        .split('{amountUSD}').join(`${adsStudioAmount(Number(d.amountMinor || 0) / 100)}${String(d.currency || 'USD').toUpperCase() === 'LYD' ? ` ${adsStudioText('LYD', 'د.ل')}` : ''}`)
-        .split('{rate}').join(String(d.lydRate || ''));
-    } else {
-      message = adsStudioText(
-        `Pay with reference ${d.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
-        `ادفع بذكر الرمز ${d.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
-      );
-    }
-    showNotification(adsStudioText('Charge request created', 'تم إنشاء طلب الشحن'), message, 'success');
+    showNotification(adsStudioText('Charge request created', 'تم إنشاء طلب الشحن'), adsStudioPayInstruction(created?.data || {}), 'success');
   } catch (e) {
     showNotification(adsStudioText('Could not create the charge', 'تعذر إنشاء طلب الشحن'), adsStudioWalletRefusal(e), 'error');
   } finally {
@@ -4154,6 +4156,18 @@ function _adsStudioWalletRequestRow(entity, adminView) {
   const currency = String(d.currency || 'USD').trim().toUpperCase() === 'LYD' ? 'LYD' : 'USD';
   const lyd = currency === 'USD' && d.amountMinorLYD ? ` • ≈ ${adsStudioPiece(`${adsStudioAmount(d.amountMinorLYD / 100)} ${adsStudioText('LYD', 'د.ل')}`, true)}` : '';
   const quiet = isPending && !adminView && adsStudioBuyingHidden();  // the iPhone app: their waiting request shows no way to pay it
+  if (isPending && !adminView && typeof renderStudioWalletPayCard === 'function') {
+    // Redesign round 4 (proposal S3): the customer's waiting request is the card of the new layout, with
+    // everything needed to pay it. Its buttons are the classic ones (receipt, cancel, ask).
+    const ref = String(d.reference || '');
+    const small = 'studio-v2-action studio-v2-wallet-small';
+    const receipt = entry && entry.requiresReceiptPhoto && !quiet ? `
+          <label class="${small}"><input type="file" accept="image/*" class="hidden" onchange="adsStudioAttachReceipt('${rid}', this)" /><i data-lucide="paperclip" class="studio-v2-icon" aria-hidden="true"></i><span>${hasPhoto ? adsStudioText('Replace receipt', 'استبدال الإيصال') : adsStudioText('Attach receipt', 'إرفاق الإيصال')}</span></label>` : '';
+    const cancel = `<button type="button" class="${small} studio-v2-wallet-danger" onclick="adsStudioDecideWalletCharge('${rid}', 'cancel')"><i data-lucide="circle-x" class="studio-v2-icon" aria-hidden="true"></i><span>${adsStudioText('Cancel request', 'ألغِ الطلب')}</span></button>`;
+    const ask = typeof studioHelpAskButton === 'function' && /^PAY-[A-Z0-9]{4,16}$/.test(ref) ? studioHelpAskButton('payment', ref, true) : '';
+    return renderStudioWalletPayCard({ reference: ref, currency, amountMinor: parseInt(d.amountMinor, 10) || 0, dueAt: '', request: { amountMinorLYD: d.amountMinorLYD ? Number(d.amountMinorLYD) : null } },
+      _adsStudioWalletMethodLabel(String(d.method || '')), renderStudioWalletInstruction(null, ref, adsStudioPayInstruction(d)), receipt + cancel + ask, quiet);
+  }
   return `
     <div class="studio-wallet-request flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
       <div class="min-w-0">
@@ -4162,11 +4176,6 @@ function _adsStudioWalletRequestRow(entity, adminView) {
       </div>
       <div class="studio-wallet-request-actions flex flex-wrap items-center gap-2">
         <span class="text-xs font-bold ${statusColor}" data-status="${Security.escapeHtml(String(d.status || ''))}">${Security.escapeHtml(Object.prototype.hasOwnProperty.call(ADS_STUDIO_PAY_STATUS, String(d.status || '')) ? adsStudioText(...ADS_STUDIO_PAY_STATUS[String(d.status)]) : String(d.status || ''))}</span>
-        ${isPending && !adminView && entry && entry.requiresReceiptPhoto && !quiet ? `
-          <label class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 cursor-pointer">
-            <input type="file" accept="image/*" class="hidden" onchange="adsStudioAttachReceipt('${rid}', this)" />
-            ${hasPhoto ? adsStudioText('Replace receipt', 'استبدال الإيصال') : adsStudioText('Attach receipt', 'إرفاق الإيصال')}
-          </label>` : ''}
         ${adminView && hasPhoto ? `<button onclick="adsStudioViewPaymentReceipt('${rid}')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700">${adsStudioText('View receipt', 'عرض الإيصال')}</button>` : ''}
         ${isPending && adminView ? `<button onclick="adsStudioDecideWalletCharge('${rid}', 'confirm')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-700">${adsStudioText('Confirm received', 'تأكيد الاستلام')}</button>` : ''}
         ${isPending && adminView && entry && entry.requiresReceiptPhoto && !hasPhoto ? `<button onclick="adsStudioDecideWalletCharge('${rid}', 'confirm', true)" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-100 hover:bg-amber-200 text-amber-700" title="${adsStudioText('Bank verified the transfer without a photo', 'تحقق المصرف من الحوالة دون صورة')}">${adsStudioText('Confirm w/o receipt', 'تأكيد بدون إيصال')}</button>` : ''}
@@ -4211,7 +4220,7 @@ function renderAdsStudioWallet() {
 
       ${adsStudioBuyingHidden() ? `<div class="glass-panel rounded-2xl p-6">${adsStudioNoBuyLine('text-sm text-slate-500')}</div>` : `<div class="glass-panel rounded-2xl p-6">
         <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
-        <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
+        <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code. We confirm payments during our working hours. The money appears here as soon as we do.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي. نؤكد الدفعات خلال ساعات عملنا، ويظهر المال هنا فور التأكيد.')}</p>
         <div class="mb-4">
           <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount', 'المبلغ')}
             <select id="ads-studio-charge-currency" onchange="adsStudioUpdateLydPreview()" class="ml-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200"><option value="USD">${adsStudioText('USD (campaigns)', 'دولار (الحملات)')}</option><option value="LYD"${charge.currency === 'LYD' ? ' selected' : ''}>${adsStudioText('LYD (subscription plans)', 'دينار (باقات الاشتراك)')}</option></select>

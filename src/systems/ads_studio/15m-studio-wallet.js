@@ -512,8 +512,8 @@ function studioWalletInstruction(request, reference) {
 }
 
 // The same words as HTML: the code stays one left-to-right piece (never split at its dash in Arabic).
-function renderStudioWalletInstruction(request, reference) {
-  return studioWalletInstruction(request, reference).split(reference).map(part => studioEsc(part))
+function renderStudioWalletInstruction(request, reference, text = studioWalletInstruction(request, reference)) {
+  return String(text).split(reference).map(part => studioEsc(part))
     .join(`<bdi dir="ltr" class="studio-v2-wallet-nowrap">${studioEsc(reference)}</bdi>`);
 }
 
@@ -535,23 +535,20 @@ function renderStudioWalletReceipt(request) {
                 ${request.hasReceipt ? `<p class="studio-v2-wallet-note" data-testid="studio-wallet-receipt-attached">${studioWalletIcon('circle-check')} ${studioEsc(adsStudioText('Receipt attached', 'أرفقت الإيصال'))}</p>` : ''}`;
 }
 
-function renderStudioWalletPending(summary) {
-  const rows = studioWalletPendingRows(summary);
-  if (!rows.length) return '';
-  const noBuy = adsStudioBuyingHidden();  // the iPhone app (15c): the request and Cancel, never how to pay it
-  const card = item => {
-    const request = item.request;
-    const purpose = item.currency === 'LYD' ? adsStudioText('For your plan', 'لاشتراكك') : adsStudioText('For your ads', 'لإعلاناتك');
-    const dinars = item.currency === 'USD' && request && request.amountMinorLYD !== null
-      ? `<div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('You pay in dinars', 'تدفع بالدينار'))}</dt><dd>${studioLtr(studioLyd(request.amountMinorLYD))}</dd></div>` : '';
-    const method = request && request.method
-      ? `<div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('Method', 'طريقة الدفع'))}</dt><dd>${studioEsc(studioWalletMethodName(request.method))}</dd></div>` : '';
-    const due = item.dueAt && studioWalletWhen(item.dueAt, 'due')
-      ? adsStudioText(`We confirm it by ${studioWalletWhen(item.dueAt, 'due')} (Tripoli time).`, `نؤكد دفعتك قبل ${studioWalletWhen(item.dueAt, 'due')} (بتوقيت طرابلس).`)
-      : adsStudioText('We confirm payments during our working hours. The money appears here as soon as we do.', 'نؤكد الدفعات خلال ساعات عملنا، ويظهر المال هنا فور التأكيد.');
-    const cancelBusy = request && _studioWallet.busy.has(`cancel:${request.id}`);
-    const cancel = request && request.id ? `<button type="button" class="studio-v2-action studio-v2-wallet-small studio-v2-wallet-danger" data-testid="studio-wallet-cancel" onclick="studioWalletAskCancel('${request.id}')"${cancelBusy ? ' disabled aria-busy="true"' : ''}>${studioWalletIcon('circle-x')}<span>${studioEsc(cancelBusy ? adsStudioText('Cancelling…', 'جارٍ الإلغاء…') : adsStudioText('Cancel request', 'ألغِ الطلب'))}</span></button>` : '';
-    return `
+// One waiting payment as a card with everything needed to pay it (proposal S3): the code with Copy, the amount,
+// the method, how to pay, who confirms and when. The wallet of the new layout draws it and, since redesign round
+// 4, the classic wallet too (15c passes its own method name, sentence and buttons). noBuy: the iPhone app.
+function renderStudioWalletPayCard(item, methodName, how, actions, noBuy) {
+  const request = item.request;
+  const purpose = item.currency === 'LYD' ? adsStudioText('For your plan', 'لاشتراكك') : adsStudioText('For your ads', 'لإعلاناتك');
+  const dinars = item.currency === 'USD' && request && request.amountMinorLYD !== null
+    ? `<div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('You pay in dinars', 'تدفع بالدينار'))}</dt><dd>${studioLtr(studioLyd(request.amountMinorLYD))}</dd></div>` : '';
+  const method = methodName
+    ? `<div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('Method', 'طريقة الدفع'))}</dt><dd>${studioEsc(methodName)}</dd></div>` : '';
+  const due = item.dueAt && studioWalletWhen(item.dueAt, 'due')
+    ? adsStudioText(`We confirm it by ${studioWalletWhen(item.dueAt, 'due')} (Tripoli time).`, `نؤكد دفعتك قبل ${studioWalletWhen(item.dueAt, 'due')} (بتوقيت طرابلس).`)
+    : adsStudioText('We confirm payments during our working hours. The money appears here as soon as we do.', 'نؤكد الدفعات خلال ساعات عملنا، ويظهر المال هنا فور التأكيد.');
+  return `
               <article class="studio-v2-wallet-card studio-v2-wallet-pay" data-testid="studio-wallet-pending-item" data-reference="${studioEsc(item.reference)}" data-currency="${item.currency}">
                 <div class="studio-v2-wallet-row-head">
                   <span class="studio-v2-wallet-chip is-warn">${studioWalletIcon('clock')}<span>${studioEsc(adsStudioText('Waiting for our confirmation', 'بانتظار تأكيدنا'))}</span></span>
@@ -562,12 +559,24 @@ function renderStudioWalletPending(summary) {
                   <div class="studio-v2-wallet-kv-row"><dt>${studioEsc(adsStudioText('Amount', 'المبلغ'))}</dt><dd data-testid="studio-wallet-pending-amount">${studioLtr(studioWalletMoney(item.amountMinor, item.currency))}</dd></div>
                   ${noBuy ? '' : dinars + method}
                 </dl>
-                ${noBuy ? '' : `<p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${renderStudioWalletInstruction(request, item.reference)}</p>`}
+                ${noBuy ? '' : `<p class="studio-v2-wallet-how" data-testid="studio-wallet-instruction">${how}</p>`}
                 <p class="studio-v2-wallet-note">${studioWalletIcon('calendar-clock')} ${studioEsc(due)}</p>
                 <div class="studio-v2-wallet-actions is-compact">
-                  ${noBuy ? '' : renderStudioWalletReceipt(request)}${cancel}
+                  ${actions}
                 </div>
               </article>`;
+}
+
+function renderStudioWalletPending(summary) {
+  const rows = studioWalletPendingRows(summary);
+  if (!rows.length) return '';
+  const noBuy = adsStudioBuyingHidden();  // the iPhone app (15c): the request and Cancel, never how to pay it
+  const card = item => {
+    const request = item.request;
+    const cancelBusy = request && _studioWallet.busy.has(`cancel:${request.id}`);
+    const cancel = request && request.id ? `<button type="button" class="studio-v2-action studio-v2-wallet-small studio-v2-wallet-danger" data-testid="studio-wallet-cancel" onclick="studioWalletAskCancel('${request.id}')"${cancelBusy ? ' disabled aria-busy="true"' : ''}>${studioWalletIcon('circle-x')}<span>${studioEsc(cancelBusy ? adsStudioText('Cancelling…', 'جارٍ الإلغاء…') : adsStudioText('Cancel request', 'ألغِ الطلب'))}</span></button>` : '';
+    return renderStudioWalletPayCard(item, request && request.method ? studioWalletMethodName(request.method) : '',
+      renderStudioWalletInstruction(request, item.reference), `${noBuy ? '' : renderStudioWalletReceipt(request)}${cancel}`, noBuy);
   };
   return `
             <section class="studio-v2-wallet-section" data-testid="studio-wallet-pending" aria-labelledby="studio-wallet-pending-title">

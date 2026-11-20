@@ -14,6 +14,7 @@ const {
   openAdminApi,
   projectToken,
   setLanguage,
+  shown,
   signInStudio,
   studioMe,
   tabParam
@@ -137,6 +138,96 @@ test.describe('Albayan Studio v2 (pilot)', () => {
       await expect(page.getByTestId('studio-staff-frame')).toHaveCount(0);
       await expect(page.getByTestId('studio-nav')).toHaveCount(0);
     }
+    expect(errors).toEqual([]);
+  });
+
+  // Redesign round 4 (proposal S3): in the classic layout the sentence on how to pay was a message that faded, and a
+  // waiting request was one line. It is now the card the new layout draws, and it stays until the payment is
+  // confirmed or cancelled.
+  test('classic wallet: a waiting charge request is a card with the code, Copy, the amount, the method and how to pay; it fits 320-1280 px in both languages; Cancel turns it into a line', async ({ page, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    const { classic } = await studioUsers(playwright, baseURL, testInfo);
+    const errors = collectPageErrors(page);
+    await page.setViewportSize(PHONE);
+    await signInStudio(page, classic);
+    await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+    const amount = page.locator('#ads-studio-charge-amount');
+    await expect(amount).toBeVisible({ timeout: BOOT_TIMEOUT });
+    const methods = page.locator('input[name="ads-studio-charge-method"]');
+    await expect(methods.first()).toBeAttached({ timeout: BOOT_TIMEOUT });
+    // The card of the request about to be made does not exist yet, and the form says who confirms, in the new layout's words.
+    const cards = page.locator('.studio-classic [data-testid="studio-wallet-pending-item"]');
+    await expect(cards).toHaveCount(0);
+    await expect(page.locator('.studio-classic')).toContainText('You get a reference code. We confirm payments during our working hours. The money appears here as soon as we do.');
+    await expect(page.locator('.studio-classic')).not.toContainText('once the payment company is connected');
+    const methodId = await methods.first().getAttribute('value');
+    const methodName = (await page.locator(`label:has(#ads-studio-method-${methodId}) .font-bold`).first().innerText()).trim();
+    await methods.first().check();
+    await amount.fill('12');
+    const [response] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === '/api/wallet/payment-requests' && r.request().method() === 'POST'),
+      page.getByRole('button', { name: 'Create charge request', exact: true }).click()
+    ]);
+    expect(response.ok(), `the charge request was refused with HTTP ${response.status()}`).toBe(true);
+    const made = await response.json();
+    const reference = String(made.data.reference);
+    expect(reference).toMatch(/^PAY-[A-Z0-9]{4,16}$/);
+
+    const card = page.locator(`.studio-classic [data-testid="studio-wallet-pending-item"][data-reference="${reference}"]`);
+    await expect(card).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(card.getByTestId('studio-wallet-reference')).toHaveText(reference);
+    await expect(card.getByTestId('studio-wallet-pending-amount')).toHaveText(shown('$12.00'));
+    await expect(card).toContainText('Waiting for our confirmation');
+    await expect(card).toContainText(methodName);
+    await expect(card.getByTestId('studio-wallet-instruction')).toContainText(reference);  // how to pay stays on screen
+    await expect(card).toContainText('We confirm payments during our working hours. The money appears here as soon as we do.');
+    const copy = card.getByTestId('studio-wallet-copy');
+    const cancel = card.getByRole('button', { name: 'Cancel request', exact: true });
+    await expect(copy).toHaveText('Copy code');
+    // Every size from a small phone to a small laptop, in both languages: nothing runs off the page, every button is
+    // large enough to press, and no button's words are cut.
+    for (const language of ['en', 'ar']) {
+      await setLanguage(page, language);
+      for (const width of [320, 360, 390, 430, 820, 1280]) {
+        await page.setViewportSize({ width, height: 844 });
+        await card.scrollIntoViewIfNeeded();
+        await expectNoPageOverflow(page, `classic payment card ${language} ${width}`);
+        const facts = await card.evaluate(el => {
+          const box = el.getBoundingClientRect();
+          return [...el.querySelectorAll('button, label.studio-v2-action')].map(control => {
+            const r = control.getBoundingClientRect();
+            return { text: control.innerText.trim(), height: Math.round(r.height), inside: r.left >= box.left - 1 && r.right <= box.right + 1, cut: control.scrollWidth > control.clientWidth + 1 };
+          });
+        });
+        expect(facts.length, `${language} ${width}: Copy and Cancel are there (and the question, where Help is on)`).toBeGreaterThanOrEqual(2);
+        for (const control of facts) {
+          expect(control.height, `${language} ${width}: "${control.text}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
+          expect(control.inside && !control.cut, `${language} ${width}: "${control.text}" stays whole inside the card`).toBe(true);
+        }
+        // An icon and its word never touch.
+        const gap = await copy.evaluate(el => {
+          const icon = el.querySelector('svg, i'); const word = el.querySelector('span');
+          if (!icon || !word) return -1;
+          const i = icon.getBoundingClientRect(); const w = word.getBoundingClientRect();
+          return Math.max(w.left - i.right, i.left - w.right);  // the space between the two, whichever comes first
+        });
+        expect(gap, `${language} ${width}: the Copy icon stands apart from its word`).toBeGreaterThanOrEqual(6);
+      }
+    }
+    await expect(card).toContainText('بانتظار تأكيدنا');
+    await setLanguage(page, 'en');
+    await page.setViewportSize(PHONE);
+
+    // Cancel: the card goes, and the request stays in the list as one line that says so.
+    const [decided] = await Promise.all([
+      page.waitForResponse(r => /^\/api\/wallet\/payment-requests\/[^/]+\/cancel$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST'),
+      cancel.click()
+    ]);
+    expect(decided.ok()).toBe(true);
+    await expect(card).toHaveCount(0, { timeout: BOOT_TIMEOUT });
+    const line = page.locator('.studio-classic .studio-wallet-request', { hasText: reference });
+    await expect(line).toBeVisible();
+    await expect(line.locator('[data-status="canceled"]')).toHaveText('Canceled');
     expect(errors).toEqual([]);
   });
 

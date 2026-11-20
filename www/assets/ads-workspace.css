@@ -461,13 +461,14 @@ body.keyboard-open .studio-b-footer { padding-top: 6px; padding-bottom: 6px; }
 /* Albayan Studio v2 wallet and account (P2-06, P2-07; src/systems/ads_studio/15m-studio-wallet.js).
    The same --ui-* tokens as the frame. The status tones (waiting, done, stop) are named once here,
    for light and dark, and a tone never stands alone: every chip also has its icon and words.
+   The classic layout names them too: since redesign round 4 it draws the same payment card.
    Amounts wrap instead of widening the page; every control is at least 44px. */
-.studio-v2-frame, .studio-v2-wsheet-overlay {
+.studio-classic, .studio-v2-frame, .studio-v2-wsheet-overlay {
   --studio-v2-tone-warn-ink: #92400e; --studio-v2-tone-warn-soft: #fef3c7;
   --studio-v2-tone-ok-ink: #047857; --studio-v2-tone-ok-soft: #d1fae5;
   --studio-v2-tone-bad-ink: #be123c; --studio-v2-tone-bad-soft: #ffe4e6;
 }
-html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {
+html.dark .studio-classic, html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {
   --studio-v2-tone-warn-ink: #fcd34d; --studio-v2-tone-warn-soft: #3b2a0c;
   --studio-v2-tone-ok-ink: #6ee7b7; --studio-v2-tone-ok-soft: #0f3a2e;
   --studio-v2-tone-bad-ink: #fda4af; --studio-v2-tone-bad-soft: #4a1422;
@@ -506,7 +507,7 @@ html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {
 .studio-v2-wallet-actions > .studio-v2-action { flex: 1 1 160px; }
 .studio-v2-wallet-actions.is-compact > .studio-v2-action { flex: 0 1 auto; }
 .studio-v2-wallet-actions.is-nav > .studio-v2-action { flex: 1 1 auto; }
-.studio-v2-wallet .studio-v2-action, .studio-v2-account .studio-v2-action, .studio-v2-wsheet .studio-v2-action { gap: 8px; cursor: pointer; }
+.studio-v2-wallet .studio-v2-action, .studio-v2-account .studio-v2-action, .studio-v2-wsheet .studio-v2-action, .studio-v2-wallet-pay .studio-v2-action { gap: 8px; cursor: pointer; }
 .studio-v2-wallet .studio-v2-action[disabled], .studio-v2-account .studio-v2-action[disabled] { opacity: 0.55; cursor: not-allowed; }
 .studio-v2-wallet-small { min-height: 44px; padding: 8px 14px; font-size: 14px; }
 .studio-v2-wallet-danger { border-color: var(--studio-v2-tone-bad-ink); color: var(--studio-v2-tone-bad-ink); }

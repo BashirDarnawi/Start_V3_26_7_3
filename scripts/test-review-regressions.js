@@ -9216,7 +9216,18 @@ async function main() {
         assert.ok(['PAY-USDAAAA1', 'PAY-LYDBBBB2', 'PAY-DONECCC3'].every(code => classic.includes(code)) && classic.includes(`onclick="adsStudioDecideWalletCharge('wpr_1', 'cancel')"`), `${where}: the requests and Cancel stay`);
         assert.equal(classic.includes('id="ads-studio-charge-amount"') && classic.includes('onclick="adsStudioCreateWalletCharge()"') && classic.includes(en ? 'Create charge request' : 'إنشاء طلب شحن'), !ios, `${where}: before, the iPhone app drew the Add money form`);
         assert.equal(classic.includes(`onchange="adsStudioAttachReceipt('wpr_2', this)"`), !ios, `${where}: the receipt upload`);
-        assert.equal(classic.includes(`150.00 ${en ? 'LYD' : 'د.ل'} • ${en ? 'Bank transfer' : 'حوالة مصرفية'}`) && classic.includes(`≈ 172.50 ${en ? 'LYD' : 'د.ل'}`), !ios, `${where}: how a waiting request is paid`);
+        // Redesign round 4 (proposal S3): a waiting request is the payment card of the new layout. The code, the amount and
+        // who confirms are always there; the dinars, the method, the sentence on how to pay and Copy never in the iPhone app.
+        const lydWord = en ? 'LYD' : 'د.ل';
+        const payCards = [...classic.matchAll(/<article class="studio-v2-wallet-card studio-v2-wallet-pay"[\s\S]*?<\/article>/g)].map(match => match[0]);
+        assert.equal(payCards.length, 2, `${where}: the two waiting requests are cards; the confirmed one stays a line`);
+        assert.ok(payCards[0].includes('PAY-USDAAAA1') && payCards[0].includes('$25.00') && payCards[1].includes('PAY-LYDBBBB2') && payCards[1].includes(`150.00 ${lydWord}`)
+          && payCards.every(card => card.includes(en ? 'Waiting for our confirmation' : 'بانتظار تأكيدنا') && card.includes(en ? 'We confirm payments during our working hours. The money appears here as soon as we do.' : 'نؤكد الدفعات خلال ساعات عملنا، ويظهر المال هنا فور التأكيد.')), `${where}: the card's fixed parts`);
+        assert.equal(payCards[0].includes(en ? 'You pay in dinars' : 'تدفع بالدينار') && payCards[0].includes(`172.50 ${lydWord}`) && payCards[0].includes(`<dd>${en ? 'Adfali' : 'ادفع لي'}</dd>`) && payCards[1].includes(`<dd>${en ? 'Bank transfer' : 'حوالة مصرفية'}</dd>`)
+          && payCards[0].includes(en ? 'Pay 172.50 LYD via Adfali and keep the code <bdi dir="ltr" class="studio-v2-wallet-nowrap">PAY-USDAAAA1</bdi> in the payment note.' : 'ادفع 172.50 د.ل عبر ادفع لي واذكر الرمز <bdi dir="ltr" class="studio-v2-wallet-nowrap">PAY-USDAAAA1</bdi> في ملاحظة الدفع.')
+          && payCards[1].includes(en ? 'Transfer 150.00 LYD, write <bdi' : 'حوّل 150.00 د.ل واكتب <bdi') && payCards.every(card => card.includes("onclick=\"studioWalletCopy('PAY-")), !ios, `${where}: how a waiting request is paid`);
+        assert.ok(!payCards.join('').includes('≈') && !/data-testid="studio-wallet-pending-item"/.test(String(f.run(`_adsStudioWalletRequestRow(${JSON.stringify(payments[2])}, false)`))), `${where}: the stamped dinar amount is not an estimate, and a confirmed request is no card`);
+        assert.ok(classic.includes(en ? 'You get a reference code. We confirm payments during our working hours.' : 'ستحصل على رمز مرجعي. نؤكد الدفعات خلال ساعات عملنا') === !ios && !classic.includes('once the payment company is connected') && !classic.includes('بعد ربط شركة الدفع'), `${where}: the Add money card says who confirms, in the new layout's words`);
         assert.ok(classic.includes(`$100.00 • ${en ? 'Adfali' : 'ادفع لي'}`), `${where}: a confirmed payment keeps its method (history)`);
         assert.equal(neutralLines(classic).length, ios ? 1 : 0, where);
         if (ios) { onlyNeutral(classic, language, 1, where); assert.ok(!BUY_WORDS[language].test(classic) && !BUY_CALLS.test(classic), `${where}: nothing to buy`); }
