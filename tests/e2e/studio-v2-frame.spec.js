@@ -17,6 +17,10 @@ async function signIn(page) {
   ]);
   expect(response.ok()).toBe(true);
   await page.waitForFunction(() => !!state.currentUser?.id);
+  // The Admin's first screen is the owner dashboard. Wait for that landing (as critical-flows does): a navigation
+  // that follows at once could overtake it under load, and the root address would then stay in the history, which
+  // is where the last Back of the first test would end.
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/control-center');
 }
 
 function meReply(overrides = {}) {
