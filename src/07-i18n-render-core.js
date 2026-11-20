@@ -226,7 +226,8 @@ function fmtLyd(value, sign = '') {
 // One way of writing dates (DESIGN.md 5.4): "19 Nov 2026", with a time "19 Nov 2026, 12:33"; the
 // same order in Arabic, with the Western digits and Gregorian months the app already pins.
 function fmtDay(value, withTime) {
-  const date = new Date(value);
+  // A day stored as "2026-11-19" is that calendar day: read as local midnight, never as the evening before.
+  const date = new Date(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value);
   if (!value || isNaN(date)) return '';
   return date.toLocaleString(appDateLocale(), { day: 'numeric', month: 'short', year: 'numeric', ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}) });
 }

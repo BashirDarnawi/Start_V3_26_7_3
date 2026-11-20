@@ -1688,14 +1688,16 @@ textarea:disabled {
   /* Eight columns by default (redesign round 3): they must total exactly 100,
      or the browser renormalises them. The customer cell carries two picture
      tiles plus the name, and the page cell stacks a page ID over a page name.
-     Actions holds worded buttons now, so it is wider than the icon row was. */
-  .ads-summary-table .ads-col-customer { width: 21%; }
+     Actions holds worded buttons now, so it is wider than the icon row was.
+     Dates are written with the month's name ("End: 16 Nov 2026"), so the date
+     column has two points more than it had, taken from the first column. */
+  .ads-summary-table .ads-col-customer { width: 19%; }
   .ads-summary-table .ads-col-page { width: 12%; }
   .ads-summary-table .ads-col-amount { width: 12%; }
   .ads-summary-table .ads-col-payment { width: 10%; }
   .ads-summary-table .ads-col-status { width: 13%; }
   .ads-summary-table .ads-col-delivery { width: 7%; }
-  .ads-summary-table .ads-col-date { width: 11%; }
+  .ads-summary-table .ads-col-date { width: 13%; }
   .ads-summary-table .ads-col-actions { width: 14%; }
   /* The dinar amount and the serial are columns of their own only on request
      ("Columns"); the browser then shares the row between all the columns shown. */

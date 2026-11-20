@@ -671,7 +671,7 @@ function controlCenterTimestamp(value) {
   const number = Number(value || 0);
   const never = ccText('Never', 'أبداً');
   if (!Number.isFinite(number) || number <= 0) return never;
-  try { return new Date(number).toLocaleString(typeof appDateLocale === 'function' ? appDateLocale() : undefined); } catch (_) { return never; }
+  try { return (typeof fmtDay === 'function' ? fmtDay(number, true) : new Date(number).toLocaleString()) || never; } catch (_) { return never; }
 }
 
 // One way of writing money on this screen: thousands separator, two decimals, the currency always shown.
@@ -2630,7 +2630,7 @@ function openAdMergePicker(adId, triggerButton) {
           const ids = pairFor(partner);
           const money = fmtUsd(partner.amountUSD);
           const when = partner.startDate ? new Date(partner.startDate) : null;
-          const dateText = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString(appDateLocale()) : '';
+          const dateText = when && !Number.isNaN(when.getTime()) ? fmtDay(when) : '';
           return `<button type="button" onclick="showAdMergeDialog('${Security.escapeHtml(ids.keepId)}','${Security.escapeHtml(ids.draftId)}', this)" class="w-full text-start rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 hover:border-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/20">
             <div class="font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(partner, isAr))}</div>
             <div class="mt-0.5 text-xs text-slate-500 break-all">

@@ -1979,7 +1979,7 @@ function renderClothesShipmentCard(s) {
       <div class="mt-3 space-y-1.5 text-sm">
         <div class="flex justify-between gap-2">
           <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الطلب' : 'Ordered'}</span>
-          <span class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(s.orderedAt || '—')}</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(fmtDay(s.orderedAt) || s.orderedAt || '—')}</span>
         </div>
         <div class="flex justify-between gap-2">
           <span class="text-slate-500 dark:text-slate-400">${isAr ? 'القطع' : 'Pieces'}</span>
@@ -1996,7 +1996,7 @@ function renderClothesShipmentCard(s) {
         ${s.receivedAt ? `
         <div class="flex justify-between gap-2">
           <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الاستلام' : 'Received at'}</span>
-          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(clothesLocalDate(s.receivedAt))}</span>
+          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(fmtDay(s.receivedAt))}</span>
         </div>` : ''}
       </div>
 
@@ -2984,7 +2984,7 @@ function renderClothesOrderCard(o) {
         ${o.deliveredAt ? `
         <div class="flex justify-between gap-2">
           <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ التسليم' : 'Delivered at'}</span>
-          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(clothesLocalDate(o.deliveredAt))}</span>
+          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(fmtDay(o.deliveredAt))}</span>
         </div>` : ''}
       </div>
 
@@ -3254,7 +3254,7 @@ function printClothesOrderSlip(orderId) {
   const lines = Array.isArray(order.lines) ? order.lines : [];
   const payMeta = clothesPaymentStatusMeta(order.paymentStatus);
   const orderNoLabel = order.orderNo ? `#${String(Math.floor(Number(order.orderNo))).padStart(4, '0')}` : '';
-  const dateLabel = clothesLocalDate(order.createdAt);
+  const dateLabel = fmtDay(order.createdAt);
 
   const rowsHtml = lines.map((line, i) => {
     const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ');

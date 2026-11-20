@@ -315,7 +315,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
           const number = shellReceiptNumber(r);
           return `<button type="button" onclick="openReceiptFromHome('${shellEsc(r.id)}')" class="shell-home-recent hub-card hub-row w-full flex items-center gap-3 p-3 text-start touch-target">
             <span class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(customerName))}</span>
-            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `<bdi>#${shellEsc(number)}</bdi> · ` : ''}${r.createdAt ? `<bdi>${shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale()))}</bdi>` : ''}</span></span>
+            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `<bdi>#${shellEsc(number)}</bdi> · ` : ''}${r.createdAt ? `<bdi>${shellEsc(fmtDay(r.createdAt))}</bdi>` : ''}</span></span>
             <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(shellReceiptLyd(r))) : ''}</span>${shellPill(meta.label, meta.tone)}</span>
           </button>`;
         }).join('')}</div>` : `<div class="hub-card p-5 text-center text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</div>`}
@@ -772,7 +772,7 @@ function shellAdSummaryRow(ad, meta = {}) {
   const accountName = ad?.metaAdAccountName || ad?.metaAdAccountId;
   if (accountName) subParts.push(`${isAr ? 'الحساب' : 'Account'}: ${shellEsc(accountName)}`);
   const start = new Date(ad?.startDate);
-  if (!Number.isNaN(start.getTime()) && ad?.startDate) subParts.push(shellEsc(start.toLocaleDateString(appDateLocale())));
+  if (!Number.isNaN(start.getTime()) && ad?.startDate) subParts.push(shellEsc(fmtDay(start)));
   if (meta.deliveryPerson?.name) subParts.push(shellEsc(meta.deliveryPerson.name));
   const amount = meta.needsSetup
     ? `<span class="text-xs font-bold text-amber-600">${isAr ? 'غير محدد' : 'Not set'}</span>`
@@ -795,7 +795,7 @@ function shellReceiptRow(receipt, customer, card, meta = {}) {
   const id = String(receipt?.id || '');
   const name = customer?.name || receipt?.customerName || (isAr ? 'غير معروف' : 'Unknown');
   const serial = meta.displayFinalNo || meta.displayTempNo || '';
-  const when = receipt?.createdAt || receipt?.startDate ? new Date(receipt.createdAt || receipt.startDate).toLocaleDateString(appDateLocale()) : '';
+  const when = receipt?.createdAt || receipt?.startDate ? fmtDay(receipt.createdAt || receipt.startDate) : '';
   const paymentState = getReceiptPaymentState(receipt);
   let tone = 'emerald';
   let pill = shellPill(isAr ? 'مدفوع' : 'Paid', 'emerald');

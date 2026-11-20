@@ -108,7 +108,7 @@ function stopAd(id) {
               <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
               <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> ${fmtUsd(adAmountUSD)}<br>
               <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> ${fmtUsd(totalAllocated)}
-              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString(appDateLocale())}` : ''}
+              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${fmtDay(ad.stoppedAt, true)}` : ''}
             </p>
           </div>
           
@@ -174,7 +174,7 @@ function stopAd(id) {
                     ? `تغيّر المبلغ المتبقي إلى ${fmtUsd((adAmountUSD - initialSpentUSD))} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
                     : `The remaining amount changed to ${fmtUsd((adAmountUSD - initialSpentUSD))} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
                 : (informedApplies && ad.remainingCustomerInformedAt
-                    ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+                    ? fmtDay(ad.remainingCustomerInformedAt, true)
                     : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.'))}</span>
             </span>
           </label>
@@ -245,7 +245,7 @@ function stopAd(id) {
       const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
       if (informedHelp) {
         informedHelp.textContent = confirmation.existingConfirmationApplies && ad.remainingCustomerInformedAt
-          ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+          ? fmtDay(ad.remainingCustomerInformedAt, true)
           : (isAr
               ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
               : 'The remaining amount changed. Tell the customer the new amount, then check this again.');
@@ -303,7 +303,7 @@ function updateReconciliationPreview(id) {
   if (informedHelp) {
     const isAr = state.language === 'ar';
     informedHelp.textContent = confirmation.existingConfirmationApplies
-      ? (ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'تم حفظ هذا التأكيد للمبلغ الحالي.' : 'This confirmation is saved for the current amount.'))
+      ? (ad.remainingCustomerInformedAt ? fmtDay(ad.remainingCustomerInformedAt, true) : (isAr ? 'تم حفظ هذا التأكيد للمبلغ الحالي.' : 'This confirmation is saved for the current amount.'))
       : (isAr
           ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
           : 'The remaining amount changed. Tell the customer the new amount, then check this again.');

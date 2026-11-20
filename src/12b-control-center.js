@@ -58,7 +58,7 @@ function controlCenterTimestamp(value) {
   const number = Number(value || 0);
   const never = ccText('Never', 'أبداً');
   if (!Number.isFinite(number) || number <= 0) return never;
-  try { return new Date(number).toLocaleString(typeof appDateLocale === 'function' ? appDateLocale() : undefined); } catch (_) { return never; }
+  try { return (typeof fmtDay === 'function' ? fmtDay(number, true) : new Date(number).toLocaleString()) || never; } catch (_) { return never; }
 }
 
 // One way of writing money on this screen: thousands separator, two decimals, the currency always shown.

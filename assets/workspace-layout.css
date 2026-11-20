@@ -795,3 +795,13 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
   .ui-workspace .page-header.has-note > div { justify-self: stretch; min-width: 0; }
 }
 
+/* Home, "Delivery Tracking": the three small tiles keep their label in one piece. At 1,100 px "Completed" was
+   drawn "Complete / d": the tile now gives up side padding before a word is broken (found by the round-3 scan). */
+.ui-workspace .home-mini-tiles > div { min-width: 0; padding-inline: 4px; }
+.ui-workspace .home-mini-tiles > div > .text-xs { overflow-wrap: normal; }
+
+/* Ads table: a date stays in one piece. With the month written out, "End: 2 Dec 2026" broke before the year in
+   the narrow Date column. The column is two points wider now (style.css), and where it is still too narrow the
+   line breaks after "End:", never inside the date. */
+.ads-summary-table .ads-date { white-space: nowrap; }
+

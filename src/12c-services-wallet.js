@@ -775,7 +775,7 @@ function renderWalletView() {
     const other = mine ? person(isIn ? tx.fromUserId : tx.toUserId) : `${person(tx.fromUserId)} ${isRTL ? '←' : '→'} ${person(tx.toUserId)}`;
 
     const amountStr = walletShow(walletTxAmountMinor(tx), walletTxCurrency(tx), mine ? (isIn ? '+' : '-') : '');
-    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
+    const when = tx.createdAt ? fmtDay(tx.createdAt, true) : '';
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
     return `
@@ -804,7 +804,7 @@ function renderWalletView() {
   const subsRows = Array.from(subsByService.values()).map(row => {
     const svc = SERVICES[row.serviceId] || SMART_SYSTEMS_CHILDREN[row.serviceId];
     const name = svc ? (isRTL ? svc.nameAr : svc.name) : row.serviceId;
-    const exp = row.end ? new Date(row.end).toLocaleDateString(appDateLocale()) : '';
+    const exp = row.end ? fmtDay(row.end) : '';
     const daysLeft = row.end ? Math.max(0, Math.ceil((row.end - now) / TIME_CONSTANTS.MILLISECONDS_PER_DAY)) : 0;
     return `
       <div class="workspace-subscription-row py-2 border-b border-slate-200/60 dark:border-slate-700/60">

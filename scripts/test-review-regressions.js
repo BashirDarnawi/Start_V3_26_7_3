@@ -2154,6 +2154,75 @@ async function main() {
     for (const source of [forms, modals]) assert.ok(source.includes("format: (v) => `$${parseFloat(v || 0).toFixed(2)}` }") && source.includes("format: (v) => `${parseFloat(v || 0).toFixed(2)} LYD` }"), 'the edit history writes its amounts as it always did');
     assert.equal(sandbox.walletFormatMinor(7500, 'LYD'), '75.00 LYD');
   });
+  await test('round 3 dates: a date is written one way ("19 Nov 2026", in Arabic "19 نوفمبر 2026"; with a time "19 Nov 2026, 14:05") on the Manager, Clothes, Meta tools and the Studio desk, a day stored as year-month-day stays that day, and text that is stored (edit history) or goes into a file keeps its writing', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const noon = '2026-11-19T12:00:00';  // local noon: the same calendar day in every time zone the tests run in
+    state.language = 'en';
+    assert.equal(sandbox.fmtDay(noon), '19 Nov 2026');
+    assert.equal(sandbox.fmtDay(noon, true), '19 Nov 2026, 12:00');
+    assert.equal(sandbox.fmtDay(new Date(2026, 8, 5, 9, 7)), '5 Sept 2026');
+    assert.equal(sandbox.fmtDay(new Date(2026, 8, 5, 9, 7).getTime(), true), '5 Sept 2026, 09:07');
+    assert.equal(sandbox.fmtDay('2026-11-19'), '19 Nov 2026', 'a day stored as year-month-day is that calendar day');
+    assert.equal(sandbox.fmtDay('2026-01-01'), '1 Jan 2026', 'also on the first of a year (never 31 Dec of the year before)');
+    // The same on a computer west of Greenwich, where midnight in Greenwich is still the evening before.
+    const zone = process.env.TZ;
+    try {
+      process.env.TZ = 'America/Los_Angeles';
+      assert.equal(sandbox.fmtDay('2026-11-19'), '19 Nov 2026', 'a stored day is not moved by the time zone');
+      assert.equal(sandbox.fmtDay('2026-01-01'), '1 Jan 2026');
+    } finally {
+      if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+    }
+    for (const nothing of ['', null, undefined, 'not a date', 0]) assert.equal(sandbox.fmtDay(nothing), '', `nothing to write for ${JSON.stringify(nothing)}`);
+    state.language = 'ar';
+    assert.equal(sandbox.fmtDay(noon), '19 نوفمبر 2026');
+    assert.match(sandbox.fmtDay(noon, true), /^19 نوفمبر 2026، 12:00 م$/);
+    assert.equal(sandbox.fmtDay('2026-11-19'), '19 نوفمبر 2026');
+    assert.ok(!/[٠-٩]/.test(sandbox.fmtDay(noon, true)), 'Western digits in Arabic too');
+
+    // No screen writes a date by hand any more. What is left on purpose: the two lines of the edit history
+    // (stored text), a file's year-month-day, and labels that are not a full date (a month, a period, a weekday).
+    const root = path.join(__dirname, '..', 'src');
+    const files = [...fs.readdirSync(root).filter(name => name.endsWith('.js')).map(name => path.join(root, name)),
+      ...fs.readdirSync(path.join(root, 'systems', 'ads_studio')).filter(name => name.endsWith('.js')).map(name => path.join(root, 'systems', 'ads_studio', name))];
+    const byHand = [];
+    for (const file of files) {
+      fs.readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+        if (!/\.toLocale(?:Date)?String\((?:appDateLocale\(\)|[a-zA-Z]+(?:\(\))? \? 'ar-LY' : 'en-GB')\)/.test(line)) return;
+        const stored = /^\{ key: '(startDate|endDate)', label: '[A-Za-z ]+', format: \(v\) => v \? new Date\(v\)\.toLocaleDateString\(appDateLocale\(\)\) : 'N\/A' \},?$/.exec(line.trim());
+        byHand.push(`${path.basename(file)}: ${stored ? `edit history, ${stored[1]}` : `line ${index + 1}: ${line.trim().slice(0, 80)}`}`);
+      });
+    }
+    assert.deepEqual(byHand, ['15-modals.js: edit history, startDate', '15-modals.js: edit history, endDate'], 'only the two stored lines of the edit history keep the numeric date');
+
+    // What a person reads: a receipt's line in a list, in both languages.
+    const f = frameFixture(frameAdmin, 'receipts');
+    f.state.customers = [{ id: 'c1', name: 'Medina Coffee' }];
+    f.state.receipts = [{ id: 'r1', customerId: 'c1', amountUSD: 100, amountLocal: 700, exchangeRate: 7, paymentMethod: 'Cash (LYD)', serialNumber: '471300', status: 'Paid', isPaid: true, createdAt: noon, createdBy: 'admin' }];
+    f.state.language = 'en';
+    let page = String(f.sandbox.renderReceiptsView());
+    assert.ok(page.includes('19 Nov 2026') && !/\b19\/11\/2026\b/.test(page), 'the receipts list writes the day the one way');
+    f.state.language = 'ar';
+    page = String(f.sandbox.renderReceiptsView());
+    assert.ok(page.includes('19 نوفمبر 2026') && !/19‏?\/11‏?\/2026/.test(page), 'in Arabic too');
+
+    // The Ads table: the date in its cell cannot break inside ("End: 2 Dec" / "2026"), and the column has room for it.
+    const views = fs.readFileSync(path.join(root, '12-views.js'), 'utf8');
+    assert.ok(views.includes(`\${isAr ? 'الانتهاء' : 'End'}: <span class="ads-date">\${fmtDay(e)}</span>`), 'the end date is one piece');
+    const layout = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
+    assert.ok(layout.includes('.ads-summary-table .ads-date { white-space: nowrap; }'));
+    const style = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+    const widths = Object.fromEntries([...style.matchAll(/\.ads-summary-table \.ads-col-([a-z]+) \{ width: (\d+)%; \}/g)].map(match => [match[1], Number(match[2])]));
+    assert.equal(widths.date, 13, 'the date column');
+    assert.equal(widths.customer + widths.page + widths.amount + widths.payment + widths.status + widths.delivery + widths.date + widths.actions, 100, 'the eight default columns still total 100');
+    // The Home's three delivery tiles keep their label in one piece ("Complete / d" at 1,100 px before).
+    assert.ok(views.includes('<div class="home-mini-tiles grid grid-cols-3 gap-3 text-sm">') && layout.includes('.ui-workspace .home-mini-tiles > div > .text-xs { overflow-wrap: normal; }') && layout.includes('.ui-workspace .home-mini-tiles > div { min-width: 0; padding-inline: 4px; }'));
+    // Clothes: the card shows the day the one way; the CSV export keeps year-month-day.
+    const clothes = fs.readFileSync(path.join(root, '15b-clothes.js'), 'utf8');
+    assert.ok(clothes.includes("${Security.escapeHtml(fmtDay(s.orderedAt) || s.orderedAt || '—')}") && clothes.includes('${Security.escapeHtml(fmtDay(s.receivedAt))}') && clothes.includes('${Security.escapeHtml(fmtDay(o.deliveredAt))}'));
+    assert.ok(clothes.includes("s.orderedAt || '', clothesLocalDate(s.receivedAt),") && clothes.includes('clothesLocalDate(o.createdAt), clothesLocalDate(o.deliveredAt),'), 'the export is a file: its dates stay year-month-day');
+  });
+
   await test('round 3 Arabic lines: a record number, a name and a date each stay one piece inside a line (before, "#D3 · 19/11/2026" was drawn as "2026/11/D3 · 19#"), and a signed percentage keeps its sign in front', async () => {
     const { sandbox, state, run } = loadBrowserSource();
     run('Security').escapeHtml = value => String(value ?? '');

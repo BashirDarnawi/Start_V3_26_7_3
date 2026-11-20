@@ -1787,7 +1787,7 @@ function formatDateShort(date) {
   const never = state.language === 'ar' ? 'أبداً' : 'Never';
   if (!date) return never;
   try {
-    return new Date(date).toLocaleString(appDateLocale());
+    return fmtDay(date, true);
   } catch (e) {
     return never;
   }

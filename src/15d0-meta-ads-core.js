@@ -41,15 +41,7 @@ function metaAdsFormatMoney(minor, currency) {
 }
 
 function metaAdsFormatDate(value, withTime = false) {
-  const date = value ? new Date(value) : null;
-  if (!date || Number.isNaN(date.getTime())) return '';
-  try {
-    return date.toLocaleString(appDateLocale(), withTime
-      ? { dateStyle: 'medium', timeStyle: 'short' }
-      : { dateStyle: 'medium' });
-  } catch (_) {
-    return date.toLocaleDateString(appDateLocale());
-  }
+  return fmtDay(value, withTime);  // the app's one way of writing a date (in Arabic this used to be numbers and slashes)
 }
 
 function metaAdsDurationDays(ad) {

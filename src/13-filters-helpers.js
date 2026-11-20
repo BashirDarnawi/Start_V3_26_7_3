@@ -1312,7 +1312,7 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
   const lastAdText = summary.lastAdDate
     // appDateLocale(), not the device locale: an ar-SA phone showed this one date as a Hijri
     // year with Arabic-Indic digits under an English UI.
-    ? new Date(summary.lastAdDate).toLocaleDateString(appDateLocale())
+    ? fmtDay(summary.lastAdDate)
     : (isAr ? 'أبداً' : 'Never');
   const pageName = Security.escapeHtml(summary.pageName || '');
   const category = Security.escapeHtml(summary.pageCategory || '');
@@ -6163,8 +6163,8 @@ function showReceiptTransferHistory(receiptId) {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
     const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
     return isArT
-      ? `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} إلى ${name}`
-      : `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} to ${name}`;
+      ? `${fmtDay(t.date, true)}: ${fmtUsd((t.amountUSD || 0))} إلى ${name}`
+      : `${fmtDay(t.date, true)}: ${fmtUsd((t.amountUSD || 0))} to ${name}`;
   }).join('\n');
   showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
@@ -6215,7 +6215,7 @@ function showReceiptEditHistory(receiptId) {
                   <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} <bdi>#${editHistory.length - idx}</bdi></span>
                   <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy || (isArH ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
+                <span class="text-xs text-slate-400">${fmtDay(edit.editedAt, true)}</span>
               </div>
 
               <div class="space-y-2">
@@ -6239,7 +6239,7 @@ function showReceiptEditHistory(receiptId) {
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString(appDateLocale())}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${fmtDay(receipt.createdAt, true)}
           </p>
         </div>
       </div>
@@ -6401,7 +6401,7 @@ function _formatAdEditHistoryDate(value, isAr) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? (isAr ? 'تاريخ غير معروف' : 'Unknown date')
-    : date.toLocaleString(appDateLocale());
+    : fmtDay(date, true);
 }
 
 // Show ad edit history modal
@@ -7074,10 +7074,10 @@ function _refreshTopUpPreview() {
   const endExtraEl = document.getElementById('topup-preview-end-extra');
   if (endEl && baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     const days = tempTopUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0) + typedDays;
-    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString(appDateLocale());
+    endEl.textContent = fmtDay(new Date(baseEnd).getTime() + days * 86400000);
     if (endExtraEl) {
       endExtraEl.textContent = days > 0
-        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} day${days > 1 ? 's' : ''})`)
+        ? (isAr ? `(الأصلية ${fmtDay(baseEnd)} + ${days} يوم)` : `(original ${fmtDay(baseEnd)} + ${days} day${days > 1 ? 's' : ''})`)
         : '';
     }
   }
@@ -7268,7 +7268,7 @@ async function saveTopUps() {
   if (baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     updates.initialEndDate = baseEnd;
     updates.endDate = new Date(new Date(baseEnd).getTime() + totalExtendDays * 86400000).toISOString();
-    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString(appDateLocale());
+    if (totalExtendDays > 0) newEndDisplay = fmtDay(updates.endDate);
   }
 
   // Charge / refund the funding receipts: added top-ups grow this ad's allocation rows, removed ones

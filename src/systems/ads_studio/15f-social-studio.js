@@ -227,7 +227,7 @@ function socialFormatWhen(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  try { return d.toLocaleString(appDateLocale(), { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return d.toLocaleString(); }
+  return fmtDay(d, true);
 }
 
 function socialPostStatusMeta(status) {

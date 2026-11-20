@@ -436,7 +436,7 @@ function adsStudioMoneyWithLyd(minor) {
 function adsStudioFormatDate(value) {
   const raw = String(value || '');
   if (!raw) return '—';
-  try { return new Date(`${raw}T00:00:00`).toLocaleDateString(adsStudioIsAr() ? 'ar-LY' : 'en-GB'); } catch (_) { return raw; }
+  try { return fmtDay(raw.slice(0, 10)) || raw; } catch (_) { return raw; }
 }
 
 function adsStudioBackTarget() {
@@ -2156,7 +2156,7 @@ function renderAdsStudioReviewHistory(campaign) {
   return `<details class="mt-3 border-t border-slate-200 dark:border-slate-700 pt-3"><summary class="touch-target min-h-11 cursor-pointer select-none text-sm font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="history" class="w-4 h-4"></i>${isAr ? 'سجل المراجعة' : 'Review history'}</summary><div class="space-y-2 pt-2">${history.map(entry => {
     const meta = adsStudioStatusMeta(entry?.decision || entry?.status || 'Reviewed');
     const when = entry?.reviewedAt ? new Date(entry.reviewedAt) : null;
-    const dateText = when && Number.isFinite(when.getTime()) ? when.toLocaleString(isAr ? 'ar-LY' : 'en-GB') : '';
+    const dateText = when && Number.isFinite(when.getTime()) ? fmtDay(when, true) : '';
     const reason = adsStudioReviewReasonLabel(entry?.reasonCode || entry?.reviewReasonCode);
     return `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm"><div class="flex flex-wrap items-center justify-between gap-2"><span class="font-bold text-slate-800 dark:text-slate-100">${Security.escapeHtml(isAr ? meta.labelAr : meta.label)}${reason ? ` · ${Security.escapeHtml(reason)}` : ''}</span>${dateText ? `<time class="text-xs text-slate-500">${Security.escapeHtml(dateText)}</time>` : ''}</div>${entry?.note ? `<p class="mt-1 whitespace-pre-wrap text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(entry.note))}</p>` : ''}</div>`;
   }).join('')}</div></details>`;
@@ -4520,7 +4520,7 @@ function socialFormatWhen(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  try { return d.toLocaleString(appDateLocale(), { dateStyle: 'medium', timeStyle: 'short' }); } catch (_) { return d.toLocaleString(); }
+  return fmtDay(d, true);
 }
 
 function socialPostStatusMeta(status) {

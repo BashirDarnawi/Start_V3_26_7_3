@@ -1022,7 +1022,7 @@ function studioDeskLibyaToday() {
 function studioDeskWhen(iso) {
   if (typeof studioHelpWhen === 'function') return studioHelpWhen(iso);
   const at = Date.parse(String(iso || ''));
-  return Number.isFinite(at) ? new Date(at).toLocaleString(adsStudioIsAr() ? 'ar-LY' : 'en-GB') : '';
+  return Number.isFinite(at) ? fmtDay(at, true) : '';
 }
 
 function studioDeskArCount(count, one, two, few, many) {
@@ -2418,7 +2418,7 @@ function studioAdminPage(id) {
 function studioAdminWhen(iso) {
   if (typeof studioDeskWhen === 'function') return studioDeskWhen(iso);
   const at = Date.parse(String(iso || ''));
-  return Number.isFinite(at) ? new Date(at).toLocaleString(adsStudioIsAr() ? 'ar-LY' : 'en-GB') : '';
+  return Number.isFinite(at) ? fmtDay(at, true) : '';
 }
 
 function studioAdminAgo(iso) {

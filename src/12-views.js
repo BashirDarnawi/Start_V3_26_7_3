@@ -1952,7 +1952,7 @@ function renderAnalyticsView() {
           : halfway
             ? (isAr ? 'تغطية جزئية — واصل التحصيل' : 'Partial cover — keep collecting')
             : (isAr ? 'خطر — النقد الجديد لا يغطي نصف المستحق' : 'Danger — new cash covers less than half');
-        const startDisplay = liquidity.tracking ? new Date(liquidity.startDate).toLocaleDateString(isAr ? 'ar-LY' : 'en-GB') : '';
+        const startDisplay = liquidity.tracking ? fmtDay(liquidity.startDate) : '';
         // Local day, like the label (a stored local midnight is the day before in UTC).
         const startDay = liquidity.tracking ? (d => new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10))(new Date(liquidity.startDate)) : '';
         const dateControl = isCurrentUserAdmin() ? `
@@ -2057,7 +2057,7 @@ function renderAnalyticsView() {
             <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'متابعة التوصيل' : 'Delivery Tracking'}</h2>
             <span class="text-xs px-3 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40">${isAr ? 'السائقون' : 'Drivers'}</span>
           </div>
-          <div class="grid grid-cols-3 gap-3 text-sm">
+          <div class="home-mini-tiles grid grid-cols-3 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
               <p class="text-slate-500 text-xs">${isAr ? 'نشط' : 'Active'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${activeDeliveries}</p>
@@ -2132,7 +2132,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
                     <p class="text-[11px] text-slate-500">${canViewFinancials ? `${fmtUsd((Number(item.value) || 0))} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
-                  <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
+                  <span class="text-[10px] text-slate-400">${item.at ? fmtDay(item.at) : ''}</span>
                 </div>
               `).join('')}
             </div>
@@ -2263,7 +2263,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
-            ? new Date(stats.lastAdDate).toLocaleDateString(appDateLocale())
+            ? fmtDay(stats.lastAdDate)
             : (isAr ? 'أبداً' : 'Never');
 
     const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
@@ -2992,7 +2992,7 @@ function renderReceiptsView() {
                     <h3 class="text-lg font-bold text-rose-700 dark:text-rose-300">${isArV ? 'وصل تالف' : 'Destroyed Receipt'}</h3>
                   </div>
                   ${displayFinalNo ? `<p class="text-sm font-mono font-bold text-slate-700 dark:text-slate-200 mt-1">${isArV ? 'الرقم المقفول' : 'Locked number'}: ${Security.escapeHtml(String(displayFinalNo))}</p>` : ''}
-                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.date || receipt.startDate || Date.now()).toLocaleString(appDateLocale())}</p>
+                  <p class="text-xs text-slate-400 mt-1">${fmtDay(receipt.createdAt || receipt.date || receipt.startDate || Date.now(), true)}</p>
                   <p class="text-[10px] text-slate-500 mt-1">${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium">${creatorName}</span></p>
                   <p class="text-xs mt-2 text-rose-600 dark:text-rose-400 font-medium">${isArV ? 'ورقة ممزقة لم تُستخدم — لا يمكن الدفع بهذا الرقم أبداً' : 'Torn paper, never used — nobody can ever pay with this number'}</p>
                 </div>
@@ -3017,7 +3017,7 @@ function renderReceiptsView() {
                       ${isArV ? 'الرقم التسلسلي' : 'Serial'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isArV ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                     </p>
                   ` : ''}
-                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString(appDateLocale())}</p>
+                  <p class="text-xs text-slate-400 mt-1">${fmtDay(receipt.createdAt || receipt.startDate, true)}</p>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500">
                     <span class="inline-flex items-center gap-1" title="${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}">
                       <i data-lucide="user" class="w-3 h-3"></i>
@@ -3048,7 +3048,7 @@ function renderReceiptsView() {
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
-                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString(appDateLocale())}</p>
+                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${fmtDay(receipt.updatedAt, true)}</p>
                       ${(() => {
                         const n = (Array.isArray(receipt.editHistory) ? receipt.editHistory.length : 0) || Number(receipt.editCount || 0);
                         return n ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
@@ -3183,7 +3183,7 @@ function renderReceiptsView() {
                     <span class="text-sm font-medium ${!receipt.collected ? 'text-amber-700 dark:text-amber-300' : fully ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-700 dark:text-orange-300'}">
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
-                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString(appDateLocale())}</span>` : ''}
+                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${fmtDay(receipt.collectedAt)}</span>` : ''}
                     ${receipt.collectedBy ? `<span class="no-print text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
@@ -3419,7 +3419,7 @@ function renderPagesView() {
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id, pageSpendIndex) : null;
           const lastAdText = pageStats?.lastAdDate
-            ? new Date(pageStats.lastAdDate).toLocaleDateString(appDateLocale())
+            ? fmtDay(pageStats.lastAdDate)
             : (isAr ? 'أبداً' : 'Never');
           // Keep the card number stable while searching instead of renumbering
           // the only match as #1.
@@ -3884,21 +3884,21 @@ function renderAdsView() {
                     <td class="py-3 px-2 ads-cell-serial" data-label="${isAr ? 'الرقم' : 'Serial'}">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                     </td>
-                    <td class="py-3 px-2 text-xs" data-label="${isAr ? 'التاريخ' : 'Date'}">
-                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
+                    <td class="py-3 px-2 text-xs ads-cell-date" data-label="${isAr ? 'التاريخ' : 'Date'}">
+                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : fmtDay(d); })()}</div>
                       ${(() => {
                         // End date (+extra time) and, when topped up, the date
                         // of the latest top-up — visible without opening the ad.
                         const e = new Date(ad.endDate);
                         const endLine = !isNaN(e) && ad.endDate
-                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString(appDateLocale())}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: <span class="ads-date">${fmtDay(e)}</span>${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
                           : '';
                         const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
                         let upLine = '';
                         if (ups.length) {
                           const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
                           const ld = lastDate ? new Date(lastDate) : null;
-                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString(appDateLocale())}` : '';
+                          const when = ld && !isNaN(ld) ? `: ${fmtDay(ld)}` : '';
                           upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${isAr ? `${ups.length} عملية شحن، الإجمالي $` : `${ups.length} top-up(s), total $`}${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; ${isAr ? 'تم الشحن' : 'Topped up'}${when}</div>`;
                         }
                         return endLine + upLine;
@@ -5385,7 +5385,7 @@ function renderReconciliationView() {
               const informedDetails = informed
                 ? [
                     informedBy?.name || '',
-                    ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : ''
+                    ad.remainingCustomerInformedAt ? fmtDay(ad.remainingCustomerInformedAt, true) : ''
                   ].filter(Boolean).join(' • ')
                 : '';
               return `<section class="ops-reconciliation-card ${statusVisual.card}" data-reconciliation-card="${safeId}">
@@ -5400,8 +5400,8 @@ function renderReconciliationView() {
                   <span class="ops-reconciliation-state ${statusVisual.badge}">${statusVisual.label}</span>
                 </header>
                 <div class="ops-reconciliation-timeline">
-                  <span><i data-lucide="calendar" class="w-4 h-4"></i>${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
-                  <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                  <span><i data-lucide="calendar" class="w-4 h-4"></i>${isAr ? 'البداية' : 'Start'}: ${fmtDay(startDay) || '-'}</span>
+                  <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${fmtDay(stoppedDay || endDay) || '-'}</span>
                 </div>
                 <p id="reconciliation-result-${safeId}" class="ops-reconciliation-result" data-customer="${reconCustomer}">${Security.escapeHtml(reconWords[0])}</p>
                 <div class="ops-reconciliation-money">
@@ -6132,7 +6132,7 @@ function showLogDetails(logId) {
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوقت' : 'Timestamp'}</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString(appDateLocale())}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${fmtDay(log.date, true)}</div>
           </div>
         </div>
 
@@ -6535,8 +6535,8 @@ function renderSettingsView() {
           <div class="mt-3 p-3 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-500">
             ${state.localRecovery?.createdAt
               ? (state.language === 'ar'
-                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`
-                : `Recovery key created: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`)
+                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${fmtDay(state.localRecovery.createdAt, true)}`
+                : `Recovery key created: ${fmtDay(state.localRecovery.createdAt, true)}`)
               : (state.language === 'ar'
                 ? 'لم يتم إنشاء مفتاح استعادة بعد.'
                 : 'No recovery key created yet.')}
@@ -6625,7 +6625,7 @@ function renderSettingsView() {
                       const user = state.users.find(u => u.id === h.userId);
                       return `
                         <tr class="border-b border-slate-100 dark:border-slate-800">
-                          <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString(appDateLocale())}</td>
+                          <td class="py-2 text-xs text-slate-500">${fmtDay(h.date, true)}</td>
                           <td class="py-2 font-mono font-bold text-emerald-600">${h.rate.toFixed(2)}</td>
                           <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || (isAr ? 'النظام' : 'System'))}</td>
                         </tr>
@@ -6712,7 +6712,7 @@ function renderSettingsView() {
               <i data-lucide="check-circle" class="w-5 h-5 text-emerald-600"></i>
               <div class="flex-1">
                 <p class="font-medium text-emerald-700 dark:text-emerald-300">${isAr ? 'المزامنة السحابية مفعّلة' : 'Cloud Sync Enabled'}</p>
-                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString(appDateLocale()) : (isAr ? 'أبداً' : 'Never')}</p>
+                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? fmtDay(state.lastCloudSync, true) : (isAr ? 'أبداً' : 'Never')}</p>
               </div>
             </div>
             <div class="flex space-x-3">

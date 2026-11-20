@@ -6815,7 +6815,8 @@ function fmtLyd(value, sign = '') {
 // One way of writing dates (DESIGN.md 5.4): "19 Nov 2026", with a time "19 Nov 2026, 12:33"; the
 // same order in Arabic, with the Western digits and Gregorian months the app already pins.
 function fmtDay(value, withTime) {
-  const date = new Date(value);
+  // A day stored as "2026-11-19" is that calendar day: read as local midnight, never as the evening before.
+  const date = new Date(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value);
   if (!value || isNaN(date)) return '';
   return date.toLocaleString(appDateLocale(), { day: 'numeric', month: 'short', year: 'numeric', ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}) });
 }
@@ -8996,7 +8997,7 @@ function formatDateShort(date) {
   const never = state.language === 'ar' ? 'أبداً' : 'Never';
   if (!date) return never;
   try {
-    return new Date(date).toLocaleString(appDateLocale());
+    return fmtDay(date, true);
   } catch (e) {
     return never;
   }
@@ -17360,7 +17361,7 @@ function renderAnalyticsView() {
           : halfway
             ? (isAr ? 'تغطية جزئية — واصل التحصيل' : 'Partial cover — keep collecting')
             : (isAr ? 'خطر — النقد الجديد لا يغطي نصف المستحق' : 'Danger — new cash covers less than half');
-        const startDisplay = liquidity.tracking ? new Date(liquidity.startDate).toLocaleDateString(isAr ? 'ar-LY' : 'en-GB') : '';
+        const startDisplay = liquidity.tracking ? fmtDay(liquidity.startDate) : '';
         // Local day, like the label (a stored local midnight is the day before in UTC).
         const startDay = liquidity.tracking ? (d => new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10))(new Date(liquidity.startDate)) : '';
         const dateControl = isCurrentUserAdmin() ? `
@@ -17465,7 +17466,7 @@ function renderAnalyticsView() {
             <h2 class="text-lg font-bold text-slate-800 dark:text-slate-100">${isAr ? 'متابعة التوصيل' : 'Delivery Tracking'}</h2>
             <span class="text-xs px-3 py-1 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40">${isAr ? 'السائقون' : 'Drivers'}</span>
           </div>
-          <div class="grid grid-cols-3 gap-3 text-sm">
+          <div class="home-mini-tiles grid grid-cols-3 gap-3 text-sm">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg text-center">
               <p class="text-slate-500 text-xs">${isAr ? 'نشط' : 'Active'}</p>
               <p class="text-xl font-bold text-slate-800 dark:text-white">${activeDeliveries}</p>
@@ -17540,7 +17541,7 @@ function renderAnalyticsView() {
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
                     <p class="text-[11px] text-slate-500">${canViewFinancials ? `${fmtUsd((Number(item.value) || 0))} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
-                  <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
+                  <span class="text-[10px] text-slate-400">${item.at ? fmtDay(item.at) : ''}</span>
                 </div>
               `).join('')}
             </div>
@@ -17671,7 +17672,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
   return customers.map((c, idx) => {
           const stats = getCustomerStats(c.id, statsIndex);
           const lastAdText = stats.lastAdDate
-            ? new Date(stats.lastAdDate).toLocaleDateString(appDateLocale())
+            ? fmtDay(stats.lastAdDate)
             : (isAr ? 'أبداً' : 'Never');
 
     const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
@@ -18400,7 +18401,7 @@ function renderReceiptsView() {
                     <h3 class="text-lg font-bold text-rose-700 dark:text-rose-300">${isArV ? 'وصل تالف' : 'Destroyed Receipt'}</h3>
                   </div>
                   ${displayFinalNo ? `<p class="text-sm font-mono font-bold text-slate-700 dark:text-slate-200 mt-1">${isArV ? 'الرقم المقفول' : 'Locked number'}: ${Security.escapeHtml(String(displayFinalNo))}</p>` : ''}
-                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.date || receipt.startDate || Date.now()).toLocaleString(appDateLocale())}</p>
+                  <p class="text-xs text-slate-400 mt-1">${fmtDay(receipt.createdAt || receipt.date || receipt.startDate || Date.now(), true)}</p>
                   <p class="text-[10px] text-slate-500 mt-1">${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium">${creatorName}</span></p>
                   <p class="text-xs mt-2 text-rose-600 dark:text-rose-400 font-medium">${isArV ? 'ورقة ممزقة لم تُستخدم — لا يمكن الدفع بهذا الرقم أبداً' : 'Torn paper, never used — nobody can ever pay with this number'}</p>
                 </div>
@@ -18425,7 +18426,7 @@ function renderReceiptsView() {
                       ${isArV ? 'الرقم التسلسلي' : 'Serial'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isArV ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
                     </p>
                   ` : ''}
-                  <p class="text-xs text-slate-400 mt-1">${new Date(receipt.createdAt || receipt.startDate).toLocaleString(appDateLocale())}</p>
+                  <p class="text-xs text-slate-400 mt-1">${fmtDay(receipt.createdAt || receipt.startDate, true)}</p>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500">
                     <span class="inline-flex items-center gap-1" title="${isArV ? 'تم الإنشاء بواسطة' : 'Created by'}">
                       <i data-lucide="user" class="w-3 h-3"></i>
@@ -18456,7 +18457,7 @@ function renderReceiptsView() {
                   </div>
                   ${receipt.updatedAt ? `
                     <div class="flex items-center mt-0.5 space-x-2">
-                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${new Date(receipt.updatedAt).toLocaleString(appDateLocale())}</p>
+                      <p class="text-[10px] text-amber-500 flex items-center"><i data-lucide="edit-3" class="w-2.5 h-2.5 mr-1"></i>${isArV ? 'عُدِّل' : 'Edited'}: ${fmtDay(receipt.updatedAt, true)}</p>
                       ${(() => {
                         const n = (Array.isArray(receipt.editHistory) ? receipt.editHistory.length : 0) || Number(receipt.editCount || 0);
                         return n ? `<button onclick="showReceiptEditHistory('${receipt.id}')" class="text-[10px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-full hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors font-medium">${isArV ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
@@ -18591,7 +18592,7 @@ function renderReceiptsView() {
                     <span class="text-sm font-medium ${!receipt.collected ? 'text-amber-700 dark:text-amber-300' : fully ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-700 dark:text-orange-300'}">
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
-                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString(appDateLocale())}</span>` : ''}
+                    ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${fmtDay(receipt.collectedAt)}</span>` : ''}
                     ${receipt.collectedBy ? `<span class="no-print text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
@@ -18827,7 +18828,7 @@ function renderPagesView() {
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id, pageSpendIndex) : null;
           const lastAdText = pageStats?.lastAdDate
-            ? new Date(pageStats.lastAdDate).toLocaleDateString(appDateLocale())
+            ? fmtDay(pageStats.lastAdDate)
             : (isAr ? 'أبداً' : 'Never');
           // Keep the card number stable while searching instead of renumbering
           // the only match as #1.
@@ -19292,21 +19293,21 @@ function renderAdsView() {
                     <td class="py-3 px-2 ads-cell-serial" data-label="${isAr ? 'الرقم' : 'Serial'}">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                     </td>
-                    <td class="py-3 px-2 text-xs" data-label="${isAr ? 'التاريخ' : 'Date'}">
-                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
+                    <td class="py-3 px-2 text-xs ads-cell-date" data-label="${isAr ? 'التاريخ' : 'Date'}">
+                      <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : fmtDay(d); })()}</div>
                       ${(() => {
                         // End date (+extra time) and, when topped up, the date
                         // of the latest top-up — visible without opening the ad.
                         const e = new Date(ad.endDate);
                         const endLine = !isNaN(e) && ad.endDate
-                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: ${e.toLocaleDateString(appDateLocale())}${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
+                          ? `<div class="text-slate-700 dark:text-slate-300 font-medium">${isAr ? 'الانتهاء' : 'End'}: <span class="ads-date">${fmtDay(e)}</span>${(parseFloat(ad.extraTimeMinutes) || 0) > 0 ? ` <span class="text-amber-600">+${ad.extraTimeMinutes}${isAr ? 'د' : 'm'}</span>` : ''}</div>`
                           : '';
                         const ups = Array.isArray(ad.topUps) ? ad.topUps : [];
                         let upLine = '';
                         if (ups.length) {
                           const lastDate = ups.map(t => t && t.date).filter(Boolean).sort().slice(-1)[0];
                           const ld = lastDate ? new Date(lastDate) : null;
-                          const when = ld && !isNaN(ld) ? `: ${ld.toLocaleDateString(appDateLocale())}` : '';
+                          const when = ld && !isNaN(ld) ? `: ${fmtDay(ld)}` : '';
                           upLine = `<div class="text-emerald-600 dark:text-emerald-400 font-medium" title="${isAr ? `${ups.length} عملية شحن، الإجمالي $` : `${ups.length} top-up(s), total $`}${ups.reduce((s, t) => s + (parseFloat(t && t.amount) || 0), 0).toFixed(2)}">&#8593; ${isAr ? 'تم الشحن' : 'Topped up'}${when}</div>`;
                         }
                         return endLine + upLine;
@@ -20793,7 +20794,7 @@ function renderReconciliationView() {
               const informedDetails = informed
                 ? [
                     informedBy?.name || '',
-                    ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : ''
+                    ad.remainingCustomerInformedAt ? fmtDay(ad.remainingCustomerInformedAt, true) : ''
                   ].filter(Boolean).join(' • ')
                 : '';
               return `<section class="ops-reconciliation-card ${statusVisual.card}" data-reconciliation-card="${safeId}">
@@ -20808,8 +20809,8 @@ function renderReconciliationView() {
                   <span class="ops-reconciliation-state ${statusVisual.badge}">${statusVisual.label}</span>
                 </header>
                 <div class="ops-reconciliation-timeline">
-                  <span><i data-lucide="calendar" class="w-4 h-4"></i>${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
-                  <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                  <span><i data-lucide="calendar" class="w-4 h-4"></i>${isAr ? 'البداية' : 'Start'}: ${fmtDay(startDay) || '-'}</span>
+                  <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${fmtDay(stoppedDay || endDay) || '-'}</span>
                 </div>
                 <p id="reconciliation-result-${safeId}" class="ops-reconciliation-result" data-customer="${reconCustomer}">${Security.escapeHtml(reconWords[0])}</p>
                 <div class="ops-reconciliation-money">
@@ -21540,7 +21541,7 @@ function showLogDetails(logId) {
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الوقت' : 'Timestamp'}</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleString(appDateLocale())}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${fmtDay(log.date, true)}</div>
           </div>
         </div>
 
@@ -21943,8 +21944,8 @@ function renderSettingsView() {
           <div class="mt-3 p-3 rounded-xl bg-white/60 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-500">
             ${state.localRecovery?.createdAt
               ? (state.language === 'ar'
-                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`
-                : `Recovery key created: ${new Date(state.localRecovery.createdAt).toLocaleString(appDateLocale())}`)
+                ? `مفتاح الاستعادة مُنشأ بتاريخ: ${fmtDay(state.localRecovery.createdAt, true)}`
+                : `Recovery key created: ${fmtDay(state.localRecovery.createdAt, true)}`)
               : (state.language === 'ar'
                 ? 'لم يتم إنشاء مفتاح استعادة بعد.'
                 : 'No recovery key created yet.')}
@@ -22033,7 +22034,7 @@ function renderSettingsView() {
                       const user = state.users.find(u => u.id === h.userId);
                       return `
                         <tr class="border-b border-slate-100 dark:border-slate-800">
-                          <td class="py-2 text-xs text-slate-500">${new Date(h.date).toLocaleString(appDateLocale())}</td>
+                          <td class="py-2 text-xs text-slate-500">${fmtDay(h.date, true)}</td>
                           <td class="py-2 font-mono font-bold text-emerald-600">${h.rate.toFixed(2)}</td>
                           <td class="py-2 text-slate-600 dark:text-slate-400">${Security.escapeHtml(user?.name || (isAr ? 'النظام' : 'System'))}</td>
                         </tr>
@@ -22120,7 +22121,7 @@ function renderSettingsView() {
               <i data-lucide="check-circle" class="w-5 h-5 text-emerald-600"></i>
               <div class="flex-1">
                 <p class="font-medium text-emerald-700 dark:text-emerald-300">${isAr ? 'المزامنة السحابية مفعّلة' : 'Cloud Sync Enabled'}</p>
-                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? new Date(state.lastCloudSync).toLocaleString(appDateLocale()) : (isAr ? 'أبداً' : 'Never')}</p>
+                <p class="text-xs text-emerald-600 dark:text-emerald-400 mt-1">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${state.lastCloudSync ? fmtDay(state.lastCloudSync, true) : (isAr ? 'أبداً' : 'Never')}</p>
               </div>
             </div>
             <div class="flex space-x-3">
@@ -22930,7 +22931,7 @@ function renderWalletView() {
     const other = mine ? person(isIn ? tx.fromUserId : tx.toUserId) : `${person(tx.fromUserId)} ${isRTL ? '←' : '→'} ${person(tx.toUserId)}`;
 
     const amountStr = walletShow(walletTxAmountMinor(tx), walletTxCurrency(tx), mine ? (isIn ? '+' : '-') : '');
-    const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
+    const when = tx.createdAt ? fmtDay(tx.createdAt, true) : '';
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
     return `
@@ -22959,7 +22960,7 @@ function renderWalletView() {
   const subsRows = Array.from(subsByService.values()).map(row => {
     const svc = SERVICES[row.serviceId] || SMART_SYSTEMS_CHILDREN[row.serviceId];
     const name = svc ? (isRTL ? svc.nameAr : svc.name) : row.serviceId;
-    const exp = row.end ? new Date(row.end).toLocaleDateString(appDateLocale()) : '';
+    const exp = row.end ? fmtDay(row.end) : '';
     const daysLeft = row.end ? Math.max(0, Math.ceil((row.end - now) / TIME_CONSTANTS.MILLISECONDS_PER_DAY)) : 0;
     return `
       <div class="workspace-subscription-row py-2 border-b border-slate-200/60 dark:border-slate-700/60">
@@ -23557,7 +23558,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
           const number = shellReceiptNumber(r);
           return `<button type="button" onclick="openReceiptFromHome('${shellEsc(r.id)}')" class="shell-home-recent hub-card hub-row w-full flex items-center gap-3 p-3 text-start touch-target">
             <span class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(customerName))}</span>
-            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `<bdi>#${shellEsc(number)}</bdi> · ` : ''}${r.createdAt ? `<bdi>${shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale()))}</bdi>` : ''}</span></span>
+            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `<bdi>#${shellEsc(number)}</bdi> · ` : ''}${r.createdAt ? `<bdi>${shellEsc(fmtDay(r.createdAt))}</bdi>` : ''}</span></span>
             <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(shellReceiptLyd(r))) : ''}</span>${shellPill(meta.label, meta.tone)}</span>
           </button>`;
         }).join('')}</div>` : `<div class="hub-card p-5 text-center text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</div>`}
@@ -24014,7 +24015,7 @@ function shellAdSummaryRow(ad, meta = {}) {
   const accountName = ad?.metaAdAccountName || ad?.metaAdAccountId;
   if (accountName) subParts.push(`${isAr ? 'الحساب' : 'Account'}: ${shellEsc(accountName)}`);
   const start = new Date(ad?.startDate);
-  if (!Number.isNaN(start.getTime()) && ad?.startDate) subParts.push(shellEsc(start.toLocaleDateString(appDateLocale())));
+  if (!Number.isNaN(start.getTime()) && ad?.startDate) subParts.push(shellEsc(fmtDay(start)));
   if (meta.deliveryPerson?.name) subParts.push(shellEsc(meta.deliveryPerson.name));
   const amount = meta.needsSetup
     ? `<span class="text-xs font-bold text-amber-600">${isAr ? 'غير محدد' : 'Not set'}</span>`
@@ -24037,7 +24038,7 @@ function shellReceiptRow(receipt, customer, card, meta = {}) {
   const id = String(receipt?.id || '');
   const name = customer?.name || receipt?.customerName || (isAr ? 'غير معروف' : 'Unknown');
   const serial = meta.displayFinalNo || meta.displayTempNo || '';
-  const when = receipt?.createdAt || receipt?.startDate ? new Date(receipt.createdAt || receipt.startDate).toLocaleDateString(appDateLocale()) : '';
+  const when = receipt?.createdAt || receipt?.startDate ? fmtDay(receipt.createdAt || receipt.startDate) : '';
   const paymentState = getReceiptPaymentState(receipt);
   let tone = 'emerald';
   let pill = shellPill(isAr ? 'مدفوع' : 'Paid', 'emerald');
@@ -25463,7 +25464,7 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
   const lastAdText = summary.lastAdDate
     // appDateLocale(), not the device locale: an ar-SA phone showed this one date as a Hijri
     // year with Arabic-Indic digits under an English UI.
-    ? new Date(summary.lastAdDate).toLocaleDateString(appDateLocale())
+    ? fmtDay(summary.lastAdDate)
     : (isAr ? 'أبداً' : 'Never');
   const pageName = Security.escapeHtml(summary.pageName || '');
   const category = Security.escapeHtml(summary.pageCategory || '');
@@ -30314,8 +30315,8 @@ function showReceiptTransferHistory(receiptId) {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
     const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
     return isArT
-      ? `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} إلى ${name}`
-      : `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} to ${name}`;
+      ? `${fmtDay(t.date, true)}: ${fmtUsd((t.amountUSD || 0))} إلى ${name}`
+      : `${fmtDay(t.date, true)}: ${fmtUsd((t.amountUSD || 0))} to ${name}`;
   }).join('\n');
   showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
@@ -30366,7 +30367,7 @@ function showReceiptEditHistory(receiptId) {
                   <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} <bdi>#${editHistory.length - idx}</bdi></span>
                   <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy || (isArH ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
-                <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
+                <span class="text-xs text-slate-400">${fmtDay(edit.editedAt, true)}</span>
               </div>
 
               <div class="space-y-2">
@@ -30390,7 +30391,7 @@ function showReceiptEditHistory(receiptId) {
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
           <p class="text-xs text-slate-500 text-center">
             ${isArH ? `الإجمالي: ${editHistory.length} ${editHistory.length > 1 ? 'تعديلات' : 'تعديل'}` : `Total: ${editHistory.length} edit${editHistory.length > 1 ? 's' : ''}`} •
-            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${new Date(receipt.createdAt).toLocaleString(appDateLocale())}
+            ${isArH ? 'تاريخ الإنشاء' : 'Created'}: ${fmtDay(receipt.createdAt, true)}
           </p>
         </div>
       </div>
@@ -30552,7 +30553,7 @@ function _formatAdEditHistoryDate(value, isAr) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? (isAr ? 'تاريخ غير معروف' : 'Unknown date')
-    : date.toLocaleString(appDateLocale());
+    : fmtDay(date, true);
 }
 
 // Show ad edit history modal
@@ -31225,10 +31226,10 @@ function _refreshTopUpPreview() {
   const endExtraEl = document.getElementById('topup-preview-end-extra');
   if (endEl && baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     const days = tempTopUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0) + typedDays;
-    endEl.textContent = new Date(new Date(baseEnd).getTime() + days * 86400000).toLocaleDateString(appDateLocale());
+    endEl.textContent = fmtDay(new Date(baseEnd).getTime() + days * 86400000);
     if (endExtraEl) {
       endExtraEl.textContent = days > 0
-        ? (isAr ? `(الأصلية ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} يوم)` : `(original ${new Date(baseEnd).toLocaleDateString(appDateLocale())} + ${days} day${days > 1 ? 's' : ''})`)
+        ? (isAr ? `(الأصلية ${fmtDay(baseEnd)} + ${days} يوم)` : `(original ${fmtDay(baseEnd)} + ${days} day${days > 1 ? 's' : ''})`)
         : '';
     }
   }
@@ -31419,7 +31420,7 @@ async function saveTopUps() {
   if (baseEnd && !isNaN(new Date(baseEnd).getTime())) {
     updates.initialEndDate = baseEnd;
     updates.endDate = new Date(new Date(baseEnd).getTime() + totalExtendDays * 86400000).toISOString();
-    if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString(appDateLocale());
+    if (totalExtendDays > 0) newEndDisplay = fmtDay(updates.endDate);
   }
 
   // Charge / refund the funding receipts: added top-ups grow this ad's allocation rows, removed ones
@@ -39158,7 +39159,7 @@ function renderModal() {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
                   const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown')));
                   return `<div class="flex justify-between">
-                    <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
+                    <span>${fmtDay(t.date, true)}</span>
                     <span class="font-medium">${fmtUsd((t.amountUSD || 0))} ${isArT ? '←' : '→'} ${name}</span>
                   </div>`;
                 }).join('')}
@@ -39287,7 +39288,7 @@ function renderModal() {
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
             <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: ${fmtUsd((parseFloat(topUpBase) || 0))} ${isArTU ? '←' : '→'} ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">${fmtUsd(((parseFloat(topUpBase) || 0) + topUpWorkingTotal))}</span></div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${fmtDay(topUpNewEnd)}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${fmtDay(topUpBaseEnd)} + ${topUpWorkingDays} يوم)` : `(original ${fmtDay(topUpBaseEnd)} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
             ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">${fmtUsd(topUpAvailable)}</span></div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: ${fmtUsd(topUpWorkingTotal)}</div>` : ''}
           </div>
@@ -39297,7 +39298,7 @@ function renderModal() {
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
                   <div class="font-medium">${fmtUsd(topup.amount)}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
-                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
+                  <div class="text-xs text-slate-500">${fmtDay(topup.date)} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
                   <i data-lucide="x-circle" class="w-4 h-4"></i>
@@ -42563,15 +42564,7 @@ function metaAdsFormatMoney(minor, currency) {
 }
 
 function metaAdsFormatDate(value, withTime = false) {
-  const date = value ? new Date(value) : null;
-  if (!date || Number.isNaN(date.getTime())) return '';
-  try {
-    return date.toLocaleString(appDateLocale(), withTime
-      ? { dateStyle: 'medium', timeStyle: 'short' }
-      : { dateStyle: 'medium' });
-  } catch (_) {
-    return date.toLocaleDateString(appDateLocale());
-  }
+  return fmtDay(value, withTime);  // the app's one way of writing a date (in Arabic this used to be numbers and slashes)
 }
 
 function metaAdsDurationDays(ad) {
@@ -43449,7 +43442,7 @@ function stopAd(id) {
               <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
               <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> ${fmtUsd(adAmountUSD)}<br>
               <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> ${fmtUsd(totalAllocated)}
-              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString(appDateLocale())}` : ''}
+              ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${fmtDay(ad.stoppedAt, true)}` : ''}
             </p>
           </div>
           
@@ -43515,7 +43508,7 @@ function stopAd(id) {
                     ? `تغيّر المبلغ المتبقي إلى ${fmtUsd((adAmountUSD - initialSpentUSD))} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
                     : `The remaining amount changed to ${fmtUsd((adAmountUSD - initialSpentUSD))} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
                 : (informedApplies && ad.remainingCustomerInformedAt
-                    ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+                    ? fmtDay(ad.remainingCustomerInformedAt, true)
                     : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.'))}</span>
             </span>
           </label>
@@ -43586,7 +43579,7 @@ function stopAd(id) {
       const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
       if (informedHelp) {
         informedHelp.textContent = confirmation.existingConfirmationApplies && ad.remainingCustomerInformedAt
-          ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
+          ? fmtDay(ad.remainingCustomerInformedAt, true)
           : (isAr
               ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
               : 'The remaining amount changed. Tell the customer the new amount, then check this again.');
@@ -43644,7 +43637,7 @@ function updateReconciliationPreview(id) {
   if (informedHelp) {
     const isAr = state.language === 'ar';
     informedHelp.textContent = confirmation.existingConfirmationApplies
-      ? (ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : (isAr ? 'تم حفظ هذا التأكيد للمبلغ الحالي.' : 'This confirmation is saved for the current amount.'))
+      ? (ad.remainingCustomerInformedAt ? fmtDay(ad.remainingCustomerInformedAt, true) : (isAr ? 'تم حفظ هذا التأكيد للمبلغ الحالي.' : 'This confirmation is saved for the current amount.'))
       : (isAr
           ? 'تغيّر المبلغ المتبقي. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع مرة أخرى.'
           : 'The remaining amount changed. Tell the customer the new amount, then check this again.');

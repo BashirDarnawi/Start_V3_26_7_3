@@ -1699,7 +1699,7 @@ function renderModal() {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
                   const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown')));
                   return `<div class="flex justify-between">
-                    <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
+                    <span>${fmtDay(t.date, true)}</span>
                     <span class="font-medium">${fmtUsd((t.amountUSD || 0))} ${isArT ? '←' : '→'} ${name}</span>
                   </div>`;
                 }).join('')}
@@ -1828,7 +1828,7 @@ function renderModal() {
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
             <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: ${fmtUsd((parseFloat(topUpBase) || 0))} ${isArTU ? '←' : '→'} ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">${fmtUsd(((parseFloat(topUpBase) || 0) + topUpWorkingTotal))}</span></div>
-            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
+            ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${fmtDay(topUpNewEnd)}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${fmtDay(topUpBaseEnd)} + ${topUpWorkingDays} يوم)` : `(original ${fmtDay(topUpBaseEnd)} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
             ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">${fmtUsd(topUpAvailable)}</span></div>` : ''}
             ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: ${fmtUsd(topUpWorkingTotal)}</div>` : ''}
           </div>
@@ -1838,7 +1838,7 @@ function renderModal() {
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
                   <div class="font-medium">${fmtUsd(topup.amount)}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
-                  <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
+                  <div class="text-xs text-slate-500">${fmtDay(topup.date)} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
                   <i data-lucide="x-circle" class="w-4 h-4"></i>
