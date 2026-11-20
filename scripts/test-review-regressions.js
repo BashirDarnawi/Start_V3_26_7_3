@@ -5197,6 +5197,93 @@ async function main() {
         assert.deepEqual(has(html, "handleSubscribe('clothes_system', 'clothes_system')", 'You are not subscribed to'), [], `${platform} local sheet`);
       }
     });
+
+    // Redesign round 4 (ROUND3.md section 4, item 10): the owner chose «د.ل» for the dinar in Arabic and amounts carry
+    // "$" in both languages, but nineteen Arabic labels still said "(USD)". They say «($)» now; English keeps "(USD)".
+    await test('round 4 Arabic labels: the dollar is «($)» in an Arabic label and never the code USD; English labels keep "(USD)"', async () => {
+      const root = path.join(__dirname, '..', 'src');
+      const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+      const files = [...manifest.files, ...Object.values(manifest.lazy).flat()];
+      const offenders = [];
+      let arabicDollarLabels = 0;
+      for (const file of files) {
+        fs.readFileSync(path.join(root, file), 'utf8').split('\n').forEach((line, index) => {
+          if (/^\s*\/\//.test(line)) return;
+          for (const literal of line.match(/'[^'\n]*'|`[^`\n]*`/g) || []) {
+            if (!/[؀-ۿ]/.test(literal)) continue;
+            if (/\bUSD\b/.test(literal.replace(/\$\{[^}]*\}/g, ''))) offenders.push(`${file}:${index + 1} ${literal.slice(0, 60)}`);
+            if (literal.includes('($)')) arabicDollarLabels += 1;
+          }
+        });
+      }
+      assert.deepEqual(offenders, [], 'an Arabic text that still names the code USD');
+      assert.ok(arabicDollarLabels >= 19, `the Arabic labels say «($)»: ${arabicDollarLabels}`);
+      const { sandbox, state, run } = loadBrowserSource();
+      state.language = 'ar';
+      assert.deepEqual([sandbox.trMethod('Cash (USD)'), sandbox.trMethod('Bank Transfer (USD)'), sandbox.trMethod('Cash (LYD)')], ['نقدي ($)', 'حوالة مصرفية ($)', 'نقدي (د.ل)']);
+      assert.equal(run("_EDIT_HISTORY_AR['Amount (USD)']"), 'المبلغ ($)');
+      state.language = 'en';
+      assert.deepEqual([sandbox.trMethod('Cash (USD)'), sandbox.trMethod('Bank Transfer (USD)')], ['Cash (USD)', 'Bank Transfer (USD)'], 'English, and the stored value, are untouched');
+    });
+
+    // Redesign round 4 (ROUND3.md section 4, item 11): the Charge wallet page wrote "1 USD ≈ 7.1 LYD" and repeated
+    // the typing beside a currency code. Both are amounts, so both are written as every amount is.
+    await test('round 4 Charge wallet: the rate line, the amount being typed and the smallest charge are written as every amount is, in English and Arabic', async () => {
+      const page = (language, currency, typed, rate) => {
+        const f = PLATFORMS.web({ language });
+        f.run("_walletPayMethods = [{ id: 'bank_transfer', name: { en: 'Bank transfer', ar: 'حوالة مصرفية' } }]");
+        f.run(`_walletPayRate = ${JSON.stringify(rate === undefined ? null : { usdToLyd: rate })}`);
+        f.run(`_chargeWallet.currency = ${JSON.stringify(currency)}`);
+        f.run(`_chargeWallet.amountText = ${JSON.stringify(typed)}`);
+        const html = String(f.sandbox.renderChargeWalletView());
+        const box = (html.match(/<div class="flex items-end justify-center gap-2" dir="ltr">([\s\S]*?)<\/div>/) || ['', ''])[1];
+        const mirror = [...box.matchAll(/<span[^>]*>([^<]*)<\/span>/g)].map(m => m[1]);
+        const line = (html.match(/data-testid="charge-wallet-rate">([^<]*)</) || ['', null])[1];
+        return { f, html, mirror, line };
+      };
+      const LRI = '⁦', RLI = '⁧', PDI = '⁩';
+      // English: "$" stands before the number, "LYD" after it; the number has its separators and two decimals.
+      let drawn = page('en', 'USD', '1500.5', 7.1);
+      assert.deepEqual(drawn.mirror, ['$', '1,500.50']);
+      assert.equal(drawn.line, '$1.00 ≈ 7.10 LYD');
+      assert.ok(!/1 USD|>USD</.test(drawn.html), 'the code "USD" no longer stands beside the amount or in the rate line');
+      drawn = page('en', 'LYD', '75', 7.1);
+      assert.deepEqual(drawn.mirror, ['75.00', 'LYD']);
+      assert.equal(drawn.line, null, 'a dinar charge shows no rate');
+      assert.deepEqual(page('en', 'USD', '', undefined).mirror, ['$', '0.00']);
+      assert.equal(page('en', 'USD', '10', undefined).line, null, 'no rate known: no line');
+      assert.equal(page('en', 'USD', '10', 0).line, null);
+      // A rate keeps its own decimals when it has more than two.
+      assert.equal(page('en', 'USD', '10', 7.105).line, '$1.00 ≈ 7.105 LYD');
+      assert.equal(page('en', 'USD', '10', '7').line, '$1.00 ≈ 7.00 LYD');
+      // Arabic: Western digits, "$" before its number, د.ل drawn on the left of its number (first in the left-to-right box).
+      drawn = page('ar', 'USD', '20', 7.105);
+      assert.deepEqual(drawn.mirror, ['$', '20.00']);
+      assert.equal(drawn.line, `${LRI}$1.00${PDI} ≈ ${RLI}7.105 د.ل${PDI}`);
+      drawn = page('ar', 'LYD', '1,250', 7.1);
+      assert.deepEqual(drawn.mirror, ['د.ل', '1,250.00']);
+      // Typing redraws only the number, in the same form.
+      const typing = page('en', 'USD', '5', 7.1);
+      const preview = { textContent: '' };
+      typing.f.sandbox.document.getElementById = id => (id === 'charge-wallet-amount-display' ? preview : null);
+      const typed = value => ({ value, selectionStart: value.length, selectionEnd: value.length, setSelectionRange() {} });
+      typing.f.sandbox.chargeWalletAmountInput(typed('2,000'));
+      assert.equal(preview.textContent, '2,000.00');
+      typing.f.sandbox.chargeWalletAmountInput(typed('12.5'));
+      assert.equal(preview.textContent, '12.50');
+      typing.f.sandbox.chargeWalletAmountInput(typed(''));
+      assert.equal(preview.textContent, '0.00');
+      // The smallest charge is an amount too.
+      for (const [language, currency, text] of [['en', 'USD', 'Minimum charge is $1.00'], ['en', 'LYD', 'Minimum charge is 1.00 LYD'],
+        ['ar', 'USD', `أقل مبلغ للشحن هو ${LRI}$1.00${PDI}`], ['ar', 'LYD', `أقل مبلغ للشحن هو ${RLI}1.00 د.ل${PDI}`]]) {
+        const small = page(language, currency, '0.5', 7.1);
+        const notes = [];
+        small.f.sandbox.showNotification = (title, message) => { notes.push(message); };
+        await small.f.sandbox.chargeWalletCreateRequest();
+        assert.deepEqual(notes, [text], `${language} ${currency}`);
+      }
+    });
+
   }
   await test('r6 A n=15: a live Not-Paid ad the company partly covered can be switched to Paid with the customer\'s share', async () => {
     const { sandbox, state } = loadBrowserSource();

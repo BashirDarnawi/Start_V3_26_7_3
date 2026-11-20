@@ -6838,10 +6838,10 @@ function platformLabel(p) {
 const METHOD_TRANSLATIONS_AR = {
   'Transfer': 'تحويل',
   'Cash (LYD)': 'نقدي (د.ل)',
-  'Cash (USD)': 'نقدي (USD)',
+  'Cash (USD)': 'نقدي ($)',
   'Bank Transfer': 'حوالة مصرفية',
   'Bank Transfer (LYD)': 'حوالة مصرفية (د.ل)',
-  'Bank Transfer (USD)': 'حوالة مصرفية (USD)',
+  'Bank Transfer (USD)': 'حوالة مصرفية ($)',
   'Transfer Office': 'مكتب صرافة',
   'Split Payment': 'دفعات مقسّمة',
 };
@@ -17797,7 +17797,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   </div>
                   <!-- USD Section - TOTAL ADS CREDIT -->
                   <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'رصيد الإعلانات (USD)' : 'Ads Credit (USD)'}</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'رصيد الإعلانات ($)' : 'Ads Credit (USD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
@@ -20136,7 +20136,7 @@ function showDeliveryDetails(itemId) {
             <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(detailAmountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (USD)' : 'To collect (USD)') : (isAr ? 'المبلغ (USD)' : 'Amount (USD)')}</div>
+            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله ($)' : 'To collect (USD)') : (isAr ? 'المبلغ ($)' : 'Amount (USD)')}</div>
             <div class="text-2xl font-black text-blue-700 dark:text-blue-300">${fmtUsd((detailAmountUSD || 0))}</div>
           </div>
         </div>
@@ -20820,7 +20820,7 @@ function renderReconciliationView() {
                     <small>${isAr ? 'المبلغ المخطط للإعلان' : 'Planned ad amount'}</small>
                   </div>
                   <div class="ops-reconciliation-spend">
-                    <label for="reconciliation-spent-${safeId}" class="ops-field-label">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
+                    <label for="reconciliation-spent-${safeId}" class="ops-field-label">${isAr ? 'المصروف الفعلي على فيسبوك ($)' : 'Actual Facebook spend (USD)'}</label>
                     <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="ops-spend-input" ${canReconcile ? '' : 'disabled'} />
                   </div>
                   <div class="ops-reconciliation-remaining">
@@ -22007,7 +22007,7 @@ function renderSettingsView() {
         </h2>
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
-            <label for="default-rate-input" class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            <label for="default-rate-input" class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي ($ إلى د.ل):' : 'Current Rate (USD to LYD):'}</label>
             ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
@@ -22200,6 +22200,13 @@ function walletShow(minor, currency, sign = '') {
   const major = walletFromMinor(minor, code);
   const value = Number.isFinite(major) ? major : 0;
   return code === 'USD' ? fmtUsd(value, sign) : code === 'LYD' ? fmtLyd(value, sign) : moneyPiece(`${sign}${fmt2(value)} ${code}`);
+}
+
+// A rate beside an amount: its own decimals when it has more than two (7.105 stays 7.105), else as an amount.
+function walletRateText(rate) {
+  const n = Number(rate);
+  const text = (String(n).split('.')[1] || '').length > 2 ? String(n) : fmt2(n);
+  return state.language === 'ar' ? moneyPiece(`${text} د.ل`, true) : `${text} LYD`;
 }
 
 // A price on a pill: never below zero.
@@ -22651,7 +22658,7 @@ function chargeWalletAmountInput(el) {
   if (typeof sanitizeMoneyInput === 'function') sanitizeMoneyInput(el);
   _chargeWallet.amountText = String(el.value || '');
   const preview = document.getElementById('charge-wallet-amount-display');
-  if (preview) preview.textContent = _chargeWallet.amountText || '0';
+  if (preview) preview.textContent = fmt2(chargeWalletAmountMinor() / 100);
 }
 
 function chargeWalletSetCurrency(currency) {
@@ -22694,7 +22701,7 @@ async function chargeWalletCreateRequest() {
   const amountMinor = chargeWalletAmountMinor();
   const currency = _chargeWallet.currency;
   if (amountMinor < 100) {
-    showNotification(hubText('Invalid amount', 'مبلغ غير صالح'), hubText(`Minimum charge is 1.00 ${currency}`, `أقل مبلغ للشحن هو 1.00 ${currency}`), 'error');
+    showNotification(hubText('Invalid amount', 'مبلغ غير صالح'), hubText(`Minimum charge is ${walletShow(100, currency)}`, `أقل مبلغ للشحن هو ${walletShow(100, currency)}`), 'error');
     return;
   }
   if (!_chargeWallet.method || !_walletPayMethodById(_chargeWallet.method)) {
@@ -22766,9 +22773,13 @@ function renderChargeWalletView() {
   const quick = [50, 100, 250];
   const currency = _chargeWallet.currency;
   const methodIcons = { bank_transfer: 'landmark', card: 'credit-card', qr: 'qr-code' };
-  const rateNote = currency === 'USD' && _walletPayRate && _walletPayRate.usdToLyd
-    ? `<div class="mt-2 text-center text-xs text-slate-500 dark:text-slate-400" dir="ltr">1 USD ≈ ${hubEsc(_walletPayRate.usdToLyd)} LYD</div>`
+  // The rate and the amount being typed are written as every amount is (round 4): "$1.00 ≈ 7.10 LYD", in
+  // Arabic with د.ل drawn on the left of its number.
+  const rateNote = currency === 'USD' && _walletPayRate && Number(_walletPayRate.usdToLyd) > 0
+    ? `<div class="mt-2 text-center text-xs text-slate-500 dark:text-slate-400" data-testid="charge-wallet-rate">${hubEsc(`${fmtUsd(1)} ≈ ${walletRateText(_walletPayRate.usdToLyd)}`)}</div>`
     : '';
+  const unit = `<span class="mb-2 text-lg font-semibold text-slate-500">${currency === 'USD' ? '$' : hubText('LYD', 'د.ل')}</span>`;
+  const unitFirst = currency === 'USD' || isRTL;
 
   return `
     <div class="hub-shell">
@@ -22777,8 +22788,7 @@ function renderChargeWalletView() {
       <div class="text-center mt-2 mb-4">
         <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400 mb-2">${t('amount')}</div>
         <div class="flex items-end justify-center gap-2" dir="ltr">
-          <span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${hubEsc(_chargeWallet.amountText || '0')}</span>
-          <span class="mb-2 text-lg font-semibold text-slate-500">${currency === 'LYD' ? hubText('LYD', 'د.ل') : currency}</span>
+          ${unitFirst ? unit : ''}<span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${fmt2(chargeWalletAmountMinor() / 100)}</span>${unitFirst ? '' : unit}
         </div>
         <label class="sr-only" for="charge-wallet-amount">${t('amount')}</label>
         <input id="charge-wallet-amount" type="text" inputmode="decimal" value="${hubEsc(_chargeWallet.amountText)}" oninput="chargeWalletAmountInput(this)" class="mt-3 mx-auto block w-40 glass-input rounded-xl px-4 py-2.5 text-center text-lg font-bold" placeholder="0" dir="ltr" />
@@ -29424,7 +29434,7 @@ function openCustomerAdDebtCoverageModal(customerId, opener = null) {
 
           <div class="mt-4">
             <div class="mb-2 flex items-end justify-between gap-3">
-              <label for="customer-ad-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'مبلغ الشركة (USD)' : 'Company amount (USD)'}</label>
+              <label for="customer-ad-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'مبلغ الشركة ($)' : 'Company amount (USD)'}</label>
               <button type="button" onclick="setCustomerAdDebtCoverageFullAmount()"
                 class="min-h-11 rounded-xl px-3 text-xs font-bold text-violet-700 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:text-violet-300 dark:hover:bg-violet-950/30">
                 ${isAr ? 'استخدم كامل الدين' : 'Use full outstanding'}
@@ -30425,7 +30435,7 @@ function _adEditHistoryText(value, fallback = '—') {
 }
 
 // History rows are stored in English; Arabic mode translates them on display only.
-const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ (USD)',
+const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ ($)',
   'Amount (LYD)': 'المبلغ (د.ل)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
   'Payment Status': 'حالة الدفع', 'Delivery Status': 'حالة التوصيل', 'Ad Status': 'حالة الإعلان', 'Start Date': 'تاريخ البداية',
   'End Date': 'تاريخ النهاية', 'Serial Number': 'رقم الوصل', 'Phone Number': 'رقم الهاتف', Payments: 'الدفعات',
@@ -31849,7 +31859,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 </div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات ($)' : 'TOTAL ADS CREDIT (USD)'}</div>
                 <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
                   <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
                   <div class="text-[10px] text-emerald-600/70 mt-1 leading-tight">${isArF ? 'مجموع كل الدفعات المحوّلة (باستثناء المبلغ 2)' : 'Sum of all converted payments (Excluding Amount 2)'}</div>
@@ -31947,7 +31957,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             </div>
           </div>
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات ($)' : 'TOTAL ADS CREDIT (USD)'}</div>
             <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
               <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
               <div class="text-[10px] text-emerald-600/70 mt-1">${isArF ? 'مجموع كل قيم R2' : 'Sum of all R2 values'}</div>
@@ -35192,8 +35202,8 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ميزانية الإعلان من الوصل غير المدفوع' : 'Ad Budget from Unpaid Receipt')
     : (isArT ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt');
   if (dueAmountLabel) dueAmountLabel.textContent = isShop
-    ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
-    : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
+    ? (isArT ? 'ميزانية الإعلان ($)' : 'Ad Budget (USD)')
+    : (isArT ? 'الصرف المخطط ($)' : 'Planned Spend (USD)');
 
   const mixedTargetUSD = isShop
     ? normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD)
@@ -35891,7 +35901,7 @@ function renderAdMergedFundingList() {
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'المبلغ المستخدم (USD)' : 'Use Amount (USD)'}</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'المبلغ المستخدم ($)' : 'Use Amount (USD)'}</label>
             <input type="text" inputmode="decimal" class="w-full border border-slate-200 px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdMergeFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
@@ -37071,7 +37081,7 @@ function renderAdFundingList() {
             </select>
           </div>
           <div>
-            <label for="ad-funding-amount-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
+            <label for="ad-funding-amount-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط ($)' : 'Planned Spend (USD)'}</label>
             <input id="ad-funding-amount-${idx}" type="text" inputmode="decimal" class="w-full min-h-11 glass-input px-3 py-2 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
@@ -38185,7 +38195,7 @@ function renderModal() {
                 <input type="hidden" id="ad-collection-method" value="${Security.escapeHtml(String(adData.collectionMethod || ''))}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
-                    <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
+                    <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان ($) *' : 'Ad Budget (USD) *'}</label>
                     ${(() => {
                       // A Meta-linked ad's budget is Meta's real planned total (read-only), so the
                       // customer's debt never drifts from what Meta runs.
@@ -38240,7 +38250,7 @@ function renderModal() {
                   </div>
                       <div class="grid grid-cols-2 gap-2">
                         <div>
-                          <label id="ad-due-amount-label" class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
+                          <label id="ad-due-amount-label" class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط ($)' : 'Planned Spend (USD)'}</label>
                           <input type="text" id="ad-due-amount-to-use" inputmode="decimal" class="w-full border border-violet-300 px-3 py-2 rounded-lg text-sm bg-white" placeholder="0.00" oninput="sanitizeMoneyInput(this); onAdDueAmountChange()" onfocus="this.select()" />
                 </div>
                         <div>
@@ -39139,7 +39149,7 @@ function renderModal() {
               </select>
                 </div>
             <div>
-              <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ (USD) *' : 'Amount (USD) *'}</label>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ ($) *' : 'Amount (USD) *'}</label>
               <input type="text" inputmode="decimal" id="transfer-amount-usd" value="${availableUSD.toFixed(2)}" class="w-full glass-input px-4 py-2 rounded-xl" min="0" max="${availableUSD.toFixed(2)}" oninput="sanitizeMoneyInput(this)" />
               <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} ${fmtUsd(availableUSD)}</p>
               </div>
@@ -39311,7 +39321,7 @@ function renderModal() {
             <h4 class="text-sm font-medium">${isArTU ? 'إضافة شحنة جديدة' : 'Add New Top-up'}</h4>
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
-                <label class="block text-xs mb-1">${isArTU ? 'المبلغ (USD)' : 'Amount (USD)'}</label>
+                <label class="block text-xs mb-1">${isArTU ? 'المبلغ ($)' : 'Amount (USD)'}</label>
                 <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this); _refreshTopUpPreview()" />
               </div>
               <div>
@@ -39367,7 +39377,7 @@ function renderModal() {
           </div>
 
           <div id="refund-amount-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
-            <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع (USD)' : 'Refund Amount (USD)'}</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع ($)' : 'Refund Amount (USD)'}</label>
             <input type="text" inputmode="decimal" id="refund-amount" value="${Security.escapeHtml(String(refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)))}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
           </div>
 

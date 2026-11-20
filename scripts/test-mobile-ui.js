@@ -6707,6 +6707,31 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && refusedHtml.includes('data-testid="studio-admin-server-message"') && refusedHtml.includes('maxSubmissionsPerDay must be a whole number from 1 to 500')
       && savedHtml.includes('data-testid="studio-admin-saved" data-version="5"'),
     `badNumber ${badNumber} put ${JSON.stringify(putCall && putCall.body)}`);
+  // Redesign round 4: the admin's own notes name no server setting in the sentence; the name waits in a fold.
+  const adminOutside = page => page.replace(/<details class="tech-steps"[\s\S]*?<\/details>/g, '');
+  const adminSetting = (page, id, name) => new RegExp(`<details class="tech-steps" data-testid="studio-health-steps-${id}"[^>]*><summary>[^<]+</summary><div class="tech-steps-body"><p[^>]*data-testid="studio-health-setting">[^<]+ <span dir="ltr" class="font-mono">${name}</span></p></div></details>`).test(page);
+  run("_studioAdmin.reads.alertTest = { value: { sent: false, configured: false } };");
+  const adminUnset = String(run('renderStudioAdminAlertTestRow()'));
+  const adminUnsetAr = String(inLanguage('ar', 'renderStudioAdminAlertTestRow()'));
+  run("_studioAdmin.reads.alertTest = { value: { sent: true, configured: true } };");
+  const adminSent = String(run('renderStudioAdminAlertTestRow()'));
+  run("_studioAdmin.reads.alertTest = { value: { sent: false, configured: true } };");
+  const adminRefused = String(run('renderStudioAdminAlertTestRow()'));
+  run("delete _studioAdmin.reads.alertTest;");
+  reply('/api/studio/admin/settings/rollout', { key: 'rollout', value: {}, version: 2, updatedAt: hours(-24), envSwitch: 'off' });
+  openAt('/studio?tab=review&section=more&id=settings-rollout');
+  run('render()');
+  const rolloutHtml = html();
+  const rolloutAr = String(inLanguage('ar', 'render(); __html'));
+  check('Admin More, round 4: "No staff channel is configured on the server." and the rollout page\'s "Server switch = off" in plain words, the setting\'s name behind "Show technical steps" (the channel\'s only while it is not set up); EN and AR',
+    adminOutside(rolloutHtml).includes('data-testid="studio-admin-env">Server switch = off: &quot;off&quot; hides the new layout whatever is saved here.</p>') && adminOutside(rolloutAr).includes('data-testid="studio-admin-env">مفتاح الخادم = off: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.</p>')
+      && !/ALBAYAN_/.test(adminOutside(rolloutHtml)) && !/ALBAYAN_/.test(adminOutside(rolloutAr)) && adminSetting(rolloutHtml, 'admin-rollout-switch', 'ALBAYAN_STUDIO_V2') && adminSetting(rolloutAr, 'admin-rollout-switch', 'ALBAYAN_STUDIO_V2') &&
+    adminOutside(adminUnset).includes('>No staff channel is configured on the server.</p>') && adminOutside(adminUnsetAr).includes('>لا قناة للفريق مُعدّة على الخادم.</p>')
+      && !/ALBAYAN_/.test(adminOutside(adminUnset)) && !/ALBAYAN_/.test(adminOutside(adminUnsetAr))
+      && adminSetting(adminUnset, 'admin-alert-channel', 'ALBAYAN_ALERT_WEBHOOK_URL') && adminSetting(adminUnsetAr, 'admin-alert-channel', 'ALBAYAN_ALERT_WEBHOOK_URL')
+      && adminUnsetAr.includes('>إعداد الخادم: <span dir="ltr" class="font-mono">ALBAYAN_ALERT_WEBHOOK_URL</span>')
+      && !adminSent.includes('tech-steps') && !adminSent.includes('ALBAYAN_') && !adminRefused.includes('tech-steps') && !adminRefused.includes('ALBAYAN_'),
+    `unset ${adminUnset.replace(/\s+/g, ' ').slice(-420)} rollout ${(rolloutHtml.match(/data-testid="studio-admin-env"[\s\S]{0,400}/) || ['(no env note)'])[0].replace(/\s+/g, ' ')}`);
   // Review loop r7 n8, n9: the admin texts say what the server does. service_access() reads uiAllowlist for every service
   // set to "pilot" whatever the layout; nothing reads capabilities.tiktokService (the rollout "TikTok service" decides).
   const adminField = (key, field) => json(`STUDIO_ADMIN_SETTINGS.${key}.fields.find(f => f[0] === ${JSON.stringify(field)})`) || [];
@@ -9092,10 +9117,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const alertOutPy = read('server/systems/ads_studio/studio_alert_out.py');
   const alertCases = [
     healthEn.includes('data-testid="studio-health-alert-channel"') && healthEn.includes('<button type="button" data-testid="studio-health-alert-test" onclick="studioHealthTestAlertChannel()"') && healthEn.includes('Test alert channel</button>')
-      && healthEn.includes('ALBAYAN_ALERT_WEBHOOK_URL') && healthAr.includes('اختبار قناة التنبيهات</button>') && healthAr.includes('ضغطة واحدة كل 10 دقائق'),
+      && healthEn.includes('Sends one test message to the staff channel. One press per 10 minutes') && healthAr.includes('اختبار قناة التنبيهات</button>') && healthAr.includes('ضغطة واحدة كل 10 دقائق'),
     alertInFlight === 1 && alertCalls.length === 1 && JSON.stringify(alertCalls[0].body) === '{}',
     alertSent.tone === 'emerald' && String(alertSent.text).startsWith('The test alert was sent.') && alertSentHtml.includes('data-testid="studio-health-alert-result" data-tone="emerald"'),
-    alertUnset.tone === 'amber' && String(alertUnset.text).includes('ALBAYAN_ALERT_WEBHOOK_URL') && String(alertUnset.text).includes('nothing was sent') && alertUnsetAr.text === 'قناة تنبيهات الفريق غير مُعدّة (ALBAYAN_ALERT_WEBHOOK_URL)، لذلك لم يُرسل شيء. تبقى التنبيهات في قائمة التنبيهات فقط.',
+    alertUnset.tone === 'amber' && alertUnset.text === 'No staff alert channel is set up, so nothing was sent. Alerts stay in the Alerts list only.' && alertUnsetAr.text === 'قناة تنبيهات الفريق غير مُعدّة، لذلك لم يُرسل شيء. تبقى التنبيهات في قائمة التنبيهات فقط.',
     alertRefused.tone === 'rose' && String(alertRefused.text).includes('did not accept the test alert') && String(alertRefused.text).includes('runbook 0.5'),
     alertWait.tone === 'amber' && alertWait.text === 'One test alert every 10 minutes for the whole team. Try again in about 9 min.' && alertWaitAr.text === 'تنبيه تجريبي واحد كل 10 دقائق للفريق كله. أعد المحاولة بعد نحو 9 دقيقة.',
     alertAdminOnly.text === 'Only an admin can use this.' && reviewerPresses === 0,
@@ -9103,7 +9128,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && alertOutPy.includes('@router.post("/admin/alert-channel/test")') && alertOutPy.includes('TEST_EVERY_MS = 10 * 60 * 1000') && alertOutPy.includes('return {"sent": sent, "configured": configured}'),
     ['studio-staff.js', 'www/studio-staff.js'].every(file => read(file).includes('data-testid="studio-health-alert-test"'))
   ];
-  check('Test alert channel (P3-25): an admin button in the Studio health screen POSTs the existing route once (single flight) and says {sent, configured} in words (sent; not set up: ALBAYAN_ALERT_WEBHOOK_URL; set up but refused), a 429 shows the wait in minutes, ADMIN_ONLY in words, a reviewer never presses; EN and AR',
+  check('Test alert channel (P3-25): an admin button in the Studio health screen POSTs the existing route once (single flight) and says {sent, configured} in words (sent; not set up, the name of the setting one press away; set up but refused), a 429 shows the wait in minutes, ADMIN_ONLY in words, a reviewer never presses; EN and AR',
     !loadError && alertCases.every(Boolean), loadError || `cases ${failedCases(alertCases)} sent ${JSON.stringify(alertSent)} wait ${JSON.stringify(alertWait)}`);
 
   // ---- P5-05: a "What to do" line under every item, linked into the desk (a pointer in words in classic)
@@ -9196,7 +9221,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     Object.entries(fixTargets).every(([key, [section, id]]) => key === 'pages' ? section === '' && id === 'studio-health-pages' : (section === 'more' ? adminPageIds.includes(id) : id === '' && deskSections.includes(`'${section}'`))),
     // the runbook is not served (the API docs exist only in debug mode), which is why the lines link the desk and name the runbook page
     read('server/main.py').includes('docs_url="/docs" if DEBUG_MODE else None') && !/StaticFiles\([^)]*docs/.test(read('server/main.py')),
-    ['studio-staff.js', 'www/studio-staff.js'].every(file => { const built = read(file); return built.includes('function studioHealthFix(id, key, runbook, en, ar)') && fixIds.every(id => built.includes(`studioHealthFix('${id}', '`)); })
+    ['studio-staff.js', 'www/studio-staff.js'].every(file => { const built = read(file); return built.includes("function studioHealthFix(id, key, runbook, en, ar, setting = '')") && fixIds.every(id => built.includes(`studioHealthFix('${id}', '`)); })
   ];
   check('Health "What to do" (P5-05): every item (token, webhook counters, jobs heartbeat, Meta lanes, replies, daily requests, allowlist, minimum budget, page subscription, funds, spend drift, page tests) names a real runbook page (or none) and links the desk section or settings form that fixes it (a real id of More, or the Requests queue; the pages link scrolls); the heartbeat and lanes come from /diagnostics at most every 10 min, a failed read is asked again on the next 60 s reload and by Refresh from Meta (the card says so); in classic the lines point in words at the section (More only for its items); EN and AR',
     !loadError && fixCases.every(Boolean), loadError || `cases ${failedCases(fixCases)} moves ${JSON.stringify(deskMoves)} diag ${diagReadsFirst}/${diagReadsReload}/${diagReadsLater} fail ${JSON.stringify({ reads: diagFail.reads, stampAge: diagFail.stampAge, retry: diagRetry.reads, refresh: diagRefresh })} missing ${fixIds.filter((id, i) => !linkedEn[i]).join(',')}`);
@@ -9223,9 +9248,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const stepsAfterReset = json('[_studioHealthSteps.all, _studioHealthSteps.open.size]');
   const stepCases = [
     stepIds.every(id => foldOf(healthEn, id, 'Show technical steps')) && stepIds.every(id => foldOf(healthAr, id, 'عرض الخطوات التقنية')) && fixIds.every(id => foldOf(healthClassic, id, 'Show technical steps')),
-    (healthEn.match(/<details class="tech-steps"/g) || []).length === stepIds.length && openIds(healthEn).length === 0 && openIds(healthAr).length === 0,
+    (healthEn.match(/<details class="tech-steps"/g) || []).length === stepIds.length + 1 && openIds(healthEn).length === 0 && openIds(healthAr).length === 0,  // + the alert channel's own fold (round 4)
     // nothing technical is left on the open screen: no "What to do", no runbook number, no place in the hosting panel
-    !/<strong>What to do|runbook \d|Jelastic|Libyan Spider/.test(outsideFolds(healthEn)) && !/<strong>ماذا تفعل|دليل التشغيل \d|Jelastic|Libyan Spider/.test(outsideFolds(healthAr)),
+    !/<strong>What to do|runbook \d|Jelastic|Libyan Spider|ALBAYAN_/.test(outsideFolds(healthEn)) && !/<strong>ماذا تفعل|دليل التشغيل \d|Jelastic|Libyan Spider|ALBAYAN_/.test(outsideFolds(healthAr)),
     healthEn.includes('Under "Show technical steps", every item says what to do and where (the runbook page is named).') && healthAr.includes('تحت «عرض الخطوات التقنية» يقول كل بند ماذا تفعل وأين (مع رقم صفحة دليل التشغيل).'),
     healthEn.includes('<button type="button" data-testid="studio-health-steps-all" aria-pressed="false" onclick="studioHealthAllSteps()"') && healthEn.includes('>Show all technical steps</button>') && healthAr.includes('>عرض كل الخطوات التقنية</button>'),
     openIds(stepsClosed).length === 0,
@@ -9239,6 +9264,34 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio health, round 3 (B-25): every "What to do" line (12 items and the page tests) sits in a closed "Show technical steps" fold with its link, nothing technical is left on the open screen, one button shows or hides all of them, opened folds survive a redraw (also after one is closed by hand), and another account starts with all of them closed; EN and AR',
     !loadError && stepCases.every(Boolean), loadError || `cases ${failedCases(stepCases)} open ${JSON.stringify({ all: openIds(stepsAll).length, oneClosed: openIds(stepsOneClosed), none: openIds(stepsNone), one: openIds(stepsOne), reset: stepsAfterReset, allOn, allOff })}`);
+
+  // ---- Redesign round 4: a server setting's name is never in the sentence a person reads first (it waits in a fold)
+  reply('/api/studio/admin/facts', { windowDays: 30, facts: { i: { checked: true, appIdConfigured: false, subscribed: 1, notSubscribed: 0 } } });
+  reply('/api/meta-ads/token-health', { configured: false });
+  reply('/api/social-studio/pages', { pages: [] });
+  reply('/api/studio/admin/diagnostics', { jobs: { enabled: false, runningHere: false, late: false, ageSeconds: 0, lastTickAt: null }, metaLanes: null });
+  who.staff = true; who.admin = true;
+  run("__calls.length = 0; resetStudioHealthState(); renderStudioHealthSection();");
+  const unsetEn = String(run('renderStudioHealthSection()'));
+  const unsetAr = String(inLanguage('ar', 'renderStudioHealthSection()'));
+  const settingIn = (page, id, name) => new RegExp(`<details class="tech-steps" data-testid="studio-health-steps-${id}"[^>]*><summary>[^<]+</summary><div class="tech-steps-body">(?:(?!</details>)[\\s\\S])*<p[^>]*data-testid="studio-health-setting">[^<]+ <span dir="ltr" class="font-mono">${name}</span></p></div></details>`).test(page);
+  const settingCases = [
+    // the three readings, in plain words, outside every fold
+    outsideFolds(unsetEn).includes('<p>The token check is not set up.</p>') && outsideFolds(unsetAr).includes('<p>فحص الرمز غير مُعدّ.</p>'),
+    outsideFolds(unsetEn).includes('>switched off here</span>') && outsideFolds(unsetAr).includes('>متوقفة هنا</span>'),
+    outsideFolds(unsetEn).includes('The Meta app is not set on the server: any app with the feed field counted.') && outsideFolds(unsetAr).includes('تطبيق ميتا غير مُعدّ على الخادم: احتُسب أي تطبيق يشترك في feed.'),
+    outsideFolds(unsetEn).includes('Sends one test message to the staff channel. One press per 10 minutes for the whole team; the press is audited.'),
+    // no setting's name on the open screen, in either language
+    !/ALBAYAN_/.test(outsideFolds(unsetEn)) && !/ALBAYAN_/.test(outsideFolds(unsetAr)),
+    // each name waits in the fold of the item it belongs to
+    settingIn(unsetEn, 'token', 'ALBAYAN_META_APP_ID') && settingIn(unsetEn, 'pages', 'ALBAYAN_META_APP_ID') && settingIn(unsetEn, 'alert-channel', 'ALBAYAN_ALERT_WEBHOOK_URL') && settingIn(unsetAr, 'alert-channel', 'ALBAYAN_ALERT_WEBHOOK_URL'),
+    unsetEn.includes('>Server setting: <span dir="ltr" class="font-mono">ALBAYAN_META_APP_ID</span>') && unsetAr.includes('>إعداد الخادم: <span dir="ltr" class="font-mono">ALBAYAN_META_APP_ID</span>'),
+    /data-testid="studio-health-fix-heartbeat"[^>]*>(?:(?!<\/p>)[\s\S])*ALBAYAN_STUDIO_JOBS/.test(unsetEn),
+    // a healthy reading names no setting in the token or pages fold
+    !settingIn(healthEn, 'token', 'ALBAYAN_META_APP_ID') && !settingIn(healthEn, 'pages', 'ALBAYAN_META_APP_ID')
+  ];
+  check('Studio health, round 4: the notes that named a server setting in brackets (token check, jobs heartbeat, staff alert channel, the Meta app of the page subscriptions) say it in plain words, and the name waits behind "Show technical steps" in the item\'s own fold; EN and AR',
+    !loadError && settingCases.every(Boolean), loadError || `cases ${failedCases(settingCases)}`);
   who.staff = false; who.admin = false;
 }
 

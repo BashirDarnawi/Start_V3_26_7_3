@@ -725,7 +725,7 @@ function renderModal() {
                 <input type="hidden" id="ad-collection-method" value="${Security.escapeHtml(String(adData.collectionMethod || ''))}" />
                 <div id="ad-collection-details" class="${adData.collectionMethod ? '' : 'hidden'} pt-2 border-t border-amber-200">
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
-                    <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
+                    <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان ($) *' : 'Ad Budget (USD) *'}</label>
                     ${(() => {
                       // A Meta-linked ad's budget is Meta's real planned total (read-only), so the
                       // customer's debt never drifts from what Meta runs.
@@ -780,7 +780,7 @@ function renderModal() {
                   </div>
                       <div class="grid grid-cols-2 gap-2">
                         <div>
-                          <label id="ad-due-amount-label" class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)'}</label>
+                          <label id="ad-due-amount-label" class="block text-[10px] text-slate-500 mb-1">${isArAd ? 'الصرف المخطط ($)' : 'Planned Spend (USD)'}</label>
                           <input type="text" id="ad-due-amount-to-use" inputmode="decimal" class="w-full border border-violet-300 px-3 py-2 rounded-lg text-sm bg-white" placeholder="0.00" oninput="sanitizeMoneyInput(this); onAdDueAmountChange()" onfocus="this.select()" />
                 </div>
                         <div>
@@ -1679,7 +1679,7 @@ function renderModal() {
               </select>
                 </div>
             <div>
-              <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ (USD) *' : 'Amount (USD) *'}</label>
+              <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ ($) *' : 'Amount (USD) *'}</label>
               <input type="text" inputmode="decimal" id="transfer-amount-usd" value="${availableUSD.toFixed(2)}" class="w-full glass-input px-4 py-2 rounded-xl" min="0" max="${availableUSD.toFixed(2)}" oninput="sanitizeMoneyInput(this)" />
               <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} ${fmtUsd(availableUSD)}</p>
               </div>
@@ -1851,7 +1851,7 @@ function renderModal() {
             <h4 class="text-sm font-medium">${isArTU ? 'إضافة شحنة جديدة' : 'Add New Top-up'}</h4>
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
-                <label class="block text-xs mb-1">${isArTU ? 'المبلغ (USD)' : 'Amount (USD)'}</label>
+                <label class="block text-xs mb-1">${isArTU ? 'المبلغ ($)' : 'Amount (USD)'}</label>
                 <input type="text" inputmode="decimal" id="topup-amount" class="w-full glass-input px-3 py-2 rounded-lg" placeholder="0.00" oninput="sanitizeMoneyInput(this); _refreshTopUpPreview()" />
               </div>
               <div>
@@ -1907,7 +1907,7 @@ function renderModal() {
           </div>
 
           <div id="refund-amount-section" class="${!refundAd.refundType || refundAd.refundType === 'None' ? 'hidden' : ''}">
-            <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع (USD)' : 'Refund Amount (USD)'}</label>
+            <label class="block text-sm font-medium mb-2">${isArRf ? 'مبلغ الاسترجاع ($)' : 'Refund Amount (USD)'}</label>
             <input type="text" inputmode="decimal" id="refund-amount" value="${Security.escapeHtml(String(refundAd.refundAmount || (refundAd.refundType === 'Full' ? refundAd.amountUSD : 0)))}" class="w-full glass-input px-4 py-2 rounded-xl" oninput="sanitizeMoneyInput(this)" />
           </div>
 

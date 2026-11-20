@@ -182,7 +182,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 </div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات ($)' : 'TOTAL ADS CREDIT (USD)'}</div>
                 <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
                   <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
                   <div class="text-[10px] text-emerald-600/70 mt-1 leading-tight">${isArF ? 'مجموع كل الدفعات المحوّلة (باستثناء المبلغ 2)' : 'Sum of all converted payments (Excluding Amount 2)'}</div>
@@ -280,7 +280,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             </div>
           </div>
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات (USD)' : 'TOTAL ADS CREDIT (USD)'}</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي رصيد الإعلانات ($)' : 'TOTAL ADS CREDIT (USD)'}</div>
             <div class="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-900/30">
               <div id="receipt-total-usd" class="text-xl font-bold text-emerald-600">$0.00</div>
               <div class="text-[10px] text-emerald-600/70 mt-1">${isArF ? 'مجموع كل قيم R2' : 'Sum of all R2 values'}</div>
@@ -3525,8 +3525,8 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ميزانية الإعلان من الوصل غير المدفوع' : 'Ad Budget from Unpaid Receipt')
     : (isArT ? 'استخدام رصيد من الوصل المستحق' : 'Use Credit from Due Receipt');
   if (dueAmountLabel) dueAmountLabel.textContent = isShop
-    ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
-    : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
+    ? (isArT ? 'ميزانية الإعلان ($)' : 'Ad Budget (USD)')
+    : (isArT ? 'الصرف المخطط ($)' : 'Planned Spend (USD)');
 
   const mixedTargetUSD = isShop
     ? normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD)
@@ -4224,7 +4224,7 @@ function renderAdMergedFundingList() {
             </select>
           </div>
           <div>
-            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'المبلغ المستخدم (USD)' : 'Use Amount (USD)'}</label>
+            <label class="block text-[10px] text-slate-400 mb-1">${isArM ? 'المبلغ المستخدم ($)' : 'Use Amount (USD)'}</label>
             <input type="text" inputmode="decimal" class="w-full border border-slate-200 px-2 py-1.5 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdMergeFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>
@@ -5404,7 +5404,7 @@ function renderAdFundingList() {
             </select>
           </div>
           <div>
-            <label for="ad-funding-amount-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط (USD)' : 'Planned Spend (USD)'}</label>
+            <label for="ad-funding-amount-${idx}" class="block text-[10px] text-slate-400 mb-1">${isArL ? 'الإنفاق المخطط ($)' : 'Planned Spend (USD)'}</label>
             <input id="ad-funding-amount-${idx}" type="text" inputmode="decimal" class="w-full min-h-11 glass-input px-3 py-2 rounded-lg text-sm" value="${alloc.amountUSD || ''}" oninput="sanitizeMoneyInput(this); updateAdFundingAmount(${idx}, this.value)" onfocus="this.select()" />
           </div>
         </div>

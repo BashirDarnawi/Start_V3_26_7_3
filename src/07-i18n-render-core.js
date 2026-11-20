@@ -249,10 +249,10 @@ function platformLabel(p) {
 const METHOD_TRANSLATIONS_AR = {
   'Transfer': 'تحويل',
   'Cash (LYD)': 'نقدي (د.ل)',
-  'Cash (USD)': 'نقدي (USD)',
+  'Cash (USD)': 'نقدي ($)',
   'Bank Transfer': 'حوالة مصرفية',
   'Bank Transfer (LYD)': 'حوالة مصرفية (د.ل)',
-  'Bank Transfer (USD)': 'حوالة مصرفية (USD)',
+  'Bank Transfer (USD)': 'حوالة مصرفية ($)',
   'Transfer Office': 'مكتب صرافة',
   'Split Payment': 'دفعات مقسّمة',
 };

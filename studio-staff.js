@@ -407,7 +407,7 @@ async function studioHealthCheckComments(pageId) {
 // {sent, configured} from POST /api/studio/admin/alert-channel/test, in words.
 function studioHealthAlertResult(result) {
   if (result?.configured === false) {
-    return { tone: 'amber', text: studioHealthText('No staff alert channel is set up (ALBAYAN_ALERT_WEBHOOK_URL), so nothing was sent. Alerts stay in the Alerts list only.', 'قناة تنبيهات الفريق غير مُعدّة (ALBAYAN_ALERT_WEBHOOK_URL)، لذلك لم يُرسل شيء. تبقى التنبيهات في قائمة التنبيهات فقط.') };
+    return { tone: 'amber', text: studioHealthText('No staff alert channel is set up, so nothing was sent. Alerts stay in the Alerts list only.', 'قناة تنبيهات الفريق غير مُعدّة، لذلك لم يُرسل شيء. تبقى التنبيهات في قائمة التنبيهات فقط.') };
   }
   if (result?.sent === true) return { tone: 'emerald', text: studioHealthText('The test alert was sent. Check that it arrived in the staff channel.', 'أُرسل التنبيه التجريبي. تأكد من وصوله إلى قناة الفريق.') };
   return { tone: 'rose', text: studioHealthText('The channel is set up but did not accept the test alert. Check the webhook address in Jelastic and the container log (runbook 0.5); until it works, the on-duty rule applies.', 'القناة مُعدّة لكنها لم تقبل التنبيه التجريبي. راجع عنوان الويب هوك في Jelastic وسجل الحاوية (دليل التشغيل 0.5)؛ وحتى تعمل، تسري قاعدة المناوبة.') };
@@ -479,7 +479,8 @@ function studioHealthGoFix(key) {
 
 // One item's line: "What to do (runbook §x): <the steps> <the link>". id names the item in tests.
 // runbook '' = the item has no runbook page of its own (the line says only "What to do").
-function studioHealthFix(id, key, runbook, en, ar) {
+// setting: the name of the server setting the item's reading speaks of (studioHealthSetting), or ''.
+function studioHealthFix(id, key, runbook, en, ar, setting = '') {
   const fix = STUDIO_HEALTH_FIXES[key];
   const label = studioHealthText(fix[2], fix[3]);
   const linked = key === 'pages' || studioHealthDeskOpen();
@@ -493,7 +494,13 @@ function studioHealthFix(id, key, runbook, en, ar) {
   const heading = runbook
     ? studioHealthText(`What to do (runbook ${runbook})`, `ماذا تفعل (دليل التشغيل ${runbook})`)
     : studioHealthText('What to do', 'ماذا تفعل');
-  return studioHealthSteps(id, `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${heading}:</strong> ${studioHealthText(en, ar)} ${where}</p>`);
+  return studioHealthSteps(id, `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${heading}:</strong> ${studioHealthText(en, ar)} ${where}</p>${setting}`);
+}
+
+// A server setting's name (redesign round 4): never inside the sentence a person reads first; it sits with
+// the other technical steps, one press away (a note's own fold, or the last line of an item's fold).
+function studioHealthSetting(name) {
+  return `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-setting">${studioHealthText('Server setting:', 'إعداد الخادم:')} <span dir="ltr" class="font-mono">${studioHealthEsc(name)}</span></p>`;
 }
 
 // "Show technical steps" (redesign round 3, finding B-25): an item shows its reading; its "What to do" line,
@@ -602,10 +609,11 @@ function studioHealthTokenSource(source) {
 }
 
 // The token's "what to do" (runbook 3.1 expiring, 3.2 invalid) and the webhook counters' (3.10).
-function studioHealthTokenFix() {
+function studioHealthTokenFix(unset = false) {
   return studioHealthFix('token', 'diagnostics', '3.1 / 3.2',
     'Few days left, or not valid: an admin presses Reconnect in Meta Sync (Connect with Facebook), or makes a new system-user token in Meta Business Settings, puts it in the Meta key variable in Jelastic (runbook 3.1) and restarts; then confirm "valid" in',
-    'أيام قليلة متبقية أو الرمز غير صالح: يضغط المدير «إعادة الربط» في مزامنة ميتا (الربط مع فيسبوك)، أو ينشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا ويضعه في متغيّر مفتاح ميتا في Jelastic (دليل التشغيل 3.1) ثم يعيد التشغيل؛ ثم تأكد من «صالح» في');
+    'أيام قليلة متبقية أو الرمز غير صالح: يضغط المدير «إعادة الربط» في مزامنة ميتا (الربط مع فيسبوك)، أو ينشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا ويضعه في متغيّر مفتاح ميتا في Jelastic (دليل التشغيل 3.1) ثم يعيد التشغيل؛ ثم تأكد من «صالح» في',
+    unset ? studioHealthSetting('ALBAYAN_META_APP_ID') : '');
 }
 
 function studioHealthWebhooksFix() {
@@ -620,14 +628,14 @@ function renderStudioHealthToken() {
   const webhooks = Object.values(t.webhookCounts?.countsByObjectField || {}).reduce((sum, n) => sum + (Number(n) || 0), 0);
   const source = studioHealthTokenSource(t.tokenSource);
   let body = source ? studioHealthLine(studioHealthText('Key in use', 'المفتاح المستخدم'), source) : '';
-  if (t.configured === false) body += `<p>${studioHealthText('The token check is not set up (ALBAYAN_META_APP_ID).', 'فحص الرمز غير مُعدّ (ALBAYAN_META_APP_ID).')}</p>`;
+  if (t.configured === false) body += `<p>${studioHealthText('The token check is not set up.', 'فحص الرمز غير مُعدّ.')}</p>`;
   else if (!t.checked) body += `<p>${studioHealthText('Not checked yet for the current token.', 'لم يُفحص الرمز الحالي بعد.')}</p>`;
   else body += [
     studioHealthLine(studioHealthText('Valid', 'صالح'), studioHealthYesNo(t.isValid === true)),
     studioHealthLine(studioHealthText('Days left', 'الأيام المتبقية'), t.expiresNever ? studioHealthText('never expires', 'لا ينتهي') : studioHealthEsc(t.daysLeft ?? '—')),
     studioHealthLine(studioHealthText('Missing permissions', 'صلاحيات ناقصة'), studioHealthEsc((t.missingScopes || []).length))
   ].join('');
-  body += studioHealthTokenFix();
+  body += studioHealthTokenFix(t.configured === false);
   body += studioHealthLine(studioHealthText('Webhook deliveries counted', 'تسليمات الويب هوك المحسوبة'), studioHealthEsc(webhooks));
   body += studioHealthWebhooksFix();
   return studioHealthCard('key-round', studioHealthText('Meta token', 'رمز ميتا'), body);
@@ -673,7 +681,7 @@ function renderStudioHealthJobsAndLanes() {
   else {
     const late = jobs.enabled === false || jobs.late === true;
     const stateText = jobs.enabled === false
-      ? studioHealthText('switched off here (ALBAYAN_STUDIO_JOBS)', 'متوقفة هنا (ALBAYAN_STUDIO_JOBS)')
+      ? studioHealthText('switched off here', 'متوقفة هنا')
       : jobs.late === true ? studioHealthText('LATE', 'متأخر') : studioHealthText('fine', 'سليم');
     const tick = jobs.lastTickAt ? studioHealthAge(Number(jobs.ageSeconds)) : studioHealthText('never ticked', 'لم تنبض بعد');
     const lastError = jobs.lastError && typeof jobs.lastError === 'object' && jobs.lastError.job ? studioHealthLine(studioHealthText('Last error', 'آخر خطأ'), `<span dir="ltr">${studioHealthEsc(String(jobs.lastError.job).slice(0, 40))}: ${studioHealthEsc(String(jobs.lastError.error || '').slice(0, 80))}</span>`) : '';
@@ -754,10 +762,11 @@ function renderStudioHealthFacts() {
         + studioHealthLine(studioHealthText('Could not check', 'تعذّر الفحص'), studioHealthEsc((i.error || 0) + (i.notChecked || 0)))
         + (Number(i.kept) > 0 ? studioHealthLine(studioHealthText('Earlier value kept (the last try failed)', 'قيمة سابقة محفوظة (فشلت آخر محاولة)'), studioHealthEsc(i.kept)) : '') : '')
       + studioHealthCounts(i.errorCodes, studioHealthCodeLabel)
-      + (i.checked && !i.appIdConfigured ? `<p class="text-[11px] text-slate-500">${studioHealthText('ALBAYAN_META_APP_ID is not set: any app with the feed field counted.', 'ALBAYAN_META_APP_ID غير مُعدّ: احتُسب أي تطبيق يشترك في feed.')}</p>` : '')
+      + (i.checked && !i.appIdConfigured ? `<p class="text-[11px] text-slate-500">${studioHealthText('The Meta app is not set on the server: any app with the feed field counted.', 'تطبيق ميتا غير مُعدّ على الخادم: احتُسب أي تطبيق يشترك في feed.')}</p>` : '')
       + studioHealthFix('pages', 'pages', '3.10',
         'A page not subscribed: press Test subscription on it (that subscribes it) in',
-        'صفحة غير مشتركة: اضغط اختبار الاشتراك عليها (فهو يشترك بها) في')),
+        'صفحة غير مشتركة: اضغط اختبار الاشتراك عليها (فهو يشترك بها) في',
+        i.checked && !i.appIdConfigured ? studioHealthSetting('ALBAYAN_META_APP_ID') : '')),
     studioHealthCard('landmark', studioHealthText('Ad account funds (last reading)', 'أموال الحسابات الإعلانية (آخر قراءة)'),
       ((f.n1?.accounts || []).map(a => studioHealthLine(studioHealthEsc(a.account), a.readError
         ? studioHealthText('not readable', 'غير مقروء')
@@ -815,9 +824,10 @@ function renderStudioHealthAlertChannel() {
   const busy = !!_studioHealth.busy[STUDIO_HEALTH_ALERT_KEY];
   return `<div class="mt-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/70 p-4" data-testid="studio-health-alert-channel">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="min-w-0"><h4 class="text-sm font-black text-slate-900 dark:text-white"><i data-lucide="bell-ring" class="w-4 h-4 inline-block align-[-2px] text-blue-600" aria-hidden="true"></i> ${studioHealthText('Staff alert channel', 'قناة تنبيهات الفريق')}</h4><p class="text-[11px] text-slate-500">${studioHealthText('Sends one test message to the staff channel (ALBAYAN_ALERT_WEBHOOK_URL). One press per 10 minutes for the whole team; the press is audited.', 'يرسل رسالة تجريبية واحدة إلى قناة الفريق (ALBAYAN_ALERT_WEBHOOK_URL). ضغطة واحدة كل 10 دقائق للفريق كله؛ الضغطة مدقّقة.')}</p></div>
+        <div class="min-w-0"><h4 class="text-sm font-black text-slate-900 dark:text-white"><i data-lucide="bell-ring" class="w-4 h-4 inline-block align-[-2px] text-blue-600" aria-hidden="true"></i> ${studioHealthText('Staff alert channel', 'قناة تنبيهات الفريق')}</h4><p class="text-[11px] text-slate-500">${studioHealthText('Sends one test message to the staff channel. One press per 10 minutes for the whole team; the press is audited.', 'يرسل رسالة تجريبية واحدة إلى قناة الفريق. ضغطة واحدة كل 10 دقائق للفريق كله؛ الضغطة مدقّقة.')}</p></div>
         <button type="button" data-testid="studio-health-alert-test" onclick="studioHealthTestAlertChannel()" ${busy ? 'disabled aria-busy="true"' : ''} class="touch-target min-h-11 rounded-xl border border-blue-200 dark:border-blue-800 px-3 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-60 inline-flex items-center gap-1.5"><i data-lucide="send" class="w-3.5 h-3.5" aria-hidden="true"></i>${busy ? studioHealthText('Sending…', 'جارٍ الإرسال…') : studioHealthText('Test alert channel', 'اختبار قناة التنبيهات')}</button>
       </div>
+      ${studioHealthSteps('alert-channel', studioHealthSetting('ALBAYAN_ALERT_WEBHOOK_URL'))}
       ${studioHealthNote(_studioHealth.results[STUDIO_HEALTH_ALERT_KEY], 'studio-health-alert-result')}
     </div>`;
 }
@@ -3283,7 +3293,7 @@ function renderStudioAdminSetting(key) {
   const raw = slot.raw;
   const fields = name === 'hours' ? renderStudioAdminHoursForm(name, raw) : spec.fields.map(field => renderStudioAdminField(name, field, raw)).join('');
   const env = name === 'rollout' && slot.record && slot.record.envSwitch
-    ? `<p class="studio-desk-note" data-testid="studio-admin-env">${studioEsc(adsStudioText(`Server switch ALBAYAN_STUDIO_V2 = ${String(slot.record.envSwitch).slice(0, 10)}: "off" hides the new layout whatever is saved here.`, `مفتاح الخادم ALBAYAN_STUDIO_V2 = ${String(slot.record.envSwitch).slice(0, 10)}: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.`))}</p>`
+    ? `<p class="studio-desk-note" data-testid="studio-admin-env">${studioEsc(adsStudioText(`Server switch = ${String(slot.record.envSwitch).slice(0, 10)}: "off" hides the new layout whatever is saved here.`, `مفتاح الخادم = ${String(slot.record.envSwitch).slice(0, 10)}: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.`))}</p>${typeof studioHealthSteps === 'function' ? studioHealthSteps('admin-rollout-switch', studioHealthSetting('ALBAYAN_STUDIO_V2')) : ''}`
     : '';
   const conflict = slot.conflict
     ? `<div class="studio-desk-problem" role="alert" data-testid="studio-admin-conflict" data-code="${studioEsc(slot.conflict)}"><p>${studioEsc(slot.error)}</p><button type="button" class="studio-v2-action studio-desk-small" data-testid="studio-admin-reload" onclick="studioAdminReload('${name}')">${studioAdminIcon('refresh-cw')}<span>${studioEsc(adsStudioText('Reload the setting (your edits are dropped)', 'أعد تحميل الإعداد (تُلغى تعديلاتك)'))}</span></button></div>`
@@ -3333,9 +3343,10 @@ function studioAdminAlertTest(button = null) {
 function renderStudioAdminAlertTestRow() {
   const slot = _studioAdmin.reads.alertTest;
   let note = '';
+  const unset = !!(slot && slot.value && !slot.value.sent && slot.value.configured === false);  // the setting's name: behind "Show technical steps"
   if (slot && slot.value) {
     note = slot.value.sent ? adsStudioText('Sent: the staff channel received the test alert.', 'أُرسل: وصل التنبيه التجريبي إلى قناة الفريق.')
-      : slot.value.configured === false ? adsStudioText('No staff channel is configured on the server (ALBAYAN_ALERT_WEBHOOK_URL).', 'لا قناة للفريق مُعدّة على الخادم (ALBAYAN_ALERT_WEBHOOK_URL).')
+      : slot.value.configured === false ? adsStudioText('No staff channel is configured on the server.', 'لا قناة للفريق مُعدّة على الخادم.')
         : adsStudioText('The channel did not accept the test alert.', 'لم تقبل القناة التنبيه التجريبي.');
   } else if (slot && slot.error) note = slot.error.text || '';
   return `
@@ -3345,6 +3356,7 @@ function renderStudioAdminAlertTestRow() {
               <span class="studio-admin-row-text"><span class="studio-v2-row-label">${studioEsc(adsStudioText('Send a test alert to the staff channel', 'أرسل تنبيهاً تجريبياً إلى قناة الفريق'))}</span><span class="studio-desk-note">${studioEsc(adsStudioText('Once every 10 minutes. No customer data.', 'مرة كل 10 دقائق. دون بيانات العملاء.'))}</span></span>
             </button>
             ${note ? `<p class="studio-desk-note studio-admin-alert-test-note" data-testid="studio-admin-alert-test-note" data-sent="${slot && slot.value && slot.value.sent ? '1' : '0'}">${studioEsc(note)}</p>` : ''}
+            ${unset && typeof studioHealthSteps === 'function' ? studioHealthSteps('admin-alert-channel', studioHealthSetting('ALBAYAN_ALERT_WEBHOOK_URL')) : ''}
           </div>`;
 }
 

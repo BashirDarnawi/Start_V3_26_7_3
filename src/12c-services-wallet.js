@@ -46,6 +46,13 @@ function walletShow(minor, currency, sign = '') {
   return code === 'USD' ? fmtUsd(value, sign) : code === 'LYD' ? fmtLyd(value, sign) : moneyPiece(`${sign}${fmt2(value)} ${code}`);
 }
 
+// A rate beside an amount: its own decimals when it has more than two (7.105 stays 7.105), else as an amount.
+function walletRateText(rate) {
+  const n = Number(rate);
+  const text = (String(n).split('.')[1] || '').length > 2 ? String(n) : fmt2(n);
+  return state.language === 'ar' ? moneyPiece(`${text} د.ل`, true) : `${text} LYD`;
+}
+
 // A price on a pill: never below zero.
 function hubMoney(minor, currency = 'LYD') {
   return walletShow(Math.max(0, Number(minor) || 0), currency);
@@ -495,7 +502,7 @@ function chargeWalletAmountInput(el) {
   if (typeof sanitizeMoneyInput === 'function') sanitizeMoneyInput(el);
   _chargeWallet.amountText = String(el.value || '');
   const preview = document.getElementById('charge-wallet-amount-display');
-  if (preview) preview.textContent = _chargeWallet.amountText || '0';
+  if (preview) preview.textContent = fmt2(chargeWalletAmountMinor() / 100);
 }
 
 function chargeWalletSetCurrency(currency) {
@@ -538,7 +545,7 @@ async function chargeWalletCreateRequest() {
   const amountMinor = chargeWalletAmountMinor();
   const currency = _chargeWallet.currency;
   if (amountMinor < 100) {
-    showNotification(hubText('Invalid amount', 'مبلغ غير صالح'), hubText(`Minimum charge is 1.00 ${currency}`, `أقل مبلغ للشحن هو 1.00 ${currency}`), 'error');
+    showNotification(hubText('Invalid amount', 'مبلغ غير صالح'), hubText(`Minimum charge is ${walletShow(100, currency)}`, `أقل مبلغ للشحن هو ${walletShow(100, currency)}`), 'error');
     return;
   }
   if (!_chargeWallet.method || !_walletPayMethodById(_chargeWallet.method)) {
@@ -610,9 +617,13 @@ function renderChargeWalletView() {
   const quick = [50, 100, 250];
   const currency = _chargeWallet.currency;
   const methodIcons = { bank_transfer: 'landmark', card: 'credit-card', qr: 'qr-code' };
-  const rateNote = currency === 'USD' && _walletPayRate && _walletPayRate.usdToLyd
-    ? `<div class="mt-2 text-center text-xs text-slate-500 dark:text-slate-400" dir="ltr">1 USD ≈ ${hubEsc(_walletPayRate.usdToLyd)} LYD</div>`
+  // The rate and the amount being typed are written as every amount is (round 4): "$1.00 ≈ 7.10 LYD", in
+  // Arabic with د.ل drawn on the left of its number.
+  const rateNote = currency === 'USD' && _walletPayRate && Number(_walletPayRate.usdToLyd) > 0
+    ? `<div class="mt-2 text-center text-xs text-slate-500 dark:text-slate-400" data-testid="charge-wallet-rate">${hubEsc(`${fmtUsd(1)} ≈ ${walletRateText(_walletPayRate.usdToLyd)}`)}</div>`
     : '';
+  const unit = `<span class="mb-2 text-lg font-semibold text-slate-500">${currency === 'USD' ? '$' : hubText('LYD', 'د.ل')}</span>`;
+  const unitFirst = currency === 'USD' || isRTL;
 
   return `
     <div class="hub-shell">
@@ -621,8 +632,7 @@ function renderChargeWalletView() {
       <div class="text-center mt-2 mb-4">
         <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400 mb-2">${t('amount')}</div>
         <div class="flex items-end justify-center gap-2" dir="ltr">
-          <span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${hubEsc(_chargeWallet.amountText || '0')}</span>
-          <span class="mb-2 text-lg font-semibold text-slate-500">${currency === 'LYD' ? hubText('LYD', 'د.ل') : currency}</span>
+          ${unitFirst ? unit : ''}<span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${fmt2(chargeWalletAmountMinor() / 100)}</span>${unitFirst ? '' : unit}
         </div>
         <label class="sr-only" for="charge-wallet-amount">${t('amount')}</label>
         <input id="charge-wallet-amount" type="text" inputmode="decimal" value="${hubEsc(_chargeWallet.amountText)}" oninput="chargeWalletAmountInput(this)" class="mt-3 mx-auto block w-40 glass-input rounded-xl px-4 py-2.5 text-center text-lg font-bold" placeholder="0" dir="ltr" />

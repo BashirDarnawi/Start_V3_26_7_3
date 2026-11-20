@@ -5272,7 +5272,7 @@ function openCustomerAdDebtCoverageModal(customerId, opener = null) {
 
           <div class="mt-4">
             <div class="mb-2 flex items-end justify-between gap-3">
-              <label for="customer-ad-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'مبلغ الشركة (USD)' : 'Company amount (USD)'}</label>
+              <label for="customer-ad-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'مبلغ الشركة ($)' : 'Company amount (USD)'}</label>
               <button type="button" onclick="setCustomerAdDebtCoverageFullAmount()"
                 class="min-h-11 rounded-xl px-3 text-xs font-bold text-violet-700 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:text-violet-300 dark:hover:bg-violet-950/30">
                 ${isAr ? 'استخدم كامل الدين' : 'Use full outstanding'}
@@ -6273,7 +6273,7 @@ function _adEditHistoryText(value, fallback = '—') {
 }
 
 // History rows are stored in English; Arabic mode translates them on display only.
-const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ (USD)',
+const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ ($)',
   'Amount (LYD)': 'المبلغ (د.ل)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
   'Payment Status': 'حالة الدفع', 'Delivery Status': 'حالة التوصيل', 'Ad Status': 'حالة الإعلان', 'Start Date': 'تاريخ البداية',
   'End Date': 'تاريخ النهاية', 'Serial Number': 'رقم الوصل', 'Phone Number': 'رقم الهاتف', Payments: 'الدفعات',

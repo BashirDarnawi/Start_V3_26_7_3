@@ -1082,7 +1082,7 @@ function renderStudioAdminSetting(key) {
   const raw = slot.raw;
   const fields = name === 'hours' ? renderStudioAdminHoursForm(name, raw) : spec.fields.map(field => renderStudioAdminField(name, field, raw)).join('');
   const env = name === 'rollout' && slot.record && slot.record.envSwitch
-    ? `<p class="studio-desk-note" data-testid="studio-admin-env">${studioEsc(adsStudioText(`Server switch ALBAYAN_STUDIO_V2 = ${String(slot.record.envSwitch).slice(0, 10)}: "off" hides the new layout whatever is saved here.`, `مفتاح الخادم ALBAYAN_STUDIO_V2 = ${String(slot.record.envSwitch).slice(0, 10)}: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.`))}</p>`
+    ? `<p class="studio-desk-note" data-testid="studio-admin-env">${studioEsc(adsStudioText(`Server switch = ${String(slot.record.envSwitch).slice(0, 10)}: "off" hides the new layout whatever is saved here.`, `مفتاح الخادم = ${String(slot.record.envSwitch).slice(0, 10)}: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.`))}</p>${typeof studioHealthSteps === 'function' ? studioHealthSteps('admin-rollout-switch', studioHealthSetting('ALBAYAN_STUDIO_V2')) : ''}`
     : '';
   const conflict = slot.conflict
     ? `<div class="studio-desk-problem" role="alert" data-testid="studio-admin-conflict" data-code="${studioEsc(slot.conflict)}"><p>${studioEsc(slot.error)}</p><button type="button" class="studio-v2-action studio-desk-small" data-testid="studio-admin-reload" onclick="studioAdminReload('${name}')">${studioAdminIcon('refresh-cw')}<span>${studioEsc(adsStudioText('Reload the setting (your edits are dropped)', 'أعد تحميل الإعداد (تُلغى تعديلاتك)'))}</span></button></div>`
@@ -1132,9 +1132,10 @@ function studioAdminAlertTest(button = null) {
 function renderStudioAdminAlertTestRow() {
   const slot = _studioAdmin.reads.alertTest;
   let note = '';
+  const unset = !!(slot && slot.value && !slot.value.sent && slot.value.configured === false);  // the setting's name: behind "Show technical steps"
   if (slot && slot.value) {
     note = slot.value.sent ? adsStudioText('Sent: the staff channel received the test alert.', 'أُرسل: وصل التنبيه التجريبي إلى قناة الفريق.')
-      : slot.value.configured === false ? adsStudioText('No staff channel is configured on the server (ALBAYAN_ALERT_WEBHOOK_URL).', 'لا قناة للفريق مُعدّة على الخادم (ALBAYAN_ALERT_WEBHOOK_URL).')
+      : slot.value.configured === false ? adsStudioText('No staff channel is configured on the server.', 'لا قناة للفريق مُعدّة على الخادم.')
         : adsStudioText('The channel did not accept the test alert.', 'لم تقبل القناة التنبيه التجريبي.');
   } else if (slot && slot.error) note = slot.error.text || '';
   return `
@@ -1144,6 +1145,7 @@ function renderStudioAdminAlertTestRow() {
               <span class="studio-admin-row-text"><span class="studio-v2-row-label">${studioEsc(adsStudioText('Send a test alert to the staff channel', 'أرسل تنبيهاً تجريبياً إلى قناة الفريق'))}</span><span class="studio-desk-note">${studioEsc(adsStudioText('Once every 10 minutes. No customer data.', 'مرة كل 10 دقائق. دون بيانات العملاء.'))}</span></span>
             </button>
             ${note ? `<p class="studio-desk-note studio-admin-alert-test-note" data-testid="studio-admin-alert-test-note" data-sent="${slot && slot.value && slot.value.sent ? '1' : '0'}">${studioEsc(note)}</p>` : ''}
+            ${unset && typeof studioHealthSteps === 'function' ? studioHealthSteps('admin-alert-channel', studioHealthSetting('ALBAYAN_ALERT_WEBHOOK_URL')) : ''}
           </div>`;
 }
 

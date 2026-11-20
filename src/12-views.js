@@ -2388,7 +2388,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   </div>
                   <!-- USD Section - TOTAL ADS CREDIT -->
                   <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'رصيد الإعلانات (USD)' : 'Ads Credit (USD)'}</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'رصيد الإعلانات ($)' : 'Ads Credit (USD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
@@ -4727,7 +4727,7 @@ function showDeliveryDetails(itemId) {
             <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(detailAmountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (USD)' : 'To collect (USD)') : (isAr ? 'المبلغ (USD)' : 'Amount (USD)')}</div>
+            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله ($)' : 'To collect (USD)') : (isAr ? 'المبلغ ($)' : 'Amount (USD)')}</div>
             <div class="text-2xl font-black text-blue-700 dark:text-blue-300">${fmtUsd((detailAmountUSD || 0))}</div>
           </div>
         </div>
@@ -5411,7 +5411,7 @@ function renderReconciliationView() {
                     <small>${isAr ? 'المبلغ المخطط للإعلان' : 'Planned ad amount'}</small>
                   </div>
                   <div class="ops-reconciliation-spend">
-                    <label for="reconciliation-spent-${safeId}" class="ops-field-label">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
+                    <label for="reconciliation-spent-${safeId}" class="ops-field-label">${isAr ? 'المصروف الفعلي على فيسبوك ($)' : 'Actual Facebook spend (USD)'}</label>
                     <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="ops-spend-input" ${canReconcile ? '' : 'disabled'} />
                   </div>
                   <div class="ops-reconciliation-remaining">
@@ -6598,7 +6598,7 @@ function renderSettingsView() {
         </h2>
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
-            <label for="default-rate-input" class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            <label for="default-rate-input" class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي ($ إلى د.ل):' : 'Current Rate (USD to LYD):'}</label>
             ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>

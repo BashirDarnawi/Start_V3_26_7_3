@@ -515,7 +515,7 @@ test.describe('Team desk (v2 staff frame)', () => {
     await testButton.click();
     const result = page.getByTestId('studio-health-alert-result');
     await expect(result).toBeVisible({ timeout: BOOT_TIMEOUT });
-    await expect(result).toHaveText(/No staff alert channel is set up \(ALBAYAN_ALERT_WEBHOOK_URL\)|One test alert every 10 minutes/);
+    await expect(result).toHaveText(/No staff alert channel is set up, so nothing was sent|One test alert every 10 minutes/);
     await expect(testButton).toBeEnabled();
     await testButton.click();
     await expect(result).toHaveText(/One test alert every 10 minutes for the whole team\. Try again in about \d+ min\./, { timeout: BOOT_TIMEOUT });
