@@ -166,7 +166,7 @@ check('photo action is a sibling, never nested inside disclosure', () => {
 });
 check('receipt summary keeps passed authoritative debt, not original amount', () => {
   const html = context.shellReceiptRow({ id: 'debt', amountLocal: 9999, status: 'Not Paid' }, { name: 'Customer' }, '<div>Existing receipt</div>', { hasCustomerDebt: true, collectionTarget: { amountLocal: 320 } });
-  assert(html.includes('320 LYD'));
+  assert(html.includes('320.00 LYD'));
   assert(!html.includes('9,999'));
 });
 // Exercise the real existing media and budget renderer, not just spies.

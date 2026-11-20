@@ -64,6 +64,11 @@ let passed = 0;
 function near(actual, expected) {
   assert.ok(Math.abs(actual - expected) < 0.005, `expected ${expected}, received ${actual}`);
 }
+// In Arabic every amount carries invisible direction marks (U+2066 to U+2069, see moneyPiece in src/07). A check about
+// words and figures reads the text without them; the check 'round 3 money' is the one that looks at the marks.
+function plain(text) {
+  return String(text).replace(/[\u2066-\u2069]/g, '');
+}
 async function test(name, fn) {
   await fn();
   passed += 1;
@@ -1507,7 +1512,7 @@ async function main() {
     f.state.language = 'ar';
     draw();
     assert.deepEqual(words('a1'), ['وصل #471396', 'التفاصيل', 'عمليات الشحن (1)', 'استرجاع', 'إيقاف الإعلان', 'تعديل', 'سجل التعديلات (2)', 'ربط بـ Meta', 'حذف']);
-    assert.ok(cell('a1', 'المبلغ').endsWith('$1,234.50 8,641.50 د.ل · السعر 7.00'), cell('a1', 'المبلغ'));
+    assert.ok(plain(cell('a1', 'المبلغ')).endsWith('$1,234.50 8,641.50 د.ل · السعر 7.00'), cell('a1', 'المبلغ'));
     f.state.language = 'en';
     f.state.currentUser = { id: 'emp', name: 'Sara', role: 'Employee', permissions: { ads: ['view'] } };
     f.state.users = [f.state.currentUser];
@@ -1559,7 +1564,7 @@ async function main() {
     const money = () => (html.split('data-delivery-record="r2"')[1] || '').split('class="ops-delivery-money"')[1].split('</div>')[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     assert.ok(money().endsWith('Amount 1,236.50 LYD $102.00'), money());
     f.state.language = 'ar'; draw();
-    assert.ok(money().endsWith('المبلغ 1,236.50 د.ل $102.00'), money());
+    assert.ok(plain(money()).endsWith('المبلغ 1,236.50 د.ل $102.00'), money());
     assert.ok(order().startsWith('[بلا سائق بعد (2) is-urgent] r5 r2 [Ali (2)]') && order().includes('[منتهية (2)] r6 r4'), order());
     assert.deepEqual(tabs().map(tab => tab.words), ['الكل', 'بحاجة توصيل', 'قيد التوصيل', 'تم التوصيل', 'ملغي', 'المكتب']);
   });
@@ -1591,7 +1596,7 @@ async function main() {
     assert.deepEqual(words(0, true), ['Nothing goes back: the whole budget was spent.', 'Update reconciliation']);
     assert.deepEqual(words(null, true), ['Enter what Meta spent to see what goes back to the customer.', 'Update reconciliation']);
     f.state.language = 'ar';
-    assert.deepEqual(words(17.5, false), ['يعود إلى Tripoli Sweets مبلغ $17.50.', 'حفظ وإرجاع $17.50']);
+    assert.deepEqual(words(17.5, false).map(plain), ['يعود إلى Tripoli Sweets مبلغ $17.50.', 'حفظ وإرجاع $17.50']);
     assert.deepEqual(words(0, true), ['لا شيء يعود: صُرفت الميزانية كاملة.', 'تحديث التسوية']);
     f.state.language = 'en';
     // Typing a spend moves the sentence, the button and the third sum together; clearing the field puts the first words back. Nothing is saved.
@@ -1755,7 +1760,7 @@ async function main() {
     f.run("setDeliveryDashboardFilter('all')"); f.state.receipts[2].isReceivedInOffice = false;
     f.state.language = 'ar'; draw();
     assert.deepEqual(buttons('r4').map(button => button.words), ['قبول', 'اتصال', 'WhatsApp', 'نسخ', 'مشاركة للمجموعة', 'إلغاء']);
-    assert.ok(text(card('r1')).includes('المطلوب تحصيله 1,234.50 د.ل $100.00'), text(card('r1')));
+    assert.ok(plain(text(card('r1'))).includes('المطلوب تحصيله 1,234.50 د.ل $100.00'), text(card('r1')));
   });
   await test('round 3 Audit logs: each entry is one sentence (who did what to which record), the internal id stays in View details, old and new values show only where both are stored, and the search finds the words on screen', async () => {
     const f = frameFixture(frameAdmin, 'audit');
@@ -1936,8 +1941,12 @@ async function main() {
     state.currentUser = { id: 'cust1', name: 'Customer One', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn', 'deleteOwn', 'stopOwn'] } };
     state.users = [state.currentUser];
     state.language = 'ar';
-    assert.ok(card(request('s1', 'Submitted')).includes('<p class="sc-money">نحجز <bdi dir="ltr">$35.00</bdi> في محفظتك، ولا تُخصم بعد.</p>'));
+    assert.ok(plain(card(request('s1', 'Submitted'))).includes('<p class="sc-money">نحجز <bdi dir="ltr">$35.00</bdi> في محفظتك، ولا تُخصم بعد.</p>'));
+    // A range reads from its start to its end: in Arabic the start is on the right, so the arrow between the dates points left.
+    const range = () => ((card(request('s1', 'Submitted')).split('data-lucide="calendar-days"></i>')[1] || '').split('</span>')[0].match(/[←→]/g) || []).join('');
+    assert.equal(range(), '←', 'before: "→" in Arabic pointed from the end date to the start date');
     state.language = 'en';
+    assert.equal(range(), '→');
     // Home: what needs the customer comes first (sent back before drafts, three at most), then the ways to start, then four figures.
     state.adCampaignRequests = [request('d1', 'Draft'), request('s1', 'Submitted'), request('b1', 'Changes Requested', { reviewReasonCode: 'creative_quality' }), request('d2', 'Draft'), request('d3', 'Draft'), request('a1', 'Approved', { paidMinorUSD: 3500 })];
     html = String(run('renderAdsStudioDashboard()'));
@@ -2001,6 +2010,184 @@ async function main() {
     f.sandbox.adsStudioBuyingHidden = () => true;
     card = draw();
     assert.ok(card.includes('data-testid="studio-wallet-reference"') && !card.includes('studioWalletCopy') && !card.includes('studio-wallet-instruction') && card.includes('studioWalletAskCancel'));
+  });
+  await test('round 3 money: an amount is written one way ("$2,375.00", "10,150.00 LYD", in Arabic "10,150.00 د.ل"), the minus sits before the "$", wallet amounts follow the rule while the text stored in audit lines keeps its old writing, and no screen builds an amount by hand', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.language = 'en';
+    assert.deepEqual([sandbox.fmtUsd(2375), sandbox.fmtUsd(0), sandbox.fmtUsd('12.5'), sandbox.fmtUsd(-12.5), sandbox.fmtUsd(-1234567.891), sandbox.fmtUsd(undefined)],
+      ['$2,375.00', '$0.00', '$12.50', '-$12.50', '-$1,234,567.89', '$0.00']);
+    assert.deepEqual([sandbox.fmtLyd(10150), sandbox.fmtLyd(999.999), sandbox.fmtLyd(-6411.1), sandbox.fmtLyd(-411.1), sandbox.fmt2(1000)],
+      ['10,150.00 LYD', '1,000.00 LYD', '-6,411.10 LYD', '-411.10 LYD', '1,000.00']);
+    assert.deepEqual([sandbox.shellLyd(320), sandbox.shellLyd(10150.5), sandbox.shellUsd(2375)], ['320.00 LYD', '10,150.50 LYD', '$2,375.00'], 'before: "320 LYD" beside "$2,375.00"');
+    assert.deepEqual([sandbox.walletShow(7500, 'LYD'), sandbox.walletShow(123456, 'USD'), sandbox.walletShow(-400, 'USD'), sandbox.walletShow(990, 'EUR'), sandbox.hubMoney(2500, 'LYD'), sandbox.hubMoney(-5, 'LYD')],
+      ['75.00 LYD', '$1,234.56', '-$4.00', '9.90 EUR', '25.00 LYD', '0.00 LYD'], 'before: "12.00 USD" and "25 LYD"');
+    assert.deepEqual([sandbox.fmtUsd(5, '+'), sandbox.fmtUsd(-5, '+'), sandbox.fmtLyd(5, '+'), sandbox.fmtLyd(3, '-'), sandbox.walletShow(700, 'USD', '+'), sandbox.walletShow(700, 'LYD', '-')],
+      ['+$5.00', '-$5.00', '+5.00 LYD', '-3.00 LYD', '+$7.00', '-7.00 LYD'], 'a sign is given to the helper, so it stays in front of its number');
+    const every = [() => sandbox.fmtUsd(35), () => sandbox.fmtUsd(-12.5), () => sandbox.fmtUsd(5, '+'), () => sandbox.fmtLyd(980), () => sandbox.fmtLyd(-6411.1), () => sandbox.fmtLyd(5, '+'),
+      () => sandbox.shellLyd(320), () => sandbox.shellUsd(2375), () => sandbox.walletShow(7500, 'LYD'), () => sandbox.walletShow(990, 'EUR'), () => sandbox.hubMoney(2500, 'LYD')];
+    assert.ok(every.every(write => !/[\u2066-\u2069]/.test(write())), 'English text carries no direction marks');
+    state.language = 'ar';
+    assert.deepEqual([sandbox.fmtLyd(10150), sandbox.fmtUsd(2375), sandbox.shellLyd(320), sandbox.walletShow(7500, 'LYD'), sandbox.walletShow(123456, 'USD'), sandbox.hubMoney(2500, 'LYD')].map(plain),
+      ['10,150.00 د.ل', '$2,375.00', '320.00 د.ل', '75.00 د.ل', '$1,234.56', '25.00 د.ل'], 'Arabic: Western digits, د.ل after dinars, "$" before dollars');
+    // An Arabic page reads right to left, and the browser would then draw "$35.00" as "35.00$", "-12.50" as "12.50-" and, inside a
+    // left-to-right box, د.ل on the wrong side of its number. So every amount is one piece with its own direction: a dollar amount
+    // reads left to right (L … E), a dinar amount reads its number first and then د.ل (R … E), and a signed number keeps its sign.
+    const L = '\u2066', R = '\u2067', E = '\u2069';
+    assert.deepEqual(every.map(write => write()), [`${L}$35.00${E}`, `${L}-$12.50${E}`, `${L}+$5.00${E}`, `${R}980.00 د.ل${E}`, `${R}${L}-6,411.10${E} د.ل${E}`, `${R}${L}+5.00${E} د.ل${E}`,
+      `${R}320.00 د.ل${E}`, `${L}$2,375.00${E}`, `${R}75.00 د.ل${E}`, `${L}9.90 EUR${E}`, `${R}25.00 د.ل${E}`]);
+    // The same helper also writes audit lines, which are stored: its text does not change with the language.
+    assert.deepEqual([sandbox.walletFormatMinor(7500, 'LYD'), sandbox.walletFormatMinor(123456, 'USD')], ['75.00 LYD', '1,234.56 USD']);
+    // The wallet's own screen: dollars, dinars and a customer's top-up, each written the one way.
+    run('Security').escapeHtml = value => String(value ?? '');
+    state.currentUser = { id: 'adm', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser];
+    state.walletTransactions = [{ id: 't1', type: 'credit', fromUserId: null, toUserId: 'adm', amountMinor: 250000, currency: 'LYD' }, { id: 't2', type: 'credit', fromUserId: null, toUserId: 'adm', amountMinor: 123456, currency: 'USD' }];
+    let wallet = String(sandbox.renderWalletView());
+    assert.ok(plain(wallet).includes('dir="ltr">2,500.00 د.ل</div>') && plain(wallet).includes('dir="ltr">$1,234.56</div>'), 'the Arabic wallet');
+    assert.ok(wallet.includes(`${R}${L}+2,500.00${E} د.ل${E}`) && wallet.includes(`${L}+$1,234.56${E}`), 'a wallet row keeps its sign inside the amount');
+    assert.ok(!/[0-9] (LYD|USD)\b/.test(wallet.replace(/<option[^>]*>[^<]*<\/option>/g, '')), 'the Arabic wallet still writes LYD or USD after a number');
+    state.language = 'en';
+    wallet = String(sandbox.renderWalletView());
+    assert.ok(wallet.includes('dir="ltr">2,500.00 LYD</div>') && wallet.includes('+$1,234.56') && !/[0-9] USD\b/.test(wallet.replace(/<option[^>]*>[^<]*<\/option>/g, '')), 'the English wallet');
+
+    // How to pay a charge request (Services wallet): amounts carry the separator, and a sentence that names a figure the
+    // request does not carry is replaced by the plain one (before: "Pay — LYD via Adfali …").
+    run(`_walletPayMethods = [
+      { id: 'adfali', name: { en: 'Adfali', ar: 'ادفع لي' }, instructions: { en: 'Pay {amountLYD} LYD via Adfali and keep the code {reference} in the payment note.', ar: 'ادفع {amountLYD} د.ل عبر ادفع لي واذكر الرمز {reference} في ملاحظة الدفع.' } },
+      { id: 'office', name: { en: 'At the office', ar: 'في المكتب' }, instructions: { en: 'Bring the code {reference} to the office.', ar: 'أحضر الرمز {reference} إلى المكتب.' } },
+      { id: 'usd', name: { en: 'Bank', ar: 'مصرف' }, instructions: { en: 'Send {amountUSD} dollars at {rate} with {reference}.', ar: 'أرسل {amountUSD} دولار بسعر {rate} مع {reference}.' } }];`);
+    const say = data => String(sandbox.chargeWalletInstructions(data));
+    const plainSentence = 'Pay with reference PAY-A — the wallet fills up as soon as the payment is confirmed.';
+    assert.equal(say({ method: 'adfali', reference: 'PAY-A', currency: 'USD', amountMinor: 500000, amountMinorLYD: 3450000 }), 'Pay 34,500.00 LYD via Adfali and keep the code PAY-A in the payment note.');
+    assert.equal(say({ method: 'adfali', reference: 'PAY-A', currency: 'USD', amountMinor: 5000, amountMinorLYD: null }), plainSentence);
+    assert.equal(say({ method: 'office', reference: 'PAY-A', currency: 'USD', amountMinor: 5000, amountMinorLYD: null }), 'Bring the code PAY-A to the office.', 'a sentence that names no missing figure is used as it is');
+    assert.equal(say({ method: 'usd', reference: 'PAY-A', currency: 'USD', amountMinor: 123456, lydRate: 6.9 }), 'Send 1,234.56 dollars at 6.9 with PAY-A.');
+    assert.equal(say({ method: 'usd', reference: 'PAY-A', currency: 'LYD', amountMinor: 5000 }), plainSentence, 'a dinar request has no dollar figure');
+    assert.equal(say({ method: 'gone', reference: 'PAY-A', currency: 'USD', amountMinor: 5000 }), plainSentence);
+    assert.ok(![say({ method: 'adfali', reference: 'PAY-A', currency: 'USD', amountMinor: 5000 }), say({ method: 'usd', reference: 'PAY-A', currency: 'LYD', amountMinor: 5000 })].some(text => text.includes('— LYD') || text.includes('— dollars')));
+
+    // The classic Studio says the same after "Create charge request".
+    const f = studioFixture();
+    f.state.language = 'en';
+    f.run(`_adsStudioPayMethods = [{ id: 'adfali', name: { en: 'Adfali', ar: 'ادفع لي' }, instructions: { en: 'Pay {amountLYD} LYD via Adfali ({amountUSD}) and keep the code {reference}.', ar: 'ادفع {amountLYD} د.ل عبر ادفع لي ({amountUSD}) واذكر الرمز {reference}.' } }];`);
+    const boxes = { 'ads-studio-charge-amount': { value: '5000' }, 'ads-studio-charge-currency': { value: 'USD' } };
+    f.sandbox.document.getElementById = id => boxes[id] || null;
+    f.sandbox.document.querySelector = selector => String(selector).includes('ads-studio-charge-method') ? { value: 'adfali' } : null;
+    f.sandbox.refreshAdsStudioWallet = () => {};
+    const said = [];
+    f.sandbox.showNotification = (title, message) => { said.push(message); };
+    let answer = { data: { method: 'adfali', reference: 'PAY-B', currency: 'USD', amountMinor: 500000, amountMinorLYD: 3450000 } };
+    f.sandbox.apiWalletPaymentRequestCreate = async () => answer;
+    await f.run('adsStudioCreateWalletCharge()');
+    answer = { data: { method: 'adfali', reference: 'PAY-B', currency: 'USD', amountMinor: 500000, amountMinorLYD: null } };
+    boxes['ads-studio-charge-amount'].value = '5000';
+    await f.run('adsStudioCreateWalletCharge()');
+    answer = { data: { method: 'adfali', reference: 'PAY-B', currency: 'LYD', amountMinor: 120000, amountMinorLYD: 120000 } };
+    boxes['ads-studio-charge-amount'].value = '1200'; boxes['ads-studio-charge-currency'].value = 'LYD';
+    f.state.language = 'ar';
+    await f.run('adsStudioCreateWalletCharge()');
+    assert.deepEqual(said, [
+      'Pay 34,500.00 LYD via Adfali (5,000.00) and keep the code PAY-B.',
+      'Pay with reference PAY-B — the wallet fills up as soon as the payment is confirmed.',
+      'ادفع 1,200.00 د.ل عبر ادفع لي (1,200.00 د.ل) واذكر الرمز PAY-B.'
+    ]);
+    // The Studio's own writers follow the same rule (they stay plain only when their files run alone in a test).
+    assert.deepEqual([f.run('adsStudioMoney(3500)'), f.run('studioUsd(-500)'), f.run('studioLyd(5000)'), f.run('studioLyd(-5000)'), f.run("adsStudioMoneyIn(12000, 'LYD')"), f.run("studioDataMoneyIn(990, 'EUR')"), f.run('studioUsd(null)')],
+      [`${L}$35.00${E}`, `${L}-$5.00${E}`, `${R}50.00 د.ل${E}`, `${R}${L}-50.00${E} د.ل${E}`, `${R}120.00 د.ل${E}`, `${L}9.90 EUR${E}`, '—']);
+    // A sentence the server wrote (the Studio inbox, a payment method's words) names dollars as "$40.00": the same piece.
+    const told = "studioPickText({ en: 'Paid $40.00 from your wallet, $1,250.50 held, -$5.00 back.', ar: 'دُفع $40.00 من محفظتك، وحُجز $1,250.50، وعاد -$5.00.' })";
+    assert.equal(f.run(told), `دُفع ${L}$40.00${E} من محفظتك، وحُجز ${L}$1,250.50${E}، وعاد ${L}-$5.00${E}.`);
+    f.run('_adsStudioPayRate = { usdToLyd: 6.9 };');
+    assert.equal(f.run("adsStudioMoneyWithLyd(250000)"), `${L}$2,500.00${E} (≈ ${R}17,250.00 د.ل${E})`, 'before: "17250.00"');
+    f.state.language = 'en';
+    assert.equal(f.run(told), 'Paid $40.00 from your wallet, $1,250.50 held, -$5.00 back.');
+    assert.equal(f.run("adsStudioMoneyWithLyd(250000)"), '$2,500.00 (≈ 17,250.00 LYD)');
+    assert.deepEqual([f.run('adsStudioMoney(3500)'), f.run('studioUsd(-500)'), f.run('studioLyd(5000)'), f.run("adsStudioMoneyIn(12000, 'LYD')")], ['$35.00', '-$5.00', '50.00 LYD', '120.00 LYD']);
+    // The owner's analytics and dashboard files write through the same pieces once they are loaded beside the app.
+    const admin = loadBrowserSource();
+    const src = path.join(__dirname, '..', 'src');
+    for (const file of JSON.parse(fs.readFileSync(path.join(src, 'manifest.json'), 'utf8')).lazy['admin-tools.js']) admin.run(fs.readFileSync(path.join(src, file), 'utf8'));
+    admin.state.language = 'ar';
+    assert.deepEqual([admin.run('analyticsUsd(1234.5)'), admin.run('analyticsUsd(-20)'), admin.run('analyticsLyd(1234.5)'), admin.run('analyticsLyd(-20)'), admin.run('controlCenterLyd(2240)'), admin.run('controlCenterUsd(17.5)'), admin.run("metaAdsFormatMoney(123456, 'USD')")],
+      [`${L}$1,234.50${E}`, `${L}-$20.00${E}`, `${R}1,234.50 د.ل${E}`, `${R}${L}-20.00${E} د.ل${E}`, `${R}2,240.00 د.ل${E}`, `${L}$17.50${E}`, `${L}$1,234.56${E}`]);
+    admin.state.language = 'en';
+    assert.deepEqual([admin.run('analyticsUsd(1234.5)'), admin.run('analyticsUsd(-20)'), admin.run('analyticsLyd(1234.5)'), admin.run('controlCenterLyd(2240)'), admin.run('controlCenterUsd(17.5)'), admin.run("metaAdsFormatMoney(123456, 'USD')")],
+      ['$1,234.50', '-$20.00', '1,234.50 LYD', '2,240.00 LYD', '$17.50', '$1,234.56']);
+
+    // No screen file builds an amount by hand any more: "$" glued to a bare number, whole dinars, or "USD"/"LYD" typed after one.
+    // (07 holds the helpers; the wallet helper of 05 writes the stored audit text; exports and prints are not screens.)
+    const root = path.join(__dirname, '..', 'src');
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+    const files = [...manifest.files, ...Object.values(manifest.lazy).flat()];
+    const byHand = [];
+    for (const file of files) {
+      const lines = fs.readFileSync(path.join(root, file), 'utf8').split('\n');
+      lines.forEach((line, index) => {
+        if (/^\s*\/\//.test(line) || /addAuditLog\(|addLog\(|format: \(v\) =>|allocation\(s\) •|csv|CSV/.test(line)) return;  // stored text and exports keep their own writing
+        if (/\$\$\{[^}]*\.toFixed\(/.test(line) || /\.toFixed\(\d\)\}\s?(LYD|USD)\b/.test(line) || /toLocaleString\([^)]*\)\s*(\+\s*' |\}\s)(LYD|USD)\b/.test(line)) byHand.push(`${file}:${index + 1}`);
+      });
+    }
+    assert.deepEqual(byHand, [], 'an amount is built by hand instead of fmtUsd()/fmtLyd() or the screen\'s own money helper');
+    // A sign glued in front of a finished amount would sit outside its piece and jump to the other side in Arabic:
+    // the sign is handed to the helper instead (fmtLyd(fee, '+')).
+    const glued = [];
+    const HELPER = '(?:fmtUsd|fmtLyd|shellLyd|shellUsd|walletShow|hubMoney|clothesFmtUSD|clothesFmtLYD|adsStudioMoney|adsStudioMoneyIn|studioUsd|studioLyd|analyticsUsd|analyticsLyd|controlCenterLyd|controlCenterUsd)';
+    const GLUE = new RegExp(`[+\\-−]\\$\\{${HELPER}\\(|'[+\\-−]'\\s*(?::\\s*'[+\\-−]?'\\s*)?\\)?\\s*(?::\\s*''\\s*)?\\}\\$\\{${HELPER}\\(`);
+    for (const file of files) fs.readFileSync(path.join(root, file), 'utf8').split('\n').forEach((line, index) => { if (!/^\s*\/\//.test(line) && GLUE.test(line)) glued.push(`${file}:${index + 1}`); });
+    assert.deepEqual(glued, [], 'a sign is glued in front of an amount instead of being handed to the helper');
+    assert.ok(GLUE.test("x = `+${fmtLyd(fee)}`") && GLUE.test("`${up ? '+' : '-'}${fmtLyd(v)}`") && GLUE.test("`${mine ? (isIn ? '+' : '-') : ''}${walletShow(m, c)}`") && GLUE.test("`${ok ? '+' : ''}${fmtUsd(v)}`") && !GLUE.test("`${fmtUsd(a)} + ${fmtUsd(b)}`"), 'the pattern itself');
+    // The other way round: text that is STORED (audit and log lines, the edit history kept on a receipt or an ad) never goes
+    // through a display helper, so a stored line reads the same in every language and carries no direction marks.
+    const DISPLAY = /\b(fmtUsd|fmtLyd|fmt2|moneyPiece|shellLyd|shellUsd|walletShow|hubMoney|clothesFmtUSD|clothesFmtLYD|adsStudioMoney|adsStudioMoneyIn|studioUsd|studioLyd|analyticsUsd|analyticsLyd|controlCenterLyd|controlCenterUsd)\(/;
+    const stored = [];
+    for (const file of files) {
+      const source = fs.readFileSync(path.join(root, file), 'utf8');
+      for (const match of source.matchAll(/\b(addAuditLog|addLog)\(/g)) {
+        let depth = 0, end = match.index + match[0].length - 1;
+        for (; end < source.length; end += 1) { if (source[end] === '(') depth += 1; else if (source[end] === ')' && (depth -= 1) === 0) break; }
+        if (DISPLAY.test(source.slice(match.index, end))) stored.push(`${file}:${source.slice(0, match.index).split('\n').length}`);
+      }
+      source.split('\n').forEach((line, index) => { if (/\bformat: \(v\) =>|allocation\(s\) •/.test(line) && DISPLAY.test(line)) stored.push(`${file}:${index + 1}`); });
+    }
+    assert.deepEqual(stored, [], 'a stored line is written with a display helper');
+    const forms = fs.readFileSync(path.join(root, '14-forms.js'), 'utf8'), modals = fs.readFileSync(path.join(root, '15-modals.js'), 'utf8');
+    for (const source of [forms, modals]) assert.ok(source.includes("format: (v) => `$${parseFloat(v || 0).toFixed(2)}` }") && source.includes("format: (v) => `${parseFloat(v || 0).toFixed(2)} LYD` }"), 'the edit history writes its amounts as it always did');
+    assert.equal(sandbox.walletFormatMinor(7500, 'LYD'), '75.00 LYD');
+  });
+  await test('round 3 Arabic lines: a record number, a name and a date each stay one piece inside a line (before, "#D3 · 19/11/2026" was drawn as "2026/11/D3 · 19#"), and a signed percentage keeps its sign in front', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = value => String(value ?? '');
+    state.language = 'ar';
+    state.currentUser = { id: 'adm', name: 'Owner', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser, { id: 'cust1', name: 'Demo Studio Customer (classic)', role: 'Employee' }];
+    state.defaultExchangeRate = 7;
+    state.customers = [{ id: 'c1', name: 'Medina Coffee', phones: ['0911111111'] }];
+    const now = new Date().toISOString();
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', tempReceiptNo: 'D3', displayNumber: 12, amountUSD: 140, amountLocal: 980, exchangeRate: 7, status: 'Not Paid', isPaid: false,
+      statusDetail: { notPaidCollection: 'in_shop' }, payments: [], transfers: [], createdAt: now }];
+    state.ads = [];
+    // Home: the recent line.
+    const home = String(sandbox.renderManagerHomeHero(state.receipts, state.ads, true));
+    assert.ok(/<bdi>#D3<\/bdi> · <bdi>[^<]+<\/bdi><\/span><\/span>/.test(home), 'the Home line: number and date are separate pieces');
+    assert.ok(!/[^>]#D3 · /.test(home), 'the number is written straight into the line');
+    // The percentage beside "Collected" (a month with no earlier month has none, so read the source of the two writers).
+    const shell = fs.readFileSync(path.join(__dirname, '..', 'src', '12d-manager-shell.js'), 'utf8'), center = fs.readFileSync(path.join(__dirname, '..', 'src', '12b-control-center.js'), 'utf8');
+    assert.ok(shell.includes("<bdi dir=\"ltr\">${pct >= 0 ? '+' : ''}${pct}%</bdi>") && center.includes("`\\u2066${month.pct >= 0 ? '+' : ''}${month.pct}%\\u2069 مقابل الشهر الماضي`"), 'a signed percentage is one left-to-right piece');
+    // Collect: the debtor line.
+    const collect = String(sandbox.renderCollectView());
+    assert.ok(collect.includes('<bdi>#D3</bdi> · <span class='), 'the Collect line');
+    // The receipt row of the list: number, serial and date.
+    const row = String(sandbox.shellReceiptRow(state.receipts[0], state.customers[0], '<div></div>', { receiptDisplayNum: 12, displayTempNo: 'D3' }));
+    assert.ok(row.includes('<bdi>#12</bdi>') && row.includes('رقم <bdi>D3</bdi> (مؤقت)'), row.slice(0, 900));
+    // The wallet: two names and a date on one line.
+    state.walletTransactions = [{ id: 't1', type: 'credit', fromUserId: null, toUserId: 'cust1', amountMinor: 5000, currency: 'USD', createdAt: now }];
+    const wallet = String(sandbox.renderWalletView()).split('workspace-wallet-row')[1] || '';
+    assert.ok(/<bdi>النظام<\/bdi> ← <bdi>Demo Studio Customer \(classic\)<\/bdi> • <bdi>[^<]+<\/bdi>/.test(wallet), wallet.slice(0, 700));
+    // In a plain line of text (an option, a hint) the number is a piece of its own as well.
+    assert.equal(sandbox.getAdReceiptDisplayLabel('r1'), '⁦#D3⁩');
+    assert.equal(sandbox.codePiece('#471396'), '⁦#471396⁩');
+    state.language = 'en';
+    assert.deepEqual([sandbox.getAdReceiptDisplayLabel('r1'), sandbox.codePiece('#471396')], ['#D3', '#471396'], 'English text carries no marks');
   });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
@@ -3416,9 +3603,9 @@ async function main() {
     // USD shows its LYD preview straight away; another user starts empty on USD.
     nodes['ads-studio-charge-currency'].value = 'USD';
     run('adsStudioUpdateLydPreview()');
-    assert.equal(nodes['ads-studio-lyd-preview'].textContent, '≈ 2500.00 LYD @ 5');
+    assert.equal(plain(nodes['ads-studio-lyd-preview'].textContent), '≈ 2,500.00 د.ل @ 5');
     html = String(run('renderAdsStudioWallet()'));
-    assert.ok(html.includes('≈ 2500.00 LYD @ 5</span>') && !html.includes('<option value="LYD" selected>'));
+    assert.ok(plain(html).includes('≈ 2,500.00 د.ل @ 5</span>') && !html.includes('<option value="LYD" selected>'));
     state.currentUser = { id: 'cust2', role: 'Employee', permissions: {} };
     html = String(run('renderAdsStudioWallet()'));
     assert.ok(!/id="ads-studio-charge-amount"[^>]*value="500"/.test(html) && !html.includes('<option value="LYD" selected>'));
@@ -3520,15 +3707,15 @@ async function main() {
     await sandbox.openReceiptDeliveryCompletionModal('r1');
     const modal = created.find(element => element.id === 'delivery-complete-modal');
     assert.ok(modal, 'the completion dialog was not built');
-    assert.match(String(modal.innerHTML), /id="delivery-complete-debt"[^>]*>107\.25 LYD</);
+    assert.match(plain(modal.innerHTML), /id="delivery-complete-debt"[^>]*>107\.25 د\.ل</);
     // The driver types the 107 they were shown: the verdict names the 0.25 that stays owed.
     const nodes = { 'delivery-complete-modal': { dataset: { receiptId: 'r1' } }, 'delivery-collected-total': {}, 'delivery-fee-compare': {}, 'delivery-debt-compare': {} };
     sandbox.document.getElementById = id => nodes[id] || null;
     sandbox.getPaymentTotalsFromDom = () => ({ totalR1: 107, totalR2: 0 });
     sandbox._readDeliveryFeeLyd = () => 0;
     sandbox.updateReceiptDeliveryCompletionComputed();
-    assert.ok(nodes['delivery-debt-compare'].textContent.includes('0.25 LYD'), nodes['delivery-debt-compare'].textContent);
-    assert.equal(nodes['delivery-collected-total'].textContent, '107.00 LYD');
+    assert.ok(plain(nodes['delivery-debt-compare'].textContent).includes('0.25 د.ل'), nodes['delivery-debt-compare'].textContent);
+    assert.equal(plain(nodes['delivery-collected-total'].textContent), '107.00 د.ل');
   });
   await test('r5 MGR n=12: a settled or company-covered underpaid delivery leaves the uncollected tile, the CSV and the card', async () => {
     const { sandbox, state, run } = loadBrowserSource();
@@ -3604,9 +3791,9 @@ async function main() {
     ];
     const rows = String(sandbox.renderWalletView()).split('workspace-wallet-row').slice(1);
     assert.equal(rows.length, 3);
-    assert.ok(rows[0].includes('شحن المحفظة') && rows[0].includes('Ali') && !rows[0].includes('text-rose-600') && !/-\s*50\.00/.test(rows[0]), rows[0]);
+    assert.ok(rows[0].includes('شحن المحفظة') && rows[0].includes('Ali') && !rows[0].includes('text-rose-600') && !/-\s*\$?50\.00/.test(rows[0]), rows[0]);
     assert.ok(rows[1].includes('ميزانية حملة') && rows[1].includes('Ali') && rows[1].includes('النظام') && !rows[1].includes('text-rose-600'), rows[1]);
-    assert.ok(/\+7\.00/.test(rows[2]) && rows[2].includes('text-emerald-600'), 'the admin\'s own top-up keeps its + sign');
+    assert.ok(/\+\$7\.00/.test(rows[2]) && rows[2].includes('text-emerald-600'), 'the admin\'s own top-up keeps its + sign');
     assert.ok(!rows.some(row => />(credit|campaign_payment)</.test(row)), 'a raw type code is the title');
   });
   await test('R2 meta-ads-4: a lean server ad row shows Albayan\'s archived Meta creative through its route, never only the expiring signed link', async () => {
@@ -3997,8 +4184,8 @@ async function main() {
       iphone: options => shell(IPHONE_UA, { getPlatform: () => 'ios' }, options),
       android: options => shell(ANDROID_UA, { getPlatform: () => 'android' }, options)
     };
-    const has = (html, ...parts) => parts.filter(part => !html.includes(part));
-    const lacks = (html, ...parts) => parts.filter(part => html.includes(part));
+    const has = (html, ...parts) => parts.filter(part => !plain(html).includes(part));
+    const lacks = (html, ...parts) => parts.filter(part => plain(html).includes(part));
 
     await test('F-iap-shell: the iPhone app sells nothing: Services Hub, Smart Systems, Plans, Charge wallet and Wallet show no buy or top-up button and the neutral line; the website and the Android app keep every button', async () => {
       // The one switch. Safari on an iPhone is the website; the same Apple build with a desktop user agent is hidden too.
@@ -4011,10 +4198,11 @@ async function main() {
 
       for (const language of ['en', 'ar']) {
         const neutral = NEUTRAL[language];
+        const lyd = language === 'ar' ? 'د.ل' : 'LYD';  // one way of writing money (DESIGN.md 5.4)
         // ---- the iPhone app ----
         let f = PLATFORMS.iphone({ language });
         let hub = String(f.sandbox.renderServicesHub());
-        assert.deepEqual(has(hub, neutral, '75.00 LYD', "navigateTo('wallet')"), [], `${language} hub keeps the balance and shows the neutral line`);
+        assert.deepEqual(has(hub, neutral, `75.00 ${lyd}`, "navigateTo('wallet')"), [], `${language} hub keeps the balance and shows the neutral line`);
         assert.deepEqual(lacks(hub, 'hubOpenChargeWallet', "navigateTo('plans')", 'Top up', 'Plans & bundles', 'الباقات والاشتراكات', 'Subscribe', 'اشترك', 'Renew'), [], `${language} hub`);
         assert.deepEqual(lacks(String(f.sandbox.hubWalletCard({ topUp: true, plansLink: true })), 'hubOpenChargeWallet', "navigateTo('plans')"), [], `${language} wallet card, both buttons asked for`);
         assert.deepEqual(lacks(String(f.sandbox.renderSmartSystems()), 'showSubscriptionModal(', '>Subscribe<', '>Renew<', '>اشترك<', '>جدّد<'), [], `${language} Smart Systems`);
@@ -4023,18 +4211,18 @@ async function main() {
         assert.deepEqual(lacks(charge, 'chargeWalletCreateRequest', 'charge-wallet-amount', 'chargeWalletPickMethod', 'Create charge request', 'Charge wallet', 'اشحن المحفظة', 'إنشاء طلب شحن'), [], `${language} Charge wallet`);
         assert.equal(f.asked.methods, 0, 'the iPhone app never asks for the payment methods');
         const wallet = String(f.sandbox.renderWalletView());
-        assert.deepEqual(has(wallet, neutral, '75.00 LYD', 'Cash at the office', 'walletTransferFromUi()'), [], `${language} Wallet keeps the balance, the history and transfers`);
+        assert.deepEqual(has(wallet, neutral, `75.00 ${lyd}`, 'Cash at the office', 'walletTransferFromUi()'), [], `${language} Wallet keeps the balance, the history and transfers`);
         assert.deepEqual(lacks(wallet, 'hubOpenChargeWallet', "navigateTo('plans')", 'walletTopUpFromUi', 'Charge wallet', 'اشحن المحفظة', 'Plans & bundles', 'external funding rails', 'قنوات التمويل'), [], `${language} Wallet`);
         // A locked service reads "Not active": never a price to pay or "Subscribe".
         f = PLATFORMS.iphone({ language, role: 'Employee', subscribed: true });
         hub = String(f.sandbox.renderServicesHub());
         assert.deepEqual(has(hub, neutral, language === 'ar' ? 'غير مفعّلة' : 'Not active', language === 'ar' ? 'نشط · 12 يوم' : 'Active · 12 d'), [], `${language} hub pills`);
-        assert.deepEqual(lacks(hub, '25 LYD', 'Subscribe', 'اشترك', "navigateTo('plans')", 'hubOpenChargeWallet'), [], `${language} hub pills`);
+        assert.deepEqual(lacks(hub, `25.00 ${lyd}`, '25 LYD', 'Subscribe', 'اشترك', "navigateTo('plans')", 'hubOpenChargeWallet'), [], `${language} hub pills`);
         // Plans: read-only rows (name, services, days left) and no price, offer badge or button.
         const plans = String(f.sandbox.renderPlansView());
-        assert.deepEqual(has(plans, neutral, '75.00 LYD', language === 'ar' ? 'كل شيء' : 'Everything', language === 'ar' ? 'الملابس شهرياً' : 'Clothes monthly',
+        assert.deepEqual(has(plans, neutral, `75.00 ${lyd}`, language === 'ar' ? 'كل شيء' : 'Everything', language === 'ar' ? 'الملابس شهرياً' : 'Clothes monthly',
           language === 'ar' ? 'نشط · 12 يوم' : 'Active · 12 d', language === 'ar' ? 'غير مفعّلة' : 'Not active', "navigateTo('services-hub')"), [], `${language} Plans`);
-        assert.deepEqual(lacks(plans, 'openPlanPaywall', 'hubOpenChargeWallet', 'Subscribe', 'اشترك', 'Renew', 'جدّد', '50 LYD', '90 LYD', '25 LYD', 'Best value', 'الأفضل قيمة', 'Save 20%', 'وفّر 20%', 'Top up', 'Loading prices'), [], `${language} Plans`);
+        assert.deepEqual(lacks(plans, 'openPlanPaywall', 'hubOpenChargeWallet', 'Subscribe', 'اشترك', 'Renew', 'جدّد', `50.00 ${lyd}`, `90.00 ${lyd}`, `25.00 ${lyd}`, '50 LYD', '90 LYD', '25 LYD', 'Best value', 'الأفضل قيمة', 'Save 20%', 'وفّر 20%', 'Top up', 'Loading prices'), [], `${language} Plans`);
         f.state.subscriptionPlans = [];  // the catalog has not arrived: nothing to wait for, no "Loading prices…"
         assert.deepEqual(lacks(String(f.sandbox.renderPlansView()), 'Loading prices', 'جاري تحميل الأسعار', 'plansEnsureFresh();', 'animate-spin'), [], `${language} Plans without a catalog`);
         f = PLATFORMS.iphone({ language, serverMode: false });  // local mode: no "subscribe from its card", no admin top-up form
@@ -4055,12 +4243,12 @@ async function main() {
           assert.deepEqual(has(webWallet, 'onclick="hubOpenChargeWallet()"', "onclick=\"navigateTo('plans')\"", language === 'ar' ? 'اشحن المحفظة' : 'Charge wallet', language === 'ar' ? 'قنوات التمويل الخارجية' : 'external funding rails'), [], `${platform} ${language} Wallet`);
           f = PLATFORMS[platform]({ language, role: 'Employee', subscribed: true });
           const webHub = String(f.sandbox.renderServicesHub());
-          assert.deepEqual(has(webHub, language === 'ar' ? '25 LYD / شهر' : '25 LYD / month'), [], `${platform} ${language} hub pills`);
+          assert.deepEqual(has(webHub, language === 'ar' ? '25.00 د.ل / شهر' : '25.00 LYD / month'), [], `${platform} ${language} hub pills`);
           // A service with no price in the catalog still reads "Subscribe" on the website. The three tiles that used to
           // show it on the hub (the two shipping services and the warehouse) are "Coming soon" since the redesign.
           assert.equal(f.sandbox.hubServiceStatus('ad_maker').label, language === 'ar' ? 'اشترك' : 'Subscribe', `${platform} ${language} unpriced service`);
           const webPlans = String(f.sandbox.renderPlansView());
-          assert.deepEqual(has(webPlans, "onclick=\"openPlanPaywall('bundle1')\"", "onclick=\"openPlanPaywall('svc:clothes_system')\"", '90 LYD', '50 LYD',
+          assert.deepEqual(has(webPlans, "onclick=\"openPlanPaywall('bundle1')\"", "onclick=\"openPlanPaywall('svc:clothes_system')\"", `90.00 ${lyd}`, `50.00 ${lyd}`,
             language === 'ar' ? '>اشترك<' : '>Subscribe<', language === 'ar' ? '>جدّد<' : '>Renew<', language === 'ar' ? 'الأفضل قيمة' : 'Best value', language === 'ar' ? 'وفّر 20%' : 'Save 20%', 'onclick="hubOpenChargeWallet()"'), [], `${platform} ${language} Plans`);
           assert.deepEqual(lacks(hub + webCharge + webWallet + webHub + webPlans, NEUTRAL.en, NEUTRAL.ar, 'Not active', 'غير مفعّلة'), [], `${platform} ${language}: nothing of the iPhone wording`);
         }
@@ -4102,10 +4290,10 @@ async function main() {
           { id: 'mixed', name: 'Mixed', nameAr: 'مختلطة', serviceIds: ['clothes_system', 'warehouse'], priceMinor: 7000, durationDays: 30, currency: 'LYD' }
         ];
         const plans = String(f.sandbox.renderPlansView());
-        assert.ok(!plans.includes("openPlanPaywall('svc:warehouse')") && !plans.includes('40 LYD'), `${language}: the warehouse plan has no price and no button`);
+        assert.ok(!plans.includes("openPlanPaywall('svc:warehouse')") && !plans.includes('40.00') && !plans.includes('40 LYD'), `${language}: the warehouse plan has no price and no button`);
         assert.ok(String(f.sandbox.renderPlanRow(f.state.subscriptionPlans[0])).includes(`>${soonWord}<`), `${language}: it reads Coming soon`);
-        assert.ok(plans.includes("openPlanPaywall('svc:clothes_system')") && plans.includes('50 LYD'), `${language}: a built service is still sold`);
-        assert.ok(plans.includes("openPlanPaywall('mixed')") && plans.includes('70 LYD'), `${language}: a bundle with a built service is still sold`);
+        assert.ok(plans.includes("openPlanPaywall('svc:clothes_system')") && plans.includes(language === 'ar' ? '50.00 د.ل' : '50.00 LYD'), `${language}: a built service is still sold`);
+        assert.ok(plans.includes("openPlanPaywall('mixed')") && plans.includes(language === 'ar' ? '70.00 د.ل' : '70.00 LYD'), `${language}: a bundle with a built service is still sold`);
       }
     });
 
@@ -4556,7 +4744,7 @@ async function main() {
         lines: [{ productId: 'p1', qty: 1, priceLYD: 80 }], deliveryFeeLYD: 0, amountPaidLYD: 100, createdAt: '2026-09-01T10:00:00Z' }];
       clothes.run("printClothesOrderSlip('o1')");
       const text = String(slip && slip.innerHTML);
-      assert.ok(text.includes(language === 'ar' ? 'مستحق للإرجاع' : 'Owed back') && text.includes('20.00 LYD'), text);
+      assert.ok(text.includes(language === 'ar' ? 'مستحق للإرجاع' : 'Owed back') && text.includes(language === 'ar' ? '20.00 د.ل' : '20.00 LYD'), text);
     }
   });
 
@@ -5231,7 +5419,7 @@ async function main() {
     assert.equal(rows[0].amount, 500, 'before: [500, 1000] = 1500 LYD against a 500 LYD receipt');
     const html = String(sandbox.renderReceiptsView());
     assert.ok(/Total Paid:<\/span><span>500\.00 LYD/.test(html), 'Total Paid must match the receipt');
-    assert.ok(!html.includes('1000.00 LYD') && !html.includes('1500.00 LYD'));
+    assert.ok(!html.includes('1,000.00 LYD') && !html.includes('1,500.00 LYD') && !html.includes('1000.00 LYD') && !html.includes('1500.00 LYD'));
   });
 
   await test('r6 R n=13: editing an old receipt keeps its dates, and the customer card reads a receipt by its own day', async () => {
@@ -5298,7 +5486,7 @@ async function main() {
     const rows = sandbox.shellDebtorRows();
     assert.equal(rows.length, 1);
     near(rows[0].dueLyd, 95);
-    assert.ok(sandbox.shellReminderMessage(rows[0]).includes('95 LYD'));
+    assert.ok(sandbox.shellReminderMessage(rows[0]).includes('95.00 LYD'));
   });
 
   await test('r6 C n=10: the customer list, debt filters, sort, pill, header tile and Home Owed pick debtors by the USD balance, like Collect', async () => {
@@ -5314,8 +5502,8 @@ async function main() {
     assert.deepEqual(customerIdsFor(sandbox, state, 'hasCredit'), []);      // before: listed as credit
     near(sandbox.getCustomerSortValue(state.customers[0], 'highestDebt'), 50);
     const pill = sandbox.shellCustomerRow(state.customers[0], stats, '', { canSeeBalance: true });
-    assert.ok(pill.includes('Owes 50 LYD') && !pill.includes('Credit'), 'the pill must say Owes');
-    assert.ok(sandbox.renderManagerHomeHero([], [], true).includes('50 LYD'), 'Home Owed counts the debtor');
+    assert.ok(pill.includes('Owes 50.00 LYD') && !pill.includes('Credit'), 'the pill must say Owes');
+    assert.ok(sandbox.renderManagerHomeHero([], [], true).includes('50.00 LYD'), 'Home Owed counts the debtor');
     // The reverse: USD settled while the LYD mirror reads -100 — nobody owes.
     state.ads = [receiptLessDebtAd('a1', 100, 11)];
     stats = sandbox.getCustomerStats('c1');
@@ -5325,7 +5513,7 @@ async function main() {
     assert.deepEqual(customerIdsFor(sandbox, state, 'hasDebt'), []);        // before: listed
     assert.ok(sandbox.shellCustomerRow(state.customers[0], stats, '', { canSeeBalance: true }).includes('Settled'));
     const hero = sandbox.renderManagerHomeHero([], [], true);
-    assert.ok(!hero.includes('100 LYD') && hero.includes('0 LYD'), 'Home Owed must not count a settled customer');
+    assert.ok(!hero.includes('100.00 LYD') && !hero.includes('100 LYD') && hero.includes('>0.00 LYD'), 'Home Owed must not count a settled customer');
   });
 
   await test('r6 C n=9/19: Collect a debt opens the receipt form with Paid chosen (the real settle path), never the handover-only dialog', async () => {
@@ -7951,7 +8139,7 @@ async function main() {
         const en = language === 'en';
         // ---- an active plan: the wallet, Add money, the builder's wallet lines
         let f = studioAs(platform, language, 'active');
-        const wallet = id => String(f.run(`renderStudioWalletScreen({ tab: 'wallet', section: '', id: '${id}', step: 0 })`));
+        const wallet = id => plain(f.run(`renderStudioWalletScreen({ tab: 'wallet', section: '', id: '${id}', step: 0 })`));
         wallet('');  // asks for the summary, the payment requests and the methods
         await f.settled();
         const page = wallet('');
@@ -7996,7 +8184,7 @@ async function main() {
         f.replies['/api/studio/wallet/summary'] = summary({ availableMinor: 1000, addedMinor: 0 });
         f.run("studioDataWant('wallet', true)");
         await f.settled();
-        const lines = String(f.run("studioBuilderWalletHtml({ draft: { budgetType: 'lifetime', budgetMinorUSD: 5000, durationDays: 5 } })"));
+        const lines = plain(f.run("studioBuilderWalletHtml({ draft: { budgetType: 'lifetime', budgetMinorUSD: 5000, durationDays: 5 } })"));
         assert.ok(lines.includes('data-testid="studio-builder-wallet-short"') && lines.includes('<bdi dir="ltr">$40.00</bdi>') && lines.includes('PAY-USDAAAA1'), `${where}: short by $40.00, the payment being confirmed`);
         assert.equal(lines.includes('data-testid="studio-builder-add-money" onclick="studioBuilderAddMoney()"'), !ios, `${where}: before, the iPhone builder offered Add money`);
         assert.equal(neutralLines(lines).length, ios ? 1 : 0, where);
@@ -8015,7 +8203,7 @@ async function main() {
         f = studioAs(platform, language, 'ended', summary({ addedMinor: 0 }, []));
         f.run('renderStudioHomeBody()');
         await f.settled();
-        const home = String(f.run('renderStudioHomeBody()'));
+        const home = plain(f.run('renderStudioHomeBody()'));
         const need = piece(home, 'data-testid="studio-need-plan"', '</li>');
         assert.ok(need.includes(en ? 'Your plan has ended' : 'انتهى اشتراكك'), `${where}: the plan-ended card stays`);
         assert.equal(need.includes(`onclick="showSubscriptionModal('ad_maker', 'ad_maker')"`), !ios, `${where}: before, the iPhone Home offered Renew`);
@@ -8084,12 +8272,12 @@ async function main() {
         f.sandbox.renderStudioV2View = () => '';
         f.run(`_adsStudioWalletForUser = 'cust1'; _adsStudioPayMethods = ${JSON.stringify(methods)}; _adsStudioPayRate = { usdToLyd: 6.9 };
           _adsStudioWalletMine = ${JSON.stringify(payments)}; _adsStudioWalletPendingAll = [];`);
-        const classic = String(f.run('renderAdsStudioWallet()'));
+        const classic = plain(f.run('renderAdsStudioWallet()'));
         assert.ok(classic.includes(en ? 'Wallet balance' : 'رصيد المحفظة') && classic.includes(en ? 'Available to spend' : 'متاح للصرف'), `${where}: the balances stay`);
         assert.ok(['PAY-USDAAAA1', 'PAY-LYDBBBB2', 'PAY-DONECCC3'].every(code => classic.includes(code)) && classic.includes(`onclick="adsStudioDecideWalletCharge('wpr_1', 'cancel')"`), `${where}: the requests and Cancel stay`);
         assert.equal(classic.includes('id="ads-studio-charge-amount"') && classic.includes('onclick="adsStudioCreateWalletCharge()"') && classic.includes(en ? 'Create charge request' : 'إنشاء طلب شحن'), !ios, `${where}: before, the iPhone app drew the Add money form`);
         assert.equal(classic.includes(`onchange="adsStudioAttachReceipt('wpr_2', this)"`), !ios, `${where}: the receipt upload`);
-        assert.equal(classic.includes(`150.00 ${en ? 'LYD' : 'د.ل'} • ${en ? 'Bank transfer' : 'حوالة مصرفية'}`) && classic.includes('≈ 172.50 LYD'), !ios, `${where}: how a waiting request is paid`);
+        assert.equal(classic.includes(`150.00 ${en ? 'LYD' : 'د.ل'} • ${en ? 'Bank transfer' : 'حوالة مصرفية'}`) && classic.includes(`≈ 172.50 ${en ? 'LYD' : 'د.ل'}`), !ios, `${where}: how a waiting request is paid`);
         assert.ok(classic.includes(`$100.00 • ${en ? 'Adfali' : 'ادفع لي'}`), `${where}: a confirmed payment keeps its method (history)`);
         assert.equal(neutralLines(classic).length, ios ? 1 : 0, where);
         if (ios) { onlyNeutral(classic, language, 1, where); assert.ok(!BUY_WORDS[language].test(classic) && !BUY_CALLS.test(classic), `${where}: nothing to buy`); }
@@ -8099,7 +8287,7 @@ async function main() {
         assert.ok(adminRow === adminRows[language] && adminRow.includes(`adsStudioDecideWalletCharge('wpr_2', 'confirm')`) && adminRow.includes(en ? 'Bank transfer' : 'حوالة مصرفية'), `${where}: the admin row`);
         // The budget step's wallet line: what is missing, and "Add money before you send" on the web and Android only.
         const missing = en ? 'Available in your wallet: $0.00 — short by $70.00.' : 'المتاح في محفظتك: $0.00 — ينقصك $70.00.';
-        assert.equal(String(f.run("adsStudioBudgetWalletText({ budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7 })")),
+        assert.equal(plain(f.run("adsStudioBudgetWalletText({ budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7 })")),
           ios ? missing : `${missing} ${en ? 'Add money before you send.' : 'أضف رصيداً قبل الإرسال.'}`, `${where}: the budget step`);
         // Sending a request the balance does not cover: the reason, and no "charge first" in the iPhone app.
         f.state.adCampaignRequests = [{ id: 'short1', status: 'Draft', createdBy: 'cust1', name: 'Daily check', objective: 'messages', platforms: ['facebook'], pageName: 'Page',
@@ -8111,7 +8299,7 @@ async function main() {
         const expected = en
           ? [`${ios ? 'Your balance is not enough for this request' : 'Charge your wallet first'} — the total budget ($70.00) is held from it when you submit.`, 'Not enough wallet balance']
           : [`${ios ? 'رصيد محفظتك لا يكفي لهذا الطلب' : 'اشحن محفظتك أولاً'} — إجمالي الميزانية ($70.00) يُحجز منها عند الإرسال.`, 'رصيد المحفظة غير كافٍ'];
-        assert.deepEqual(f.notes.map(note => [note.message, note.title, note.type]), [[...expected, 'error']], `${where}: the balance check before sending`);
+        assert.deepEqual(f.notes.map(note => [plain(note.message), note.title, note.type]), [[...expected, 'error']], `${where}: the balance check before sending`);
       }
     });
   }
@@ -9637,7 +9825,7 @@ async function main() {
     assert.deepEqual([full.asked.length, full.calls], [0, 1], 'a spend that keeps all company money is not questioned');
     const arabic = await run(false, '99.87', 'ar');
     assert.equal(arabic.calls, 0);
-    assert.equal(arabic.asked[0], 'أموال الشركة المسجّلة على هذا الإعلان $100.00، والمصروف الذي أدخلته $99.87.\n'
+    assert.equal(plain(arabic.asked[0]), 'أموال الشركة المسجّلة على هذا الإعلان $100.00، والمصروف الذي أدخلته $99.87.\n'
       + 'سيرجع $0.13 إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟');
   });
   console.log(`\n${passed} review behavior regressions passed.`);

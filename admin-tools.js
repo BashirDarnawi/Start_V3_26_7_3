@@ -18,6 +18,21 @@ function analyticsMoney(value, digits = 2) {
   });
 }
 
+// Written the one way (DESIGN.md 5.4): "$1,234.50", "1,234.50 LYD", in Arabic "1,234.50 د.ل".
+// In Arabic an amount is one piece with its own direction (moneyPiece, 07); this file also runs alone in its tests.
+function analyticsPiece(text, rtl) {
+  return typeof moneyPiece === 'function' ? moneyPiece(text, rtl) : text;
+}
+function analyticsUsd(value) {
+  const text = analyticsMoney(value);
+  return analyticsPiece(text[0] === '-' ? `-$${text.slice(1)}` : `$${text}`);
+}
+function analyticsLyd(value) {
+  const text = analyticsMoney(value);
+  if (!(typeof state !== 'undefined' && state.language === 'ar')) return `${text} LYD`;
+  return analyticsPiece(`${text[0] === '-' ? analyticsPiece(text) : text} د.ل`, true);
+}
+
 function analyticsEscape(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
 }
@@ -388,9 +403,9 @@ function renderAnalyticsBreakdownDialog() {
         </div>
         <div class="grid grid-cols-2 ${showProfit ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-3 mb-6">
           <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'السجلات' : 'Records'}</p><p class="text-xl font-bold">${totals.count}</p></div>
-          <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 p-4"><p class="text-xs text-slate-500">${labels.primary}</p><p class="text-xl font-bold">$${analyticsMoney(totals.primary)}</p></div>
-          ${labels.secondary ? `<div class="rounded-2xl bg-amber-50 dark:bg-amber-950/40 p-4"><p class="text-xs text-slate-500">${labels.secondary}</p><p class="text-xl font-bold">$${analyticsMoney(totals.secondary)}</p></div>` : ''}
-          ${showProfit ? `<div class="rounded-2xl bg-cyan-50 dark:bg-cyan-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'ربح معروف' : 'Known profit'}</p><p class="text-xl font-bold">${analyticsMoney(totals.profit)} LYD</p></div>` : ''}
+          <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 p-4"><p class="text-xs text-slate-500">${labels.primary}</p><p class="text-xl font-bold">${analyticsUsd(totals.primary)}</p></div>
+          ${labels.secondary ? `<div class="rounded-2xl bg-amber-50 dark:bg-amber-950/40 p-4"><p class="text-xs text-slate-500">${labels.secondary}</p><p class="text-xl font-bold">${analyticsUsd(totals.secondary)}</p></div>` : ''}
+          ${showProfit ? `<div class="rounded-2xl bg-cyan-50 dark:bg-cyan-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'ربح معروف' : 'Known profit'}</p><p class="text-xl font-bold">${analyticsLyd(totals.profit)}</p></div>` : ''}
         </div>
         <div class="space-y-2 mb-6" aria-label="Trend chart">
           ${data.periods.map(row => `<div class="grid grid-cols-[64px_1fr_90px] sm:grid-cols-[90px_1fr_120px] items-center gap-3 text-xs">
@@ -399,13 +414,13 @@ function renderAnalyticsBreakdownDialog() {
               <div class="h-full bg-indigo-500" style="width:${Math.max(0, row.primaryUSD / maxValue * 100)}%"></div>
               ${row.secondaryUSD ? `<div class="h-full bg-amber-400" style="width:${Math.max(0, row.secondaryUSD / maxValue * 100)}%"></div>` : ''}
             </div>
-            <span class="font-semibold text-right">$${analyticsMoney(row.primaryUSD)}</span>
+            <span class="font-semibold text-right">${analyticsUsd(row.primaryUSD)}</span>
           </div>`).join('')}
         </div>
         <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700">
           <table class="w-full min-w-[620px] text-sm">
             <thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'الفترة' : 'Period'}</th><th class="p-3 text-right">${isAr ? 'العدد' : 'Count'}</th><th class="p-3 text-right">${labels.primary}</th>${labels.secondary ? `<th class="p-3 text-right">${labels.secondary}</th>` : ''}${showProfit ? `<th class="p-3 text-right">${isAr ? 'الربح المعروف' : 'Known profit'}</th>` : ''}</tr></thead>
-            <tbody>${data.periods.slice().reverse().map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.label)}</td><td class="p-3 text-right">${row.count}</td><td class="p-3 text-right">$${analyticsMoney(row.primaryUSD)}</td>${labels.secondary ? `<td class="p-3 text-right">$${analyticsMoney(row.secondaryUSD)}</td>` : ''}${showProfit ? `<td class="p-3 text-right ${row.profitLYD >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${analyticsMoney(row.profitLYD)} LYD</td>` : ''}</tr>`).join('')}</tbody>
+            <tbody>${data.periods.slice().reverse().map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.label)}</td><td class="p-3 text-right">${row.count}</td><td class="p-3 text-right">${analyticsUsd(row.primaryUSD)}</td>${labels.secondary ? `<td class="p-3 text-right">${analyticsUsd(row.secondaryUSD)}</td>` : ''}${showProfit ? `<td class="p-3 text-right ${row.profitLYD >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${analyticsLyd(row.profitLYD)}</td>` : ''}</tr>`).join('')}</tbody>
           </table>
         </div>
         ${metric === 'collection-status' ? `<button type="button" onclick="openOutstandingReceiptsFromAnalytics()" class="mt-5 w-full sm:w-auto px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-semibold">${isAr ? 'عرض الوصولات غير المحصلة' : 'View outstanding receipts'}</button>` : ''}
@@ -468,17 +483,17 @@ function renderProfitabilityPanel(snapshot, isAr) {
         <button type="button" onclick="openDollarPurchaseManager()" class="w-full lg:w-auto px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-lg flex items-center justify-center gap-2"><i data-lucide="badge-dollar-sign" class="w-5 h-5"></i>${isAr ? 'تسجيل شراء دولارات' : 'Record Dollar Purchase'}</button>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'إيراد معترف به' : 'Recognized revenue'}</p><p class="text-xl font-bold text-emerald-700">${analyticsMoney(snapshot.paidRevenueLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">$${analyticsMoney(snapshot.paidCoveredUSD ?? snapshot.paidActualSpendUSD)} ${isAr ? 'إنفاق مدفوع مُسعَّر' : 'priced paid spend'}</p></div>
-        <div class="rounded-2xl bg-rose-50 dark:bg-rose-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'تكلفة فيسبوك' : 'Facebook cost'}</p><p class="text-xl font-bold text-rose-700">${analyticsMoney(snapshot.paidCostLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'من دفعات الدولار المسجلة' : 'from recorded USD lots'}</p></div>
-        <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsMoney(snapshot.knownGrossProfitLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
-        <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">$${analyticsMoney(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsMoney(snapshot.inventoryCostLYD)} LYD ${isAr ? 'تكلفة' : 'cost'}</p></div>
+        <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'إيراد معترف به' : 'Recognized revenue'}</p><p class="text-xl font-bold text-emerald-700">${analyticsLyd(snapshot.paidRevenueLYD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsUsd(snapshot.paidCoveredUSD ?? snapshot.paidActualSpendUSD)} ${isAr ? 'إنفاق مدفوع مُسعَّر' : 'priced paid spend'}</p></div>
+        <div class="rounded-2xl bg-rose-50 dark:bg-rose-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'تكلفة فيسبوك' : 'Facebook cost'}</p><p class="text-xl font-bold text-rose-700">${analyticsLyd(snapshot.paidCostLYD)}</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'من دفعات الدولار المسجلة' : 'from recorded USD lots'}</p></div>
+        <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsLyd(snapshot.knownGrossProfitLYD)}</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
+        <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">${analyticsUsd(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsLyd(snapshot.inventoryCostLYD)} ${isAr ? 'تكلفة' : 'cost'}</p></div>
       </div>
       ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0 || snapshot.unpaidSpendUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
         <strong>${isAr ? 'يحتاج إكمال:' : 'Needs attention:'}</strong>
-        ${snapshot.unpaidSpendUSD > 0 ? `${isAr ? 'إنفاق على إعلانات غير مدفوعة (دولارات استُهلكت ولم تُحصَّل بعد)' : 'spend on unpaid ads (dollars used, not yet billed)'}: $${analyticsMoney(snapshot.unpaidSpendUSD)}.` : ''}
-        ${snapshot.writtenOffSpendUSD > 0 ? ` ${isAr ? 'إنفاق مشطوب (لن يُدفع، محسوب كخسارة)' : 'written-off spend (will not be paid, counted as a loss)'}: $${analyticsMoney(snapshot.writtenOffSpendUSD)} = ${analyticsMoney(snapshot.writtenOffCostLYD)} LYD.` : ''}
-        ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: $${analyticsMoney(snapshot.unpricedSpendUSD)}.` : ''}
-        ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: $${analyticsMoney(snapshot.missingSaleRateUSD)}.` : ''}
+        ${snapshot.unpaidSpendUSD > 0 ? `${isAr ? 'إنفاق على إعلانات غير مدفوعة (دولارات استُهلكت ولم تُحصَّل بعد)' : 'spend on unpaid ads (dollars used, not yet billed)'}: ${analyticsUsd(snapshot.unpaidSpendUSD)}.` : ''}
+        ${snapshot.writtenOffSpendUSD > 0 ? ` ${isAr ? 'إنفاق مشطوب (لن يُدفع، محسوب كخسارة)' : 'written-off spend (will not be paid, counted as a loss)'}: ${analyticsUsd(snapshot.writtenOffSpendUSD)} = ${analyticsLyd(snapshot.writtenOffCostLYD)}.` : ''}
+        ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: ${analyticsUsd(snapshot.unpricedSpendUSD)}.` : ''}
+        ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: ${analyticsUsd(snapshot.missingSaleRateUSD)}.` : ''}
         ${isAr ? 'هذه المبالغ مستبعدة من الربح حتى تكتمل البيانات.' : 'These amounts stay out of profit until their data is complete.'}
       </div>` : ''}
     </section>`;
@@ -507,14 +522,14 @@ function renderDollarPurchaseDialog() {
             <label class="text-sm font-medium">${isAr ? 'تاريخ الشراء' : 'Purchase date'}<input name="purchaseDate" type="date" value="${today}" max="${today}" required class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl"></label>
             <label class="text-sm font-medium">${isAr ? 'المبلغ بالدولار' : 'USD amount'}<input name="amountUSD" type="number" min="0.01" max="1000000" step="0.01" inputmode="decimal" required oninput="updateDollarPurchasePreview()" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="100.00"></label>
             <label class="text-sm font-medium">${isAr ? 'سعر 1 دولار بالدينار' : 'LYD paid per $1'}<input name="rateLYD" type="number" min="0.0001" max="1000" step="0.0001" inputmode="decimal" required oninput="updateDollarPurchasePreview()" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="9.7000"></label>
-            <div class="rounded-xl bg-white dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي ما دفعته' : 'Total paid'}</p><p id="dollar-purchase-total" class="text-xl font-bold text-indigo-700 mt-1">0.00 LYD</p></div>
+            <div class="rounded-xl bg-white dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي ما دفعته' : 'Total paid'}</p><p id="dollar-purchase-total" class="text-xl font-bold text-indigo-700 mt-1">${analyticsLyd(0)}</p></div>
             <label class="text-sm font-medium sm:col-span-2">${isAr ? 'المصدر أو الحساب (اختياري)' : 'Source/account (optional)'}<input name="source" maxlength="120" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="${isAr ? 'مثال: السوق / الحساب المسبق 1' : 'Example: Market / Prepaid Balance 1'}"></label>
             <label class="text-sm font-medium sm:col-span-2">${isAr ? 'ملاحظة (اختياري)' : 'Note (optional)'}<input name="note" maxlength="240" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl"></label>
           </div>
           <div class="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><p class="text-xs text-slate-500">${isAr ? 'السجل غير قابل للتعديل. لتصحيح خطأ، احذفه وأنشئه من جديد.' : 'Records are immutable. To correct a mistake, delete it and create it again.'}</p><button type="submit" class="px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold">${isAr ? 'حفظ شراء الدولار' : 'Save Dollar Purchase'}</button></div>
         </form>
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3"><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي المشترى' : 'Total purchased'}</p><p class="font-bold">$${analyticsMoney(snapshot.totalPurchasedUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي التكلفة' : 'Total cost'}</p><p class="font-bold">${analyticsMoney(snapshot.totalPurchaseCostLYD)} LYD</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'المتبقي' : 'Inventory'}</p><p class="font-bold">$${analyticsMoney(snapshot.inventoryUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إنفاق بلا تكلفة' : 'Unpriced spend'}</p><p class="font-bold ${snapshot.unpricedSpendUSD ? 'text-amber-600' : 'text-emerald-600'}">$${analyticsMoney(snapshot.unpricedSpendUSD)}</p></div></div>
-        <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700"><table class="w-full min-w-[720px] text-sm"><thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'التاريخ' : 'Date'}</th><th class="p-3 text-right">USD</th><th class="p-3 text-right">${isAr ? 'السعر' : 'Rate'}</th><th class="p-3 text-right">${isAr ? 'التكلفة' : 'Cost'}</th><th class="p-3 text-right">${isAr ? 'المتبقي' : 'Remaining'}</th><th class="p-3 text-left">${isAr ? 'المصدر / الملاحظة' : 'Source / note'}</th><th class="p-3"></th></tr></thead><tbody>${purchases.length ? purchases.map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.purchaseDate)}</td><td class="p-3 text-right">$${analyticsMoney(row.amountUSD)}</td><td class="p-3 text-right">${analyticsMoney(row.rateLYD, 4)}</td><td class="p-3 text-right">${analyticsMoney(row.totalLYD || analyticsNumber(row.amountUSD) * analyticsNumber(row.rateLYD))} LYD</td><td class="p-3 text-right">$${analyticsMoney(remaining.get(String(row.id || '')) || 0)}</td><td class="p-3"><div class="font-medium">${analyticsEscape(row.source || '—')}</div><div class="text-xs text-slate-500">${analyticsEscape(row.note || '')}</div></td><td class="p-3 text-right"><button type="button" onclick="deleteDollarPurchase('${analyticsEscape(row.id)}')" class="p-2 rounded-lg text-rose-600 hover:bg-rose-50" aria-label="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`).join('') : `<tr><td colspan="7" class="p-8 text-center text-slate-500">${isAr ? 'لم تسجل أي عملية شراء دولارات بعد.' : 'No dollar purchases recorded yet.'}</td></tr>`}</tbody></table></div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3"><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي المشترى' : 'Total purchased'}</p><p class="font-bold">${analyticsUsd(snapshot.totalPurchasedUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي التكلفة' : 'Total cost'}</p><p class="font-bold">${analyticsLyd(snapshot.totalPurchaseCostLYD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'المتبقي' : 'Inventory'}</p><p class="font-bold">${analyticsUsd(snapshot.inventoryUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إنفاق بلا تكلفة' : 'Unpriced spend'}</p><p class="font-bold ${snapshot.unpricedSpendUSD ? 'text-amber-600' : 'text-emerald-600'}">${analyticsUsd(snapshot.unpricedSpendUSD)}</p></div></div>
+        <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700"><table class="w-full min-w-[720px] text-sm"><thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'التاريخ' : 'Date'}</th><th class="p-3 text-right">USD</th><th class="p-3 text-right">${isAr ? 'السعر' : 'Rate'}</th><th class="p-3 text-right">${isAr ? 'التكلفة' : 'Cost'}</th><th class="p-3 text-right">${isAr ? 'المتبقي' : 'Remaining'}</th><th class="p-3 text-left">${isAr ? 'المصدر / الملاحظة' : 'Source / note'}</th><th class="p-3"></th></tr></thead><tbody>${purchases.length ? purchases.map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.purchaseDate)}</td><td class="p-3 text-right">${analyticsUsd(row.amountUSD)}</td><td class="p-3 text-right">${analyticsMoney(row.rateLYD, 4)}</td><td class="p-3 text-right">${analyticsLyd(row.totalLYD || analyticsNumber(row.amountUSD) * analyticsNumber(row.rateLYD))}</td><td class="p-3 text-right">${analyticsUsd(remaining.get(String(row.id || '')) || 0)}</td><td class="p-3"><div class="font-medium">${analyticsEscape(row.source || '—')}</div><div class="text-xs text-slate-500">${analyticsEscape(row.note || '')}</div></td><td class="p-3 text-right"><button type="button" onclick="deleteDollarPurchase('${analyticsEscape(row.id)}')" class="p-2 rounded-lg text-rose-600 hover:bg-rose-50" aria-label="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`).join('') : `<tr><td colspan="7" class="p-8 text-center text-slate-500">${isAr ? 'لم تسجل أي عملية شراء دولارات بعد.' : 'No dollar purchases recorded yet.'}</td></tr>`}</tbody></table></div>
       </div>
     </section>`;
   if (window.lucide) lucide.createIcons({ nodes: [root] });
@@ -545,7 +560,7 @@ function updateDollarPurchasePreview() {
   const form = document.getElementById('dollar-purchase-form');
   const output = document.getElementById('dollar-purchase-total');
   if (!form || !output) return;
-  output.textContent = `${analyticsMoney(analyticsNumber(form.amountUSD?.value) * analyticsNumber(form.rateLYD?.value))} LYD`;
+  output.textContent = analyticsLyd(analyticsNumber(form.amountUSD?.value) * analyticsNumber(form.rateLYD?.value));
 }
 
 async function saveDollarPurchase(event) {
@@ -661,7 +676,14 @@ function controlCenterTimestamp(value) {
 
 // One way of writing money on this screen: thousands separator, two decimals, the currency always shown.
 function controlCenterLyd(value) {
-  return `${controlCenterMoney(value)} ${ccText('LYD', 'د.ل')}`;
+  return controlCenterPiece(`${controlCenterMoney(value)} ${ccText('LYD', 'د.ل')}`, true);
+}
+function controlCenterUsd(value) {
+  return controlCenterPiece(`$${controlCenterMoney(value)}`);
+}
+// In Arabic an amount is one piece with its own direction (moneyPiece, 07); this file also runs alone in its tests.
+function controlCenterPiece(text, rtl) {
+  return typeof moneyPiece === 'function' ? moneyPiece(text, rtl) : text;
 }
 
 function controlCenterLocale() {
@@ -824,7 +846,7 @@ function getControlCenterAttention(today, studio) {
       ccText('Money customers still owe.', 'مبالغ لا تزال مستحقة على العملاء.'),
       ccText('Open receipts', 'فتح الوصولات'), 'controlCenterOpenReceipts()'),
     line('unpriced-spend', unpriced > 0.005 ? 1 : 0, 'rose',
-      ccText(`$${controlCenterMoney(unpriced)} of Meta spend has no purchase cost`, `إنفاق ميتا بقيمة ${controlCenterMoney(unpriced)} دولار دون تكلفة شراء مسجلة`),
+      ccText(`${controlCenterUsd(unpriced)} of Meta spend has no purchase cost`, `إنفاق ميتا بقيمة ${controlCenterUsd(unpriced)} دون تكلفة شراء مسجلة`),
       ccText('Record the real dollar purchase so profit is not guessed.', 'سجّل التكلفة الفعلية لشراء الدولار حتى لا يُحسب الربح بالتخمين.'),
       ccText('Fix profit data', 'استكمال بيانات الربح'), "navigateTo('analytics')", 'circle-dollar-sign'),
     line('meta-duplicates', facts.metaDuplicates.length, 'amber',
@@ -1413,7 +1435,7 @@ function renderControlCenterCheck(check) {
   // A check this screen does not know yet: the server's own sentence, with its count.
   for (const item of found.values()) lines.push(`<li><span class="management-attention-count is-warning"><bdi>${Number(item?.count) || 0}</bdi></span><span class="management-attention-text"><strong>${Security.escapeHtml(controlCenterBlockerName(item))}</strong></span></li>`);
   const totals = check.totals || {};
-  const total = (label, value) => `<div><dt>${label}</dt><dd><bdi>$${controlCenterMoney(value)}</bdi></dd></div>`;
+  const total = (label, value) => `<div><dt>${label}</dt><dd><bdi>${controlCenterUsd(value)}</bdi></dd></div>`;
   return `
     <div class="management-check" role="status" data-month-check="${Security.escapeHtml(check.period)}">
       <h3>${Security.escapeHtml(controlCenterMonthName(check.period))}: ${check.blockers.length ? ccText('items to review before closing', 'عناصر للمراجعة قبل الإقفال') : ccText('no closing problems found', 'لا توجد مشاكل تمنع الإقفال')}</h3>
@@ -1554,7 +1576,7 @@ function renderControlCenterToday(server) {
     : `<div class="management-empty"><i data-lucide="circle-check" class="h-9 w-9"></i><h3>${ccText('Nothing needs you right now.', 'لا شيء يحتاجك الآن.')}</h3><p>${ccText(`Checked at ${checkedAt}`, `آخر فحص ${checkedAt}`)}</p></div>`;
   const month = today.month;
   const monthName = (() => { try { return month.now.toLocaleDateString(controlCenterLocale(), { month: 'long', year: 'numeric' }); } catch (_) { return ''; } })();
-  const versus = month.pct === null ? ccText('first month on record', 'أول شهر مُسجَّل') : ccText(`${month.pct >= 0 ? '+' : ''}${month.pct}% vs last month`, `${month.pct >= 0 ? '+' : ''}${month.pct}% مقابل الشهر الماضي`);
+  const versus = month.pct === null ? ccText('first month on record', 'أول شهر مُسجَّل') : ccText(`${month.pct >= 0 ? '+' : ''}${month.pct}% vs last month`, `\u2066${month.pct >= 0 ? '+' : ''}${month.pct}%\u2069 مقابل الشهر الماضي`);
   const figure = (label, value, note, open) => `<button type="button" onclick="${open}" class="management-figure"><span>${label}</span><strong><bdi>${Security.escapeHtml(value)}</bdi></strong><small>${Security.escapeHtml(note)}</small></button>`;
   const system = server ? getControlCenterSystem() : null;
   const ready = system ? system.connections.filter(item => item.ok).length : 0;
@@ -2606,13 +2628,13 @@ function openAdMergePicker(adId, triggerButton) {
       <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-2">
         ${entry.partners.map(partner => {
           const ids = pairFor(partner);
-          const money = (Number(partner.amountUSD) || 0).toFixed(2);
+          const money = fmtUsd(partner.amountUSD);
           const when = partner.startDate ? new Date(partner.startDate) : null;
           const dateText = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString(appDateLocale()) : '';
           return `<button type="button" onclick="showAdMergeDialog('${Security.escapeHtml(ids.keepId)}','${Security.escapeHtml(ids.draftId)}', this)" class="w-full text-start rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 hover:border-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/20">
             <div class="font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(partner, isAr))}</div>
             <div class="mt-0.5 text-xs text-slate-500 break-all">
-              ${String(partner.metaAdId || '').trim() ? `Meta #${Security.escapeHtml(String(partner.metaAdId))}` : `${isAr ? 'المبلغ' : 'Amount'}: $${money}`}
+              ${String(partner.metaAdId || '').trim() ? `Meta #${Security.escapeHtml(String(partner.metaAdId))}` : `${isAr ? 'المبلغ' : 'Amount'}: ${money}`}
               ${dateText ? ` • ${Security.escapeHtml(dateText)}` : ''}
             </div>
           </button>`;
@@ -2696,7 +2718,7 @@ function showAdMergeDialog(keepAdId, draftAdId, triggerButton) {
   closeAdMergeDialog(false);
   _adMergeReturnFocus = triggerButton || document.activeElement;
 
-  const keepAmount = (Number(plan.keepAd.amountUSD) || 0).toFixed(2);
+  const keepAmount = fmtUsd(plan.keepAd.amountUSD);
   const keepReceipts = getAdLinkedReceiptIds(plan.keepAd).length;
   const dialog = document.createElement('div');
   dialog.id = 'ad-merge-dialog';
@@ -2727,7 +2749,7 @@ function showAdMergeDialog(keepAdId, draftAdId, triggerButton) {
           <section class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
             <div class="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">${isAr ? 'سيبقى' : 'Will be kept'}</div>
             <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(plan.keepAd, isAr))}</div>
-            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'المبلغ' : 'Amount'}: $${keepAmount}</div>
+            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'المبلغ' : 'Amount'}: ${keepAmount}</div>
             <div class="text-xs text-slate-600 dark:text-slate-300">${isAr ? `${keepReceipts} وصل مرتبط` : `${keepReceipts} linked receipt${keepReceipts === 1 ? '' : 's'}`}</div>
             <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">${isAr ? 'سيأخذ ربط Meta' : 'Gains the Meta link'}</div>
           </section>

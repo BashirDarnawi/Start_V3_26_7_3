@@ -570,19 +570,19 @@ function renderModal() {
                 <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الميزانية الأصلية' : 'Original planned budget'}</div>
-                    <div class="font-bold">$${stoppedPlannedUSD.toFixed(2)}</div>
+                    <div class="font-bold">${fmtUsd(stoppedPlannedUSD)}</div>
                   </div>
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'المصروف الفعلي النهائي' : 'Final actual spend'}</div>
-                    <div class="font-bold text-orange-700 dark:text-orange-300">$${stoppedFinalUSD.toFixed(2)}</div>
+                    <div class="font-bold text-orange-700 dark:text-orange-300">${fmtUsd(stoppedFinalUSD)}</div>
                   </div>
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'تمويل الوصولات الملتزم' : 'Receipt funding committed'}</div>
-                    <div class="font-bold text-blue-700 dark:text-blue-300">$${stoppedCommittedUSD.toFixed(2)}</div>
+                    <div class="font-bold text-blue-700 dark:text-blue-300">${fmtUsd(stoppedCommittedUSD)}</div>
                   </div>
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الرصيد المُعاد' : 'Balance returned'}</div>
-                    <div class="font-bold text-emerald-700 dark:text-emerald-300">$${stoppedReturnedUSD.toFixed(2)}</div>
+                    <div class="font-bold text-emerald-700 dark:text-emerald-300">${fmtUsd(stoppedReturnedUSD)}</div>
                   </div>
                 </div>
               </div>
@@ -750,8 +750,8 @@ function renderModal() {
                     />
                     ${metaBudget > 0 ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isArAd ? 'تلقائي من Meta — نفس الميزانية المخططة الحقيقية للإعلان' : "Automatic from Meta — the ad's real planned budget"}</span></div>` : ''}
                     ${metaBudgetBlocked ? `<div class="mt-1 flex items-start gap-1 rounded-lg bg-amber-100 p-2 text-[11px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="alert-triangle" class="h-3 w-3 shrink-0 mt-0.5"></i><span>${isArAd
-                      ? `ميزانية Meta ($${metaBudgetRaw.toFixed(2)}) أقل من المبلغ المحجوز على وصولات هذا الإعلان ($${committedUSD.toFixed(2)})، لذلك تُترك الميزانية للتعديل اليدوي. صحّح مبلغ الوصل أو الميزانية في Meta.`
-                      : `Meta's budget ($${metaBudgetRaw.toFixed(2)}) is lower than the money already reserved on this ad's receipts ($${committedUSD.toFixed(2)}), so the budget stays editable. Fix the receipt amount or the budget in Meta.`}</span></div>` : ''}`;
+                      ? `ميزانية Meta (${fmtUsd(metaBudgetRaw)}) أقل من المبلغ المحجوز على وصولات هذا الإعلان (${fmtUsd(committedUSD)})، لذلك تُترك الميزانية للتعديل اليدوي. صحّح مبلغ الوصل أو الميزانية في Meta.`
+                      : `Meta's budget (${fmtUsd(metaBudgetRaw)}) is lower than the money already reserved on this ad's receipts (${fmtUsd(committedUSD)}), so the budget stays editable. Fix the receipt amount or the budget in Meta.`}</span></div>` : ''}`;
                     })()}
                     <input type="hidden" id="ad-driver-budget-rate" value="${Security.escapeHtml(String(adData.exchangeRate || state.defaultExchangeRate || 1))}" />
                     <div id="ad-driver-budget-summary" class="text-[11px] text-violet-600 dark:text-violet-300"></div>
@@ -866,8 +866,8 @@ function renderModal() {
               </div>
               <div id="ad-driver-settlement-hint" class="hidden p-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-xs text-amber-700 dark:text-amber-300">
                 ${isArAd
-                  ? `المبلغ المطلوب تسويته: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
-                  : `Amount to settle: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. Paid receipt funding must total this amount.`}
+                  ? `المبلغ المطلوب تسويته: <strong>${fmtUsd(adSettleTargetUSD)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
+                  : `Amount to settle: <strong>${fmtUsd(adSettleTargetUSD)}</strong>. Paid receipt funding must total this amount.`}
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
@@ -1662,8 +1662,8 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
             <div class="text-xs text-slate-500 mb-1">${isArT ? 'الرصيد المتاح' : 'Available Balance'}</div>
-            <div class="text-lg font-bold text-blue-700 dark:text-blue-200">$${availableUSD.toFixed(2)} USD</div>
-            <div class="text-xs text-slate-500">~ ${(availableUSD * (transferReceipt.exchangeRate || state.defaultExchangeRate || 1)).toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-blue-700 dark:text-blue-200">${fmtUsd(availableUSD)}</div>
+            <div class="text-xs text-slate-500">~ ${fmtLyd((availableUSD * (transferReceipt.exchangeRate || state.defaultExchangeRate || 1)))}</div>
           </div>
 
           ${transferCustomers.length === 0 ? `
@@ -1681,7 +1681,7 @@ function renderModal() {
             <div>
               <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ (USD) *' : 'Amount (USD) *'}</label>
               <input type="text" inputmode="decimal" id="transfer-amount-usd" value="${availableUSD.toFixed(2)}" class="w-full glass-input px-4 py-2 rounded-xl" min="0" max="${availableUSD.toFixed(2)}" oninput="sanitizeMoneyInput(this)" />
-              <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} $${availableUSD.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} ${fmtUsd(availableUSD)}</p>
               </div>
             <div>
               <label class="block text-sm font-medium mb-2">${isArT ? 'ملاحظة (اختياري)' : 'Note (optional)'}</label>
@@ -1700,7 +1700,7 @@ function renderModal() {
                   const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown')));
                   return `<div class="flex justify-between">
                     <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
-                    <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
+                    <span class="font-medium">${fmtUsd((t.amountUSD || 0))} ${isArT ? '←' : '→'} ${name}</span>
                   </div>`;
                 }).join('')}
               </div>
@@ -1733,7 +1733,7 @@ function renderModal() {
           <input type="hidden" id="split-payments-receipt-id" value="${Security.escapeHtml(String(splitReceipt.id || ''))}" />
           <div class="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl">
             <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">${isArS ? 'إجمالي الوصل' : 'Receipt Total'}</div>
-            <div class="text-2xl font-bold text-indigo-600">$${splitReceipt.amountUSD?.toFixed(2)} = ${splitReceipt.amountLocal?.toFixed(2)} LYD</div>
+            <div class="text-2xl font-bold text-indigo-600">${fmtUsd(splitReceipt.amountUSD)} = ${fmtLyd(splitReceipt.amountLocal)}</div>
             <div class="text-xs text-slate-500 mt-1">${isArS ? 'سعر الصرف:' : 'Exchange Rate:'} ${splitReceipt.exchangeRate}</div>
           </div>
 
@@ -1827,17 +1827,17 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${(parseFloat(topUpBase) || 0).toFixed(2)} → ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">$${((parseFloat(topUpBase) || 0) + topUpWorkingTotal).toFixed(2)}</span></div>
+            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: ${fmtUsd((parseFloat(topUpBase) || 0))} ${isArTU ? '←' : '→'} ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">${fmtUsd(((parseFloat(topUpBase) || 0) + topUpWorkingTotal))}</span></div>
             ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
-            ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">$${topUpAvailable.toFixed(2)}</span></div>` : ''}
-            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
+            ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">${fmtUsd(topUpAvailable)}</span></div>` : ''}
+            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: ${fmtUsd(topUpWorkingTotal)}</div>` : ''}
           </div>
 
           <div id="topups-container" class="space-y-2">
             ${existingTopUps.map((topup, idx) => `
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
-                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
+                  <div class="font-medium">${fmtUsd(topup.amount)}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
                   <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
@@ -1893,9 +1893,9 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-rose-50 dark:bg-rose-900/20 rounded-xl">
             <div class="text-sm font-medium text-rose-700 dark:text-rose-300">${isArRf ? 'مبلغ الإعلان' : 'Ad Amount'}</div>
-            <div class="text-2xl font-bold text-rose-600">$${refundAd.amountUSD} (${refundAd.amountLocal} LYD)</div>
+            <div class="text-2xl font-bold text-rose-600">${fmtUsd(refundAd.amountUSD)} (${fmtLyd(refundAd.amountLocal)})</div>
             ${refundAd.refundType && refundAd.refundType !== 'None' ? `
-              <div class="text-xs text-slate-500 mt-2">${isArRf ? 'الاسترجاع الحالي' : 'Current Refund'}: ${trStatus(refundAd.refundType)} - $${refundAd.refundAmount || 0} (${trStatus(refundAd.refundStatus || 'Pending')})</div>
+              <div class="text-xs text-slate-500 mt-2">${isArRf ? 'الاسترجاع الحالي' : 'Current Refund'}: ${trStatus(refundAd.refundType)} - ${fmtUsd(refundAd.refundAmount)} (${trStatus(refundAd.refundStatus || 'Pending')})</div>
             ` : ''}
           </div>
 
@@ -2159,7 +2159,7 @@ function renderModal() {
         if (d === 365 || d === 360) return isRTL ? '/ سنة' : '/ year';
         return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
       };
-      const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
+      const lockMoney = (minor) => walletShow(Math.max(0, Number(minor) || 0), 'LYD');
       const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(${Math.max(0, (Number(lockPlans[0]?.priceMinor) || 0) - lydBalanceMinor)}); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
       // Charge wallet is admin-only outside the Ads Studio: others ask the office.
       const lockCanCharge = isCurrentUserAdmin() || (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL);
@@ -2325,7 +2325,7 @@ function renderModal() {
     case 'wallet-topup': {
       const isArW = state.language === 'ar';
       const topupUser = state.users.find(u => u.id === state.modalData?.userId);
-      const balanceLabel = topupUser ? walletFormatMinor(WALLET.getBalanceMinor(topupUser.id), WALLET.currency) : '';
+      const balanceLabel = topupUser ? walletShow(WALLET.getBalanceMinor(topupUser.id), WALLET.currency) : '';
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
           <i data-lucide="banknote" class="w-6 h-6 text-emerald-600"></i>
@@ -3038,7 +3038,7 @@ async function handleModalSubmit() {
         });
         showNotification(
           isArW ? 'تم الشحن' : 'Credited',
-          isArW ? `تمت إضافة ${walletFormatMinor(tx.amountMinor, tx.currency)} إلى المحفظة.` : `${walletFormatMinor(tx.amountMinor, tx.currency)} added to the wallet.`,
+          isArW ? `تمت إضافة ${walletShow(tx.amountMinor, tx.currency)} إلى المحفظة.` : `${walletShow(tx.amountMinor, tx.currency)} added to the wallet.`,
           'success'
         );
       } catch (e) {
@@ -3419,11 +3419,11 @@ async function handleModalSubmit() {
             isArSubAd ? 'تنبيه' : 'Validation',
             isTerminalSettle
               ? (isArSubAd
-                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) المبلغ المُنفَق المستحق على هذا الإعلان المنتهي ($${requiredSettleUSD.toFixed(2)}).`
-                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal this finished ad's committed spend ($${requiredSettleUSD.toFixed(2)}).`)
+                ? `يجب أن يساوي مجموع تمويل الوصولات (${fmtUsd(totalAllocated)}) المبلغ المُنفَق المستحق على هذا الإعلان المنتهي (${fmtUsd(requiredSettleUSD)}).`
+                : `Receipt funding (${fmtUsd(totalAllocated)}) must equal this finished ad's committed spend (${fmtUsd(requiredSettleUSD)}).`)
               : (isArSubAd
-                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) مبلغ الإعلان غير المدفوع ($${requiredSettleUSD.toFixed(2)}).`
-                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad amount ($${requiredSettleUSD.toFixed(2)}).`),
+                ? `يجب أن يساوي مجموع تمويل الوصولات (${fmtUsd(totalAllocated)}) مبلغ الإعلان غير المدفوع (${fmtUsd(requiredSettleUSD)}).`
+                : `Receipt funding (${fmtUsd(totalAllocated)}) must equal the unpaid ad amount (${fmtUsd(requiredSettleUSD)}).`),
             'error'
           );
           return;
@@ -3477,8 +3477,8 @@ async function handleModalSubmit() {
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ $${shortfall.toFixed(2)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
-                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by $${shortfall.toFixed(2)}. Add a second receipt or choose one with enough balance.`,
+                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ ${fmtUsd(shortfall)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
+                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by ${fmtUsd(shortfall)}. Add a second receipt or choose one with enough balance.`,
               'error'
             );
             return;
@@ -3601,8 +3601,8 @@ async function handleModalSubmit() {
               showNotification(
                 isArSubAd ? 'تنبيه' : 'Validation',
                 isArSubAd
-                  ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
-                  : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
+                  ? `صرف الرصيد المستحق (${fmtUsd(dueAmountToUseUSD)}) يتجاوز المتاح (${fmtUsd(effectiveAvailable)}).`
+                  : `Due credit spend (${fmtUsd(dueAmountToUseUSD)}) exceeds available (${fmtUsd(effectiveAvailable)}).`,
                 'error'
               );
               return;
@@ -3673,8 +3673,8 @@ async function handleModalSubmit() {
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `الصرف المدمج ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
-                : `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+                ? `الصرف المدمج (${fmtUsd(plannedTotal)}) يتجاوز الرصيد المتاح (${fmtUsd(remaining)}) للوصل ${receipt.serialNumber || receipt.id}.`
+                : `Merged spend (${fmtUsd(plannedTotal)}) exceeds available balance (${fmtUsd(remaining)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -3715,8 +3715,8 @@ async function handleModalSubmit() {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isArSubAd
-              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي $${amountUSD.toFixed(2)} من الميزانية المطلوبة $${intendedBudget.toFixed(2)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
-              : `The unpaid receipt does not cover the full difference. Current funding is $${amountUSD.toFixed(2)} of the intended $${intendedBudget.toFixed(2)}. Choose another receipt or enter a smaller budget.`,
+              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي ${fmtUsd(amountUSD)} من الميزانية المطلوبة ${fmtUsd(intendedBudget)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
+              : `The unpaid receipt does not cover the full difference. Current funding is ${fmtUsd(amountUSD)} of the intended ${fmtUsd(intendedBudget)}. Choose another receipt or enter a smaller budget.`,
             'error'
           );
           return;
@@ -3731,8 +3731,8 @@ async function handleModalSubmit() {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isArSubAd
-              ? `إجمالي التمويل ($${fundedTotal.toFixed(2)}) أكبر من ميزانية الإعلان ($${amountUSD.toFixed(2)}).`
-              : `Receipt funding ($${fundedTotal.toFixed(2)}) exceeds the ad budget ($${amountUSD.toFixed(2)}).`,
+              ? `إجمالي التمويل (${fmtUsd(fundedTotal)}) أكبر من ميزانية الإعلان (${fmtUsd(amountUSD)}).`
+              : `Receipt funding (${fmtUsd(fundedTotal)}) exceeds the ad budget (${fmtUsd(amountUSD)}).`,
             'error'
           );
           return;
@@ -4737,7 +4737,7 @@ async function deleteReceipt(id, seen) {
     return;
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
-  const amountUSD = (Number(receipt?.amountUSD) || 0).toFixed(2);
+  const amountUSD = fmtUsd(receipt?.amountUSD);
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
@@ -4767,8 +4767,8 @@ async function deleteReceipt(id, seen) {
     return;
   }
   let warning = isArDel
-    ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
-    : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
+    ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} (${amountUSD})؟`
+    : `Are you sure you want to delete receipt #${serialNo} (${amountUSD})?`;
   if (linkedAds.length > 0) {
     warning += isArDel
       ? `\n\n⚠️ تحذير: ${linkedAds.length} إعلان(ات) ممولة من هذا الوصل. سيتم تنظيف ارتباطات التمويل الخاصة بها.`
@@ -4777,8 +4777,8 @@ async function deleteReceipt(id, seen) {
   if (transferSource) {
     const srcLabel = transferSource.serialNumber || transferSource.id.slice(0, 8);
     warning += isArDel
-      ? `\n\n↩️ هذا وصل محوَّل — سيعود مبلغه ($${amountUSD}) إلى الوصل الأصلي رقم ${srcLabel}.`
-      : `\n\n↩️ This is a transferred-in receipt — its $${amountUSD} will return to source receipt #${srcLabel}.`;
+      ? `\n\n↩️ هذا وصل محوَّل — سيعود مبلغه (${amountUSD}) إلى الوصل الأصلي رقم ${srcLabel}.`
+      : `\n\n↩️ This is a transferred-in receipt — its ${amountUSD} will return to source receipt #${srcLabel}.`;
   }
   if (outgoingTargets.length > 0) {
     warning += isArDel
@@ -4797,7 +4797,7 @@ async function deleteReceipt(id, seen) {
     if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
     if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
-    if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
+    if (returnedTo) detail += isArDel ? ` — عاد ${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — ${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
     if (cascadeCount > 0) detail += isArDel ? ` — تم حذف ${cascadeCount} وصل محوَّل مرتبط` : ` — ${cascadeCount} linked transferred-in receipt(s) deleted`;
     showNotification(isArDel ? 'تم الحذف' : 'Deleted', detail, 'success');
     render();
@@ -4818,26 +4818,26 @@ async function deleteAd(id, seen) {
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
-  const amountUSD = (Number(ad?.amountUSD) || 0).toFixed(2);
+  const amountUSD = fmtUsd(ad?.amountUSD);
   // Say where the money goes: a deleted ad's allocations stop counting, so its funded amount is free again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
     : 0;
   let warning = isAr
-    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}`
-    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}`;
+    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: ${amountUSD}`
+    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: ${amountUSD}`;
   if (fundedUSD > 0) {
     warning += isAr
-      ? `\n\n↩️ سيعود $${fundedUSD.toFixed(2)} إلى رصيد وصل(وصولات) التمويل.`
-      : `\n\n↩️ $${fundedUSD.toFixed(2)} will return to the funding receipt(s) balance.`;
+      ? `\n\n↩️ سيعود ${fmtUsd(fundedUSD)} إلى رصيد وصل(وصولات) التمويل.`
+      : `\n\n↩️ ${fmtUsd(fundedUSD)} will return to the funding receipt(s) balance.`;
   }
   // Unpaid In-Shop: the server takes this ad's debt off the open receipt at once (due rows, else the legacy mirror).
   if (ad?.paymentStatus === 'not_paid' && ad.collectionMethod === 'in_shop' && ad.receiptId) {
     const rows = (Array.isArray(ad.dueAllocations) ? ad.dueAllocations : []).filter(r => r?.receiptId === ad.receiptId);
     const dueUSD = rows.length ? _relinkPoolSum(rows) : Number(ad.dueAmountToUseUSD) || 0;
     if (Math.round(dueUSD * 100) > 0) warning += isAr
-      ? `\n\n↩️ سيُزال دين هذا الإعلان غير المدفوع (حتى $${dueUSD.toFixed(2)}) من وصل العميل المفتوح.`
-      : `\n\n↩️ This ad's unpaid debt (up to $${dueUSD.toFixed(2)}) will be removed from the customer's open receipt.`;
+      ? `\n\n↩️ سيُزال دين هذا الإعلان غير المدفوع (حتى ${fmtUsd(dueUSD)}) من وصل العميل المفتوح.`
+      : `\n\n↩️ This ad's unpaid debt (up to ${fmtUsd(dueUSD)}) will be removed from the customer's open receipt.`;
   }
   warning += isAr
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`

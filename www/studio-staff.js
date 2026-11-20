@@ -1276,7 +1276,7 @@ function renderStudioDeskBrief(request) {
   const rows = [
     [adsStudioText('Goal', 'الهدف'), studioDeskGoal(request).label],
     [adsStudioText('Budget', 'الميزانية'), `${typeof adsStudioBudgetLine === 'function' ? adsStudioBudgetLine(request) : ''}${total ? ` · ${adsStudioText('holds', 'محجوز')} ${studioUsd(total)}` : ''}`],
-    [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} → ${adsStudioFormatDate(request.endDate)}` : ''],
+    [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} ${adsStudioIsAr() ? '←' : '→'} ${adsStudioFormatDate(request.endDate)}` : ''],
     [adsStudioText('Page', 'الصفحة'), text(request.pageName)],
     [adsStudioText('Where', 'المنصات'), list(request.platforms)],
     [adsStudioText('Audience', 'الجمهور'), [list(request.locations), `${Number(request.ageMin) || 18}–${Number(request.ageMax) || 65}`, list(request.genders), list(request.interests)].filter(Boolean).join(' · ')],

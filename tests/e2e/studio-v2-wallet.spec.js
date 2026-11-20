@@ -10,6 +10,7 @@ const {
   openAdminApi,
   projectToken,
   setLanguage,
+  shown,
   signInStudio,
   studioMe
 } = require('./helpers/studio-v2');
@@ -123,8 +124,8 @@ async function openWallet(page, user) {
 async function expectNumbersFromServer(page) {
   const summary = await pageApi(page, '/api/studio/wallet/summary');
   const tiles = { available: summary.usd.availableMinor, reserved: summary.usd.reservedMinor, 'in-ads': summary.usd.inAdsMinor, spent: summary.usd.spentMinor };
-  for (const [key, minor] of Object.entries(tiles)) await expect(page.getByTestId(`studio-wallet-${key}-amount`)).toHaveText(usd(minor));
-  await expect(page.getByTestId('studio-wallet-lyd-amount')).toHaveText(lyd(summary.lyd.balanceMinor, await page.evaluate(() => state.language)));
+  for (const [key, minor] of Object.entries(tiles)) await expect(page.getByTestId(`studio-wallet-${key}-amount`)).toHaveText(shown(usd(minor)));
+  await expect(page.getByTestId('studio-wallet-lyd-amount')).toHaveText(shown(lyd(summary.lyd.balanceMinor, await page.evaluate(() => state.language))));
   return summary;
 }
 
@@ -165,14 +166,14 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
     await expect(page.getByTestId('studio-wallet-add-step')).toHaveText('Step 1 of 4: Purpose');
     await page.getByTestId('studio-wallet-purpose-ads').click();
     await expect(page.getByTestId('studio-wallet-add-step')).toHaveText('Step 2 of 4: Amount');
-    for (const minor of [1000, 2500, 5000, 10000]) await expect(page.getByTestId(`studio-wallet-preset-${minor}`)).toHaveText(usd(minor));
+    for (const minor of [1000, 2500, 5000, 10000]) await expect(page.getByTestId(`studio-wallet-preset-${minor}`)).toHaveText(shown(usd(minor)));
     await page.getByTestId('studio-wallet-add-next').click();
     await expect(page.locator('#studio-wallet-add-error')).toHaveText('Choose or type an amount.');
     await page.getByTestId('studio-wallet-preset-2500').click();
     await expect(page.getByTestId('studio-wallet-preset-2500')).toHaveAttribute('aria-pressed', 'true');
     const { rate } = await pageApi(page, '/api/wallet/payment-requests/methods');
     expect(rate && rate.usdToLyd, 'a dollar rate exists').toBeGreaterThan(0);
-    await expect(page.locator('#studio-wallet-amount-help')).toHaveText(`= $25.00 · about ${lyd(lydFor(2500, rate.usdToLyd))} at today's rate (estimate)`);
+    await expect(page.locator('#studio-wallet-amount-help')).toHaveText(shown(`= $25.00 · about ${lyd(lydFor(2500, rate.usdToLyd))} at today's rate (estimate)`));
     await page.getByTestId('studio-wallet-add-next').click();
     await expect(page.getByTestId('studio-wallet-add-step')).toHaveText('Step 3 of 4: Method');
     await page.getByTestId('studio-wallet-method-adfali').click();
@@ -193,7 +194,7 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
     const row = mine[0].data;
     expect([row.reference, row.amountMinor, row.currency, row.method, row.status]).toEqual([reference, 2500, 'USD', 'adfali', 'pending']);
     await expect(page.getByTestId('studio-wallet-created-amount')).toHaveText('$25.00');
-    await expect(page.getByTestId('studio-wallet-created-lyd')).toHaveText(lyd(row.amountMinorLYD));
+    await expect(page.getByTestId('studio-wallet-created-lyd')).toHaveText(shown(lyd(row.amountMinorLYD)));
     await expect(page.getByTestId('studio-wallet-created-instruction')).toHaveText(
       `Pay ${grouped(row.amountMinorLYD)} LYD via Adfali and keep the code ${reference} in the payment note.`);
 
@@ -215,7 +216,7 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
     });
     await page.getByTestId('studio-wallet-refresh').click();
     await expect(page.getByTestId('studio-wallet-pending-item')).toHaveCount(0);
-    await expect(page.getByTestId('studio-wallet-available-amount')).toHaveText(usd(before.usd.availableMinor + 2500));
+    await expect(page.getByTestId('studio-wallet-available-amount')).toHaveText(shown(usd(before.usd.availableMinor + 2500)));
     await expectNumbersFromServer(page);
     await expect(page.getByTestId('studio-wallet-history-item').first()).toContainText('Added to your wallet');
     await expectNoPageOverflow(page, 'wallet after a confirmed payment');
@@ -283,7 +284,7 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
     await expectNumbersFromServer(page);
 
     await setLanguage(page, 'ar');
-    await expect(page.getByTestId('studio-wallet-meta-used')).toHaveText(/^استخدمت ميتا \$3\.40 حتى الآن/);
+    await expect(page.getByTestId('studio-wallet-meta-used')).toHaveText(/^استخدمت ميتا ⁦?\$3\.40⁩? حتى الآن/);
     await expect(page.getByTestId('studio-v2-frame')).toHaveAttribute('dir', 'rtl');
     await expectNoPageOverflow(page, 'wallet with an ad (AR)');
     expect(errors).toEqual([]);
@@ -299,20 +300,20 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
     await openWallet(page, users.plan);
     await setLanguage(page, 'ar');
     await expect(page.getByTestId('studio-wallet-lyd')).toContainText('رصيد الاشتراك (بالدينار)');
-    await expect(page.getByTestId('studio-wallet-lyd-amount')).toHaveText(/ د\.ل$/);
+    await expect(page.getByTestId('studio-wallet-lyd-amount')).toHaveText(/ د\.ل⁩?$/);
 
     await page.getByTestId('studio-wallet-add-lyd').click();
     await expect(page.getByTestId('studio-wallet-add-step')).toHaveText('الخطوة 2 من 4: المبلغ');
     await page.locator('#studio-wallet-amount').fill('٥٠');
-    await expect(page.locator('#studio-wallet-amount-help')).toHaveText('= 50.00 د.ل');
+    await expect(page.locator('#studio-wallet-amount-help')).toHaveText(shown('= 50.00 د.ل'));
     await page.getByTestId('studio-wallet-add-next').click();
     await page.getByTestId('studio-wallet-method-bank_transfer').click();
-    await expect(page.getByTestId('studio-wallet-confirm-amount')).toHaveText('50.00 د.ل');
+    await expect(page.getByTestId('studio-wallet-confirm-amount')).toHaveText(shown('50.00 د.ل'));
     await expect(page.getByTestId('studio-wallet-confirm-lyd')).toHaveCount(0);
     await expect(page.getByTestId('studio-wallet-confirm')).not.toContainText('$');
     await page.getByTestId('studio-wallet-create').click();
     await expect(page.getByTestId('studio-wallet-created')).toBeVisible();
-    await expect(page.getByTestId('studio-wallet-created-amount')).toHaveText('50.00 د.ل');
+    await expect(page.getByTestId('studio-wallet-created-amount')).toHaveText(shown('50.00 د.ل'));
     await expect(page.getByTestId('studio-wallet-created')).not.toContainText('$');
     await expect(page.getByTestId('studio-wallet-created').getByTestId('studio-wallet-receipt')).toBeVisible();
     const reference = (await page.getByTestId('studio-wallet-created-reference').innerText()).trim();

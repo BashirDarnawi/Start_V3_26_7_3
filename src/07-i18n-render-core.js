@@ -200,11 +200,28 @@ const STATUS_TRANSLATIONS_AR = {
 function fmt2(value) {
   return (Number(value) || 0).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ',');
 }
-function fmtUsd(value) {
-  return `$${fmt2(value)}`;
+// An Arabic page reads right to left, and the browser's own rules would then draw "$35.00" as "35.00$",
+// "-12.50" as "12.50-" and, inside a left-to-right box, د.ل on the wrong side of its number. So in Arabic every
+// amount is one piece with its own direction: U+2066 starts a left-to-right piece, U+2067 a right-to-left one,
+// U+2069 ends it (the same invisible marks the delivery message already puts around a phone number).
+function moneyPiece(text, rtl) {
+  return state.language === 'ar' ? `${rtl ? '\u2067' : '\u2066'}${text}\u2069` : text;
 }
-function fmtLyd(value) {
-  return `${fmt2(value)} ${state.language === 'ar' ? 'د.ل' : 'LYD'}`;
+// A record number or a code in a line of text is one left-to-right piece too ("#D12", never "D12#"). In markup,
+// <bdi> or dir="ltr" does the same.
+function codePiece(text) {
+  return moneyPiece(text);
+}
+// sign: '+' or '-' in front of the amount ("+$5.00"); a negative value brings its own minus ("-$12.50", never "$-12.50").
+function fmtUsd(value, sign = '') {
+  const text = fmt2(value);
+  return moneyPiece(text[0] === '-' ? `-$${text.slice(1)}` : `${sign}$${text}`);
+}
+// English "1,250.00 LYD"; Arabic reads the number first and then د.ل, which is drawn on its left.
+function fmtLyd(value, sign = '') {
+  const text = sign + fmt2(value);
+  if (state.language !== 'ar') return `${text} LYD`;
+  return moneyPiece(`${/^[+-]/.test(text) ? moneyPiece(text) : text} د.ل`, true);
 }
 // One way of writing dates (DESIGN.md 5.4): "19 Nov 2026", with a time "19 Nov 2026, 12:33"; the
 // same order in Arabic, with the Western digits and Gregorian months the app already pins.

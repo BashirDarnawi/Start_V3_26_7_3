@@ -63,7 +63,14 @@ function controlCenterTimestamp(value) {
 
 // One way of writing money on this screen: thousands separator, two decimals, the currency always shown.
 function controlCenterLyd(value) {
-  return `${controlCenterMoney(value)} ${ccText('LYD', 'د.ل')}`;
+  return controlCenterPiece(`${controlCenterMoney(value)} ${ccText('LYD', 'د.ل')}`, true);
+}
+function controlCenterUsd(value) {
+  return controlCenterPiece(`$${controlCenterMoney(value)}`);
+}
+// In Arabic an amount is one piece with its own direction (moneyPiece, 07); this file also runs alone in its tests.
+function controlCenterPiece(text, rtl) {
+  return typeof moneyPiece === 'function' ? moneyPiece(text, rtl) : text;
 }
 
 function controlCenterLocale() {
@@ -226,7 +233,7 @@ function getControlCenterAttention(today, studio) {
       ccText('Money customers still owe.', 'مبالغ لا تزال مستحقة على العملاء.'),
       ccText('Open receipts', 'فتح الوصولات'), 'controlCenterOpenReceipts()'),
     line('unpriced-spend', unpriced > 0.005 ? 1 : 0, 'rose',
-      ccText(`$${controlCenterMoney(unpriced)} of Meta spend has no purchase cost`, `إنفاق ميتا بقيمة ${controlCenterMoney(unpriced)} دولار دون تكلفة شراء مسجلة`),
+      ccText(`${controlCenterUsd(unpriced)} of Meta spend has no purchase cost`, `إنفاق ميتا بقيمة ${controlCenterUsd(unpriced)} دون تكلفة شراء مسجلة`),
       ccText('Record the real dollar purchase so profit is not guessed.', 'سجّل التكلفة الفعلية لشراء الدولار حتى لا يُحسب الربح بالتخمين.'),
       ccText('Fix profit data', 'استكمال بيانات الربح'), "navigateTo('analytics')", 'circle-dollar-sign'),
     line('meta-duplicates', facts.metaDuplicates.length, 'amber',
@@ -815,7 +822,7 @@ function renderControlCenterCheck(check) {
   // A check this screen does not know yet: the server's own sentence, with its count.
   for (const item of found.values()) lines.push(`<li><span class="management-attention-count is-warning"><bdi>${Number(item?.count) || 0}</bdi></span><span class="management-attention-text"><strong>${Security.escapeHtml(controlCenterBlockerName(item))}</strong></span></li>`);
   const totals = check.totals || {};
-  const total = (label, value) => `<div><dt>${label}</dt><dd><bdi>$${controlCenterMoney(value)}</bdi></dd></div>`;
+  const total = (label, value) => `<div><dt>${label}</dt><dd><bdi>${controlCenterUsd(value)}</bdi></dd></div>`;
   return `
     <div class="management-check" role="status" data-month-check="${Security.escapeHtml(check.period)}">
       <h3>${Security.escapeHtml(controlCenterMonthName(check.period))}: ${check.blockers.length ? ccText('items to review before closing', 'عناصر للمراجعة قبل الإقفال') : ccText('no closing problems found', 'لا توجد مشاكل تمنع الإقفال')}</h3>
@@ -956,7 +963,7 @@ function renderControlCenterToday(server) {
     : `<div class="management-empty"><i data-lucide="circle-check" class="h-9 w-9"></i><h3>${ccText('Nothing needs you right now.', 'لا شيء يحتاجك الآن.')}</h3><p>${ccText(`Checked at ${checkedAt}`, `آخر فحص ${checkedAt}`)}</p></div>`;
   const month = today.month;
   const monthName = (() => { try { return month.now.toLocaleDateString(controlCenterLocale(), { month: 'long', year: 'numeric' }); } catch (_) { return ''; } })();
-  const versus = month.pct === null ? ccText('first month on record', 'أول شهر مُسجَّل') : ccText(`${month.pct >= 0 ? '+' : ''}${month.pct}% vs last month`, `${month.pct >= 0 ? '+' : ''}${month.pct}% مقابل الشهر الماضي`);
+  const versus = month.pct === null ? ccText('first month on record', 'أول شهر مُسجَّل') : ccText(`${month.pct >= 0 ? '+' : ''}${month.pct}% vs last month`, `\u2066${month.pct >= 0 ? '+' : ''}${month.pct}%\u2069 مقابل الشهر الماضي`);
   const figure = (label, value, note, open) => `<button type="button" onclick="${open}" class="management-figure"><span>${label}</span><strong><bdi>${Security.escapeHtml(value)}</bdi></strong><small>${Security.escapeHtml(note)}</small></button>`;
   const system = server ? getControlCenterSystem() : null;
   const ready = system ? system.connections.filter(item => item.ok).length : 0;

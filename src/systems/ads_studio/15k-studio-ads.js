@@ -331,7 +331,7 @@ function renderStudioAdsBrief(request) {
     [adsStudioText('Budget', 'الميزانية'), studioAdsBudgetText(request)],
     [adsStudioText('Page', 'الصفحة'), String(request.pageName || '')],
     [adsStudioText('Where', 'المنصات'), platforms],
-    [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} → ${adsStudioFormatDate(request.endDate)}` : (days ? adsStudioDaysText(days) : '')],
+    [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} ${adsStudioIsAr() ? '←' : '→'} ${adsStudioFormatDate(request.endDate)}` : (days ? adsStudioDaysText(days) : '')],
     [adsStudioText('Ad text', 'نص الإعلان'), String(request.primaryText || '')]
   ].filter(([, value]) => value);
   if (!rows.length) return '';

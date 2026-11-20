@@ -809,13 +809,13 @@ function openAdMergePicker(adId, triggerButton) {
       <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-2">
         ${entry.partners.map(partner => {
           const ids = pairFor(partner);
-          const money = (Number(partner.amountUSD) || 0).toFixed(2);
+          const money = fmtUsd(partner.amountUSD);
           const when = partner.startDate ? new Date(partner.startDate) : null;
           const dateText = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString(appDateLocale()) : '';
           return `<button type="button" onclick="showAdMergeDialog('${Security.escapeHtml(ids.keepId)}','${Security.escapeHtml(ids.draftId)}', this)" class="w-full text-start rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 hover:border-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/20">
             <div class="font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(partner, isAr))}</div>
             <div class="mt-0.5 text-xs text-slate-500 break-all">
-              ${String(partner.metaAdId || '').trim() ? `Meta #${Security.escapeHtml(String(partner.metaAdId))}` : `${isAr ? 'المبلغ' : 'Amount'}: $${money}`}
+              ${String(partner.metaAdId || '').trim() ? `Meta #${Security.escapeHtml(String(partner.metaAdId))}` : `${isAr ? 'المبلغ' : 'Amount'}: ${money}`}
               ${dateText ? ` • ${Security.escapeHtml(dateText)}` : ''}
             </div>
           </button>`;
@@ -899,7 +899,7 @@ function showAdMergeDialog(keepAdId, draftAdId, triggerButton) {
   closeAdMergeDialog(false);
   _adMergeReturnFocus = triggerButton || document.activeElement;
 
-  const keepAmount = (Number(plan.keepAd.amountUSD) || 0).toFixed(2);
+  const keepAmount = fmtUsd(plan.keepAd.amountUSD);
   const keepReceipts = getAdLinkedReceiptIds(plan.keepAd).length;
   const dialog = document.createElement('div');
   dialog.id = 'ad-merge-dialog';
@@ -930,7 +930,7 @@ function showAdMergeDialog(keepAdId, draftAdId, triggerButton) {
           <section class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
             <div class="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">${isAr ? 'سيبقى' : 'Will be kept'}</div>
             <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(plan.keepAd, isAr))}</div>
-            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'المبلغ' : 'Amount'}: $${keepAmount}</div>
+            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'المبلغ' : 'Amount'}: ${keepAmount}</div>
             <div class="text-xs text-slate-600 dark:text-slate-300">${isAr ? `${keepReceipts} وصل مرتبط` : `${keepReceipts} linked receipt${keepReceipts === 1 ? '' : 's'}`}</div>
             <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">${isAr ? 'سيأخذ ربط Meta' : 'Gains the Meta link'}</div>
           </section>

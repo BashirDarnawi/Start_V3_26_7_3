@@ -6789,11 +6789,28 @@ const STATUS_TRANSLATIONS_AR = {
 function fmt2(value) {
   return (Number(value) || 0).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ',');
 }
-function fmtUsd(value) {
-  return `$${fmt2(value)}`;
+// An Arabic page reads right to left, and the browser's own rules would then draw "$35.00" as "35.00$",
+// "-12.50" as "12.50-" and, inside a left-to-right box, د.ل on the wrong side of its number. So in Arabic every
+// amount is one piece with its own direction: U+2066 starts a left-to-right piece, U+2067 a right-to-left one,
+// U+2069 ends it (the same invisible marks the delivery message already puts around a phone number).
+function moneyPiece(text, rtl) {
+  return state.language === 'ar' ? `${rtl ? '\u2067' : '\u2066'}${text}\u2069` : text;
 }
-function fmtLyd(value) {
-  return `${fmt2(value)} ${state.language === 'ar' ? 'د.ل' : 'LYD'}`;
+// A record number or a code in a line of text is one left-to-right piece too ("#D12", never "D12#"). In markup,
+// <bdi> or dir="ltr" does the same.
+function codePiece(text) {
+  return moneyPiece(text);
+}
+// sign: '+' or '-' in front of the amount ("+$5.00"); a negative value brings its own minus ("-$12.50", never "$-12.50").
+function fmtUsd(value, sign = '') {
+  const text = fmt2(value);
+  return moneyPiece(text[0] === '-' ? `-$${text.slice(1)}` : `${sign}$${text}`);
+}
+// English "1,250.00 LYD"; Arabic reads the number first and then د.ل, which is drawn on its left.
+function fmtLyd(value, sign = '') {
+  const text = sign + fmt2(value);
+  if (state.language !== 'ar') return `${text} LYD`;
+  return moneyPiece(`${/^[+-]/.test(text) ? moneyPiece(text) : text} د.ل`, true);
 }
 // One way of writing dates (DESIGN.md 5.4): "19 Nov 2026", with a time "19 Nov 2026, 12:33"; the
 // same order in Arabic, with the Western digits and Gregorian months the app already pins.
@@ -17240,23 +17257,23 @@ function renderAnalyticsView() {
           <div class="flex items-start justify-between relative">
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'إيراد الإعلانات (مدفوع)' : 'Ad Revenue (Paid)'}</p>
-              <p class="text-2xl font-bold text-slate-800 dark:text-white">$${paidAdRevenue.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">${isAr ? 'قيد الانتظار' : 'Pending'}: $${unpaidAdRevenue.toFixed(2)}</p>
+              <p class="text-2xl font-bold text-slate-800 dark:text-white">${fmtUsd(paidAdRevenue)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isAr ? 'قيد الانتظار' : 'Pending'}: ${fmtUsd(unpaidAdRevenue)}</p>
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg">
               <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </button>
-        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('receipts-volume')")}
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', fmtUsd(totalReceiptsUSD), 'file-text', 'from-indigo-500 to-purple-600', "if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('receipts-volume')")}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
-              <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>` : ''}
+              <p class="text-2xl font-bold text-slate-800 dark:text-white">${fmtUsd(availableReceiptBalance)}</p>
+              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: ${fmtUsd(totalUsedFromReceipts)} / ${isAr ? 'مدفوع' : 'Paid'}: ${fmtUsd(paidUSD)}</p>` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
@@ -17276,8 +17293,8 @@ function renderAnalyticsView() {
               </div>
               ${canViewSensitive ? `
               <div class="flex items-center space-x-3 mt-2 text-xs">
-                <span class="text-emerald-600 font-medium">✓ $${collectedUSD.toFixed(0)}</span>
-                <span class="text-amber-600 font-medium">○ $${notCollectedUSD.toFixed(0)}</span>
+                <span class="text-emerald-600 font-medium">✓ ${fmtUsd(collectedUSD)}</span>
+                <span class="text-amber-600 font-medium">○ ${fmtUsd(notCollectedUSD)}</span>
               </div>
               ` : ''}
             </div>
@@ -17341,25 +17358,25 @@ function renderAnalyticsView() {
         <div class="grid grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'نقد جديد مُحصَّل' : 'New money collected'}</p>
-            <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">$${liquidity.collectedUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">${fmtUsd(liquidity.collectedUSD)}</p>
           </div>
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'صُرف على إعلانات جديدة' : 'Spent on new ads'}</p>
-            <p class="text-xl font-bold text-rose-600 dark:text-rose-400">$${liquidity.adSpendUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold text-rose-600 dark:text-rose-400">${fmtUsd(liquidity.adSpendUSD)}</p>
           </div>
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'صافي النقد الجديد' : 'Net new cash'}</p>
-            <p class="text-xl font-bold ${liquidity.netUSD >= 0 ? 'text-slate-800 dark:text-white' : 'text-rose-600 dark:text-rose-400'}">$${liquidity.netUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold ${liquidity.netUSD >= 0 ? 'text-slate-800 dark:text-white' : 'text-rose-600 dark:text-rose-400'}">${fmtUsd(liquidity.netUSD)}</p>
           </div>
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'المستحق لكل العملاء' : 'Owed to all customers'}</p>
-            <p class="text-xl font-bold text-indigo-600 dark:text-indigo-400">$${liquidity.liabilityUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold text-indigo-600 dark:text-indigo-400">${fmtUsd(liquidity.liabilityUSD)}</p>
           </div>
         </div>
         <div>
           <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
             <span>${isAr ? 'نسبة التغطية' : 'Coverage'}: ${liquidity.coveragePercent.toFixed(1)}%</span>
-            ${liquidity.shortfallUSD > 0.005 ? `<span class="font-semibold text-rose-600">${isAr ? 'العجز المتبقي' : 'Still uncovered'}: $${liquidity.shortfallUSD.toFixed(2)}</span>` : `<span class="font-semibold text-emerald-600">${isAr ? 'مُغطّى بالكامل' : 'Fully covered'}</span>`}
+            ${liquidity.shortfallUSD > 0.005 ? `<span class="font-semibold text-rose-600">${isAr ? 'العجز المتبقي' : 'Still uncovered'}: ${fmtUsd(liquidity.shortfallUSD)}</span>` : `<span class="font-semibold text-emerald-600">${isAr ? 'مُغطّى بالكامل' : 'Fully covered'}</span>`}
           </div>
           <div class="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
             <div class="h-full rounded-full transition-all duration-500 ${covered ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : (halfway ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'bg-gradient-to-r from-rose-500 to-red-600')}" style="width: ${Math.min(liquidity.coveragePercent, 100)}%"></div>
@@ -17447,7 +17464,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(c.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">${c.spend.toFixed(2)} USD</p>
+                    <p class="text-[11px] text-slate-500">${fmtUsd(c.spend)}</p>
                   </div>
                   <span class="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">${isAr ? 'الأعلى' : 'Top'}</span>
                 </div>
@@ -17488,7 +17505,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">${canViewFinancials ? `$${(Number(item.value) || 0).toFixed(2)} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
+                    <p class="text-[11px] text-slate-500">${canViewFinancials ? `${fmtUsd((Number(item.value) || 0))} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
                   <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
                 </div>
@@ -17525,7 +17542,7 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
 
 function renderProgress(label, value, max, colorClass) {
   const percentage = max > 0 ? Math.min((value / max) * 100, 100) : 0;
-  const displayValue = typeof value === 'number' ? (value >= 1000 ? '$' + value.toFixed(0) : '$' + value.toFixed(2)) : value;
+  const displayValue = typeof value === 'number' ? fmtUsd(value) : value;  // two decimals always (before: "$2375" beside "$937.50")
   return `
     <div class="mt-3">
       <div class="flex justify-between text-xs mb-1">
@@ -17671,7 +17688,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
               <div class="flex justify-between items-start mb-4">
                 <div class="flex-1">
                   <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 text-xs font-bold">#${displayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 text-xs font-bold" dir="ltr">#${displayNum}</span>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</h3>
                   </div>
                   <div class="flex min-w-0 flex-wrap items-center gap-2 mt-1">
@@ -17732,15 +17749,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                            6411 balance while 6411.10 was actually owed. -->
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${fmt2(stats.totalSpentLYD)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="customer-money-cell font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">${fmt2(stats.totalPaidLYD)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="customer-money-cell font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${moneyPiece((stats.balanceLYD >= 0 ? '+' : '') + fmt2(stats.balanceLYD))}</div>
                       </div>
                     </div>
                   </div>
@@ -17750,15 +17767,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${fmtUsd(stats.totalSpentUSD)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="customer-money-cell font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">${fmtUsd(stats.totalPaidUSD)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceUSD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="customer-money-cell font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${fmtUsd(stats.balanceUSD, '+')}</div>
                       </div>
                     </div>
                   </div>
@@ -17766,14 +17783,14 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <!-- Uncommitted Not Paid receipt debt (already inside Balance; Spent stays ads-only) -->
                   <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">
                     <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
-                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(2)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
+                    <span dir="ltr">${fmtLyd(stats.receiptDebtLYD)} · ${fmtUsd(stats.receiptDebtUSD)}</span>
                   </div>
                   ` : ''}
                   ${(stats.companyFundedUSD > 0.005) ? `
                   <!-- Debt already absorbed by company funds (credited inside Balance; not customer money, not revenue) -->
                   <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-violet-700 dark:text-violet-300">
                     <span class="inline-flex items-center gap-1"><i data-lucide="landmark" class="w-3 h-3"></i>${isAr ? 'غطته الشركة' : 'Company covered'}</span>
-                    <span dir="ltr">$${stats.companyFundedUSD.toFixed(2)}</span>
+                    <span dir="ltr">${fmtUsd(stats.companyFundedUSD)}</span>
                   </div>
                   ` : ''}
                   ${(coverableDebtReceipts.length || coverableAdDebtUSD > 0.005) ? `
@@ -17785,7 +17802,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     class="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2">
                     <i data-lucide="landmark" class="w-4 h-4"></i>
                     <span>${isAr ? 'سداد الدين من أموال الشركة' : 'Pay debt from company funds'}</span>
-                    <span dir="ltr">($${coverableDebtUSD.toFixed(2)})</span>
+                    <span dir="ltr">(${fmtUsd(coverableDebtUSD)})</span>
                   </button>
                   ` : ''}
                 </div>
@@ -17902,8 +17919,8 @@ function renderCustomersView() {
       <div class="grid ${canSeeCustomerBalances ? 'grid-cols-2 sm:grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
-        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', Math.round(totalDebts).toLocaleString('en-US') + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
-        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', Math.round(totalRevenue).toLocaleString('en-US') + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
+        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', fmtLyd(totalDebts), 'alert-circle', 'from-rose-500 to-pink-600')}
+        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', fmtLyd(totalRevenue), 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
         ` : ''}
       </div>
 
@@ -17998,7 +18015,7 @@ function renderReceiptsView() {
     ? allReceipts.find(receipt => String(receipt?.id || '') === receiptRecordFilter)
     : null;
   const filteredReceiptNumber = String(filteredReceipt?.finalReceiptNo || filteredReceipt?.serialNumber || filteredReceipt?.tempReceiptNo || '').trim();
-  const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? `#${filteredReceiptNumber}` : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
+  const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? codePiece(`#${filteredReceiptNumber}`) : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
   // ONE ads pass for the whole card list, instead of a fresh scan per card.
   // Deliberately built from getVisibleRecords (soft-delete only, NOT
   // permission-scoped): receipt money must never change with who is looking.
@@ -18346,7 +18363,7 @@ function renderReceiptsView() {
               <div class="flex justify-between items-start">
                 <div>
                   <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-300 text-xs font-bold">#${receiptDisplayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-300 text-xs font-bold" dir="ltr">#${receiptDisplayNum}</span>
                     <h3 class="text-lg font-bold text-rose-700 dark:text-rose-300">${isArV ? 'وصل تالف' : 'Destroyed Receipt'}</h3>
                   </div>
                   ${displayFinalNo ? `<p class="text-sm font-mono font-bold text-slate-700 dark:text-slate-200 mt-1">${isArV ? 'الرقم المقفول' : 'Locked number'}: ${Security.escapeHtml(String(displayFinalNo))}</p>` : ''}
@@ -18367,7 +18384,7 @@ function renderReceiptsView() {
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold">#${receiptDisplayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold" dir="ltr">#${receiptDisplayNum}</span>
                   <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || receipt.customerName || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
                   </div>
                   ${(displayTempNo || displayFinalNo) ? `
@@ -18383,7 +18400,7 @@ function renderReceiptsView() {
                     </span>
                     <span class="inline-flex items-center gap-1" title="${receiptUsageTitle}">
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
-                      <span>${receiptUsageLabel}: <span class="font-semibold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${displayedUsedUSD.toFixed(2)}</span> ${receiptUsedLabel} • <span class="font-semibold text-blue-600">$${displayedRemainingUSD.toFixed(2)}</span> ${receiptRemainingLabel} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
+                      <span>${receiptUsageLabel}: <span class="font-semibold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${fmtUsd(displayedUsedUSD)}</span> ${receiptUsedLabel} • <span class="font-semibold text-blue-600">${fmtUsd(displayedRemainingUSD)}</span> ${receiptRemainingLabel} <span class="text-slate-400">(${fmtLyd(remainingLYD)})</span></span>
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
@@ -18415,13 +18432,13 @@ function renderReceiptsView() {
                   ` : ''}
                 </div>
                 <div class="text-right" ${hasCustomerDebt ? 'data-receipt-linked-debt="true"' : ''}>
-                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
-                  <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
+                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${fmtUsd((hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)))}</div>
+                  <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${fmtLyd((hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)))}</div>
                   ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 dark:text-rose-400 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult && (hasCustomerDebt || receipt.paymentResult !== 'UNDERPAID') ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600 dark:text-rose-400' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
-                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(2)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${_deliveryRemainingLocal(receipt, collectionTarget.amountLocal).toFixed(2)} LYD`}
+                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} ${fmtLyd(Number(receipt.overpaidAmount || 0), '+')}` : `${isArV ? 'المتبقي' : 'Remaining'} ${fmtLyd(_deliveryRemainingLocal(receipt, collectionTarget.amountLocal))}`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
@@ -18438,7 +18455,7 @@ function renderReceiptsView() {
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
                     return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
-                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(2)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${fmtLyd((Number(feeCollectedRaw) || 0))} <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
                     </div>`;
                   })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
@@ -18447,8 +18464,8 @@ function renderReceiptsView() {
 
               <div class="space-y-2 mb-4 text-sm border-t border-b border-slate-200 dark:border-slate-700 py-3">
                 <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${Number(receipt.exchangeRate || state.defaultExchangeRate || 0).toFixed(2)}</span></div>
-                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
-                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
+                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">${fmtLyd(receipt.officeFee, '+')}</span></div>` : ''}
+                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">${fmtLyd(receipt.discount, '-')}</span></div>` : ''}
               </div>
 
               ${hasMultiplePayments ? `
@@ -18469,14 +18486,14 @@ function renderReceiptsView() {
                           ${payment.deliveryPersonId ? `<div class="no-print text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
                         </div>
                         <div class="text-right">
-                          <div class="font-bold text-indigo-600">${r1.toFixed(2)} LYD</div>
+                          <div class="font-bold text-indigo-600">${fmtLyd(r1)}</div>
                           ${payment.rate ? `<div class="text-xs text-slate-500">@ ${payment.rate}</div>` : ''}
                         </div>
                       </div>
                     `}).join('')}
                   </div>
                   <div class="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700 flex justify-between font-bold text-emerald-600">
-                    <span>${isArV ? 'إجمالي المدفوع' : 'Total Paid'}:</span><span>${totalPaid.toFixed(2)} LYD</span>
+                    <span>${isArV ? 'إجمالي المدفوع' : 'Total Paid'}:</span><span>${fmtLyd(totalPaid)}</span>
                   </div>
                 </div>
               ` : `
@@ -18507,7 +18524,7 @@ function renderReceiptsView() {
                     <div class="col-span-2 flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40">
                       <div class="text-xs text-slate-600 dark:text-slate-300 flex items-center space-x-2">
                         <i data-lucide="swap" class="w-3 h-3"></i>
-                        <span>${isArV ? 'المُحوَّل' : 'Transferred'}: $${usage.transferredUSD.toFixed(2)}</span>
+                        <span>${isArV ? 'المُحوَّل' : 'Transferred'}: ${fmtUsd(usage.transferredUSD)}</span>
                         ${hasTransfers && lastTransferName ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-100">${isArV ? 'الأخير' : 'Last'}: ${lastTransferName}</span>` : ''}
                       </div>
                       <div class="flex items-center space-x-3">
@@ -18554,12 +18571,12 @@ function renderReceiptsView() {
                 </div>
                 ${receipt.collected ? `
                   <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 text-xs">
-                    <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${collectedLYD.toFixed(2)} LYD</span></span>
-                    ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${leftLYD.toFixed(2)} LYD</span></span>` : ''}
+                    <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${fmtLyd(collectedLYD)}</span></span>
+                    ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${fmtLyd(leftLYD)}</span></span>` : ''}
                   </div>
                   ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
                     <div class="flex flex-wrap gap-1 mt-1">
-                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${(Number(p.amount) || 0).toFixed(2)} LYD</span>`).join('')}
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${fmtLyd((Number(p.amount) || 0))}</span>`).join('')}
                     </div>
                   ` : ''}
                 ` : ''}
@@ -18576,8 +18593,8 @@ function renderReceiptsView() {
                       </div>
                       <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">
                         ${isArV ? 'دين العميل المتبقي:' : 'Customer debt remaining:'}
-                        <span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
-                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>${isArV ? 'غطته الشركة:' : 'Company covered:'} <span dir="ltr" class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
+                        <span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">${fmtUsd(companyCoverableOutstandingUSD)}</span>
+                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>${isArV ? 'غطته الشركة:' : 'Company covered:'} <span dir="ltr" class="font-bold text-violet-700 dark:text-violet-300">${fmtUsd(companyCoveredUSD)}</span>` : ''}
                       </div>
                       <p class="mt-1 text-[11px] leading-4 text-violet-700 dark:text-violet-300">
                         ${isArV ? 'مصروف تجاري فقط — ليس دفعة من العميل وليس إيراداً.' : 'Business expense only &mdash; not a customer payment and not revenue.'}
@@ -18788,7 +18805,7 @@ function renderPagesView() {
               <div class="flex justify-between items-start mb-4">
                 <div class="flex-1">
                   <div class="flex items-center gap-2 mb-1">
-                    <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold">#${pageDisplayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold" dir="ltr">#${pageDisplayNum}</span>
                     ${isMetaImportedPage ? `<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>` : ''}
                     ${needsPageOwner ? `<span class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold">${isAr ? 'يحتاج مالك' : 'Needs owner'}</span>` : ''}
                     ${duplicatePageIds.has(String(p.id)) ? `<button type="button" data-action="view-page-duplicates" data-page-id="${Security.escapeHtml(String(p.id))}" onclick="showPageDuplicates(this.dataset.pageId, this)" class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold inline-flex items-center gap-1 hover:bg-amber-200 dark:hover:bg-amber-900/60" aria-haspopup="dialog" title="${isAr ? 'توجد صفحة أخرى بنفس الاسم' : 'Another page has the same name'}"><i data-lucide="copy" class="w-3 h-3"></i>${isAr ? 'مكرر' : 'Duplicate'}</button>` : ''}
@@ -18860,8 +18877,8 @@ function renderPagesView() {
                       <div>
                         <div class="text-slate-500 mb-1">${isAr ? 'إجمالي الإنفاق' : 'Total Spend'}</div>
                         ${canSeePageFinancials ? `
-                          <div class="font-bold text-emerald-600 dark:text-emerald-400">$${(pageStats?.totalSpendUSD || 0).toFixed(2)}</div>
-                          <div class="text-[10px] text-emerald-600 dark:text-emerald-400">${(pageStats?.totalSpendLYD || 0).toFixed(2)} LYD</div>
+                          <div class="font-bold text-emerald-600 dark:text-emerald-400">${fmtUsd((pageStats?.totalSpendUSD || 0))}</div>
+                          <div class="text-[10px] text-emerald-600 dark:text-emerald-400">${fmtLyd((pageStats?.totalSpendLYD || 0))}</div>
                         ` : `<div class="text-slate-400 flex items-center gap-1"><i data-lucide="lock" class="w-3 h-3"></i>${isAr ? 'محجوب' : 'Hidden'}</div>`}
                       </div>
                     </div>
@@ -19028,7 +19045,7 @@ function renderAdsView() {
           </details>
         </div>
         ${adReceiptFilter ? `<div id="ad-receipt-link-filter" role="status" class="mt-3 flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-200 sm:flex-row sm:items-center sm:justify-between">
-          <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong>#${activeReceiptLabel}</strong></span>
+          <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong dir="ltr">#${activeReceiptLabel}</strong></span>
           <button type="button" onclick="clearAdReceiptFilter()" class="min-h-11 inline-flex items-center justify-center gap-1 rounded-lg px-3 font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:text-indigo-200 dark:hover:bg-indigo-900/50" aria-label="${isAr ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="h-4 w-4"></i>${isAr ? 'عرض كل الإعلانات' : 'Show all ads'}</button>
         </div>` : ''}
         <div id="ads-advanced-filters" class="workspace-advanced-panel ${adAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${adAdvancedFiltersOpen ? 'false' : 'true'}">
@@ -19164,7 +19181,7 @@ function renderAdsView() {
                         ${adPageAvatarTile}
                         ${adPrimaryTile}
                         <div class="min-w-0 flex-1">
-                          <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
+                          <div class="break-words font-medium"><bdi>#${adDisplayNum}</bdi> - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
                           ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${phoneLtrHtml(ad.phoneNumber)}</div>` : ''}
                         </div>
@@ -19223,8 +19240,8 @@ function renderAdsView() {
                       ${needsSetup ? `<div class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">${isAr ? 'يحتاج إكمال' : 'Needs setup'}</div>` : (isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : '')}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
-                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${(Number(ad.spentUSD) || 0).toFixed(2)}</div>
-                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - (Number(ad.spentUSD) || 0)).toFixed(2)}</div>
+                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: ${fmtUsd((Number(ad.spentUSD) || 0))}</div>
+                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: ${fmtUsd(((ad.amountUSD || 0) - (Number(ad.spentUSD) || 0)))}</div>
                         </div>
                       ` : ''}
                       ${renderMetaAdStatusSummary(ad, isAr)}
@@ -19267,7 +19284,7 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions">
-                      ${visibleLinkedReceiptIds.length ? `<div class="ads-linked-receipts">${visibleLinkedReceiptIds.map(id => `<button type="button" data-action="view-ad-receipt" data-receipt-id="${Security.escapeHtml(String(id))}" onclick="openReceiptRecord(this.dataset.receiptId)"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${isAr ? 'وصل' : 'Receipt'} #${Security.escapeHtml(_rcptNo(receiptsById.get(String(id))) || String(id))}</span></button>`).join('')}</div>` : ''}
+                      ${visibleLinkedReceiptIds.length ? `<div class="ads-linked-receipts">${visibleLinkedReceiptIds.map(id => `<button type="button" data-action="view-ad-receipt" data-receipt-id="${Security.escapeHtml(String(id))}" onclick="openReceiptRecord(this.dataset.receiptId)"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${isAr ? 'وصل' : 'Receipt'} <bdi>#${Security.escapeHtml(_rcptNo(receiptsById.get(String(id))) || String(id))}</bdi></span></button>`).join('')}</div>` : ''}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="ads-row-step" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         <button type="button" id="${adMoreId}" class="ads-row-details" aria-expanded="${adOpen}" onclick="shellToggleRow('ads', '${adId}'); document.getElementById('${adMoreId}')?.focus()">${isAr ? 'التفاصيل' : 'Details'}</button>
                         <details class="${adsAsCards ? 'row-actions' : 'frame-menu row-menu'}"${adsAsCards ? ' open' : ''}>
@@ -19590,7 +19607,7 @@ function renderDeliveriesView(logOnly) {
           <h2><i data-lucide="coins" class="w-4 h-4"></i>${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</h2>
           <div><span>${isAr ? 'المُحصَّل' : 'Collected'}</span><bdi>${fmtLyd(stats.feesCollectedLYD)}</bdi></div>
           <div class="${stats.feesShopPaidLYD > 0 ? 'ops-text-danger' : ''}"><span>${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'}</span><bdi>${fmtLyd(stats.feesShopPaidLYD)}</bdi></div>
-          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${fmtLyd(Math.abs(stats.feeVarianceLYD))}</bdi></div>
+          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${fmtLyd(Math.abs(stats.feeVarianceLYD), stats.feeVarianceLYD >= 0 ? '+' : '-')}</bdi></div>
         </section>
       `}
       <div class="ops-board ${canViewDeliveryStats ? 'has-driver-panel' : ''}">
@@ -19758,7 +19775,7 @@ async function checkStuckDeliveries() {
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(_deliveryDisplayAmounts(d).local || 0).toLocaleString('en-US')} LYD</span>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${fmtLyd(_deliveryDisplayAmounts(d).local)}</span>
             <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
@@ -20085,13 +20102,13 @@ function showDeliveryDetails(itemId) {
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
             <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (USD)' : 'To collect (USD)') : (isAr ? 'المبلغ (USD)' : 'Amount (USD)')}</div>
-            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(detailAmountUSD || 0).toFixed(2)}</div>
+            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">${fmtUsd((detailAmountUSD || 0))}</div>
           </div>
         </div>
         ${detailCoveredUSD > 0.005 ? `
         <div class="px-4 py-2 rounded-xl bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-xs font-bold text-violet-700 dark:text-violet-300 flex items-center gap-2">
           <i data-lucide="landmark" class="w-4 h-4"></i>
-          <span>${isAr ? `غطّت الشركة $${detailCoveredUSD.toFixed(2)} من هذا الدين` : `Company covered $${detailCoveredUSD.toFixed(2)} of this debt`}</span>
+          <span>${isAr ? `غطّت الشركة ${fmtUsd(detailCoveredUSD)} من هذا الدين` : `Company covered ${fmtUsd(detailCoveredUSD)} of this debt`}</span>
         </div>` : ''}
         
         <!-- Status & Driver -->
@@ -20974,8 +20991,8 @@ function renderUsersView() {
                     <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${deliveryStats.totalAssigned}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600 dark:text-purple-300">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
-                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600 dark:text-rose-400">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600 dark:text-purple-300">${fmtLyd(deliveryFeesLYD)}</span></div>
+                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600 dark:text-rose-400">${fmtLyd(deliveryFeesShopLYD)}</span></div>` : ''}
                   </div>
                 ` : ''}
 
@@ -22141,13 +22158,18 @@ function hubPlanForService(serviceId) {
     || null;
 }
 
-// "25 LYD" (major units, no trailing zeros for whole numbers) — pills only.
+// A wallet amount as people read it (DESIGN.md 5.4): "$12.00", "75.00 LYD", in Arabic "75.00 د.ل".
+// walletFormatMinor() keeps writing "75.00 LYD" because its text is also stored in audit lines.
+function walletShow(minor, currency, sign = '') {
+  const code = walletNormalizeCurrency(currency);
+  const major = walletFromMinor(minor, code);
+  const value = Number.isFinite(major) ? major : 0;
+  return code === 'USD' ? fmtUsd(value, sign) : code === 'LYD' ? fmtLyd(value, sign) : moneyPiece(`${sign}${fmt2(value)} ${code}`);
+}
+
+// A price on a pill: never below zero.
 function hubMoney(minor, currency = 'LYD') {
-  const major = walletFromMinor(Math.max(0, Number(minor) || 0), currency);
-  const text = Number.isInteger(major)
-    ? major.toLocaleString('en-US')
-    : major.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${text} ${walletNormalizeCurrency(currency)}`;
+  return walletShow(Math.max(0, Number(minor) || 0), currency);
 }
 
 function hubPeriodLabel(durationDays) {
@@ -22239,7 +22261,7 @@ function hubWalletCard({ topUp = true, plansLink = false } = {}) {
         <span class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 flex items-center justify-center flex-shrink-0"><i data-lucide="wallet" class="w-5 h-5"></i></span>
         <span class="min-w-0">
           <span class="block text-[11px] text-slate-500 dark:text-slate-400">${hubText('Wallet balance', 'رصيد المحفظة')}</span>
-          <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, 'LYD'))}</span>
+          <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletShow(balanceMinor, 'LYD'))}</span>
         </span>
       </button>
       ${plansLink && !noBuy ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
@@ -22616,7 +22638,10 @@ function chargeWalletInstructions(created) {
   const entry = _walletPayMethodById(d.method);
   const isAr = state.language === 'ar';
   const template = entry && entry.instructions ? String(isAr ? entry.instructions.ar : entry.instructions.en) : '';
-  if (!template) {
+  const lyd = d.amountMinorLYD ? fmt2(d.amountMinorLYD / 100) : '';
+  const usd = String(d.currency || 'USD') === 'USD' ? fmt2(Number(d.amountMinor || 0) / 100) : '';
+  // A figure this request does not carry used to read "Pay — LYD": the plain sentence instead (the amount is on the card).
+  if (!template || (!lyd && template.includes('{amountLYD}')) || (!usd && template.includes('{amountUSD}'))) {
     return hubText(
       `Pay with reference ${d.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
       `ادفع بذكر الرمز ${d.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
@@ -22624,8 +22649,8 @@ function chargeWalletInstructions(created) {
   }
   return template
     .split('{reference}').join(String(d.reference || ''))
-    .split('{amountLYD}').join(d.amountMinorLYD ? (d.amountMinorLYD / 100).toFixed(2) : '—')
-    .split('{amountUSD}').join(String(d.currency || 'USD') === 'USD' ? (Number(d.amountMinor || 0) / 100).toFixed(2) : '—')
+    .split('{amountLYD}').join(lyd)
+    .split('{amountUSD}').join(usd)
     .split('{rate}').join(String(d.lydRate || ''));
 }
 
@@ -22678,7 +22703,7 @@ function renderChargeWalletView() {
 
   const created = _chargeWallet.created;
   if (created) {
-    const amountLabel = walletFormatMinor(Number(created.amountMinor || 0), created.currency || 'USD');
+    const amountLabel = walletShow(Number(created.amountMinor || 0), created.currency || 'USD');
     const methodEntry = _walletPayMethodById(created.method);
     const methodName = methodEntry ? String((isRTL ? methodEntry.name?.ar : methodEntry.name?.en) || created.method) : String(created.method || '');
     return `
@@ -22691,7 +22716,7 @@ function renderChargeWalletView() {
           <div class="mt-5 rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 text-sm text-start">
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('Reference', 'الرمز المرجعي')}</span><span class="font-mono font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(created.reference || '')}</span></div>
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${t('amount')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(amountLabel)}</span></div>
-            ${created.amountMinorLYD && String(created.currency || 'USD') !== 'LYD' ? `<div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('In LYD', 'بالدينار')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(Number(created.amountMinorLYD || 0), 'LYD'))}</span></div>` : ''}
+            ${created.amountMinorLYD && String(created.currency || 'USD') !== 'LYD' ? `<div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('In LYD', 'بالدينار')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletShow(Number(created.amountMinorLYD || 0), 'LYD'))}</span></div>` : ''}
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('Method', 'طريقة الدفع')}</span><span class="font-bold text-slate-900 dark:text-white">${hubEsc(methodName)}</span></div>
           </div>
           <p class="mt-4 text-sm text-slate-600 dark:text-slate-300 text-start leading-6">${hubEsc(chargeWalletInstructions(created))}</p>
@@ -22718,7 +22743,7 @@ function renderChargeWalletView() {
         <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400 mb-2">${t('amount')}</div>
         <div class="flex items-end justify-center gap-2" dir="ltr">
           <span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${hubEsc(_chargeWallet.amountText || '0')}</span>
-          <span class="mb-2 text-lg font-semibold text-slate-500">${currency}</span>
+          <span class="mb-2 text-lg font-semibold text-slate-500">${currency === 'LYD' ? hubText('LYD', 'د.ل') : currency}</span>
         </div>
         <label class="sr-only" for="charge-wallet-amount">${t('amount')}</label>
         <input id="charge-wallet-amount" type="text" inputmode="decimal" value="${hubEsc(_chargeWallet.amountText)}" oninput="chargeWalletAmountInput(this)" class="mt-3 mx-auto block w-40 glass-input rounded-xl px-4 py-2.5 text-center text-lg font-bold" placeholder="0" dir="ltr" />
@@ -22839,8 +22864,8 @@ function renderWalletView() {
     }
   }
   const balancesHtml = balances.length
-    ? balances.map(({ c, m }) => `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(m, c)}</div>`).join('')
-    : `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(0, WALLET.currency)}</div>`;
+    ? balances.map(({ c, m }) => `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletShow(m, c)}</div>`).join('')
+    : `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletShow(0, WALLET.currency)}</div>`;
   const currencyOptions = WALLET_SUPPORTED_CURRENCIES
     .map(c => `<option value="${c}" ${c === WALLET.currency ? 'selected' : ''}>${c}</option>`)
     .join('');
@@ -22866,9 +22891,11 @@ function renderWalletView() {
     const isIn = tx.toUserId === uid;
     // The admin sees everyone's rows: a row between two others has no sign.
     const mine = isIn || tx.fromUserId === uid;
-    const other = mine ? who(isIn ? tx.fromUserId : tx.toUserId) : `${who(tx.fromUserId)} ${isRTL ? '←' : '→'} ${who(tx.toUserId)}`;
+    // Each name and the date stay one piece (<bdi>): a Latin name next to a date used to pull the day number into the name.
+    const person = id => `<bdi>${Security.escapeHtml(who(id))}</bdi>`;
+    const other = mine ? person(isIn ? tx.fromUserId : tx.toUserId) : `${person(tx.fromUserId)} ${isRTL ? '←' : '→'} ${person(tx.toUserId)}`;
 
-    const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
+    const amountStr = walletShow(walletTxAmountMinor(tx), walletTxCurrency(tx), mine ? (isIn ? '+' : '-') : '');
     const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
@@ -22876,11 +22903,11 @@ function renderWalletView() {
       <div class="workspace-wallet-row py-3 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
           <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(walletTxLabel(tx.type, isRTL) || 'tx')}</div>
-          <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
+          <div class="text-xs text-slate-500 dark:text-slate-400">${other} ${when ? `• <bdi>${Security.escapeHtml(when)}</bdi>` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
         <div class="workspace-wallet-amount font-black ${!mine ? 'text-slate-600 dark:text-slate-300' : isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
-          ${mine ? (isIn ? '+' : '-') : ''}${Security.escapeHtml(amountStr)}
+          ${Security.escapeHtml(amountStr)}
         </div>
       </div>
     `;
@@ -23209,13 +23236,13 @@ function shellInitial(name) {
 function shellLyd(amount) {
   const n = Number(amount) || 0;
   const rounded = Math.round(n * 100) / 100;
-  const text = Number.isInteger(rounded)
-    ? rounded.toLocaleString('en-US')
-    : rounded.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${text} ${shellText('LYD', 'د.ل')}`;
+  // Two decimals always, like every other amount (DESIGN.md 5.4): "10,150.00 LYD", never "10,150 LYD" beside "$2,375.00".
+  if (typeof fmtLyd === 'function') return fmtLyd(rounded);  // the app: one writer for every dinar amount
+  return `${rounded.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${shellText('LYD', 'د.ل')}`;
 }
 
 function shellUsd(amount) {
+  if (typeof fmtUsd === 'function') return fmtUsd(amount);
   return `$${(Number(amount) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
@@ -23471,7 +23498,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
           <span class="block mt-1 text-sm text-white/80">${canViewFinancials ? (isAr ? `المُحصَّل · ${shellEsc(monthName)}` : `Collected · ${shellEsc(monthName)}`) : (isAr ? `وصولات · ${shellEsc(monthName)}` : `Receipts · ${shellEsc(monthName)}`)}</span>
           <span class="shell-hero-value block mt-1 text-3xl font-black tracking-tight" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(collectedLyd)) : receiptsThisMonth}</span>
           ${canViewFinancials ? `<span class="mt-2 flex flex-wrap items-center gap-3 text-xs text-white/80">
-            ${pct === null ? `<span>${isAr ? 'أول شهر مُسجَّل' : 'First month on record'}</span>` : `<span class="inline-flex items-center gap-1"><i data-lucide="${pct >= 0 ? 'trending-up' : 'trending-down'}" class="w-3.5 h-3.5"></i>${pct >= 0 ? '+' : ''}${pct}% ${isAr ? 'مقابل الشهر الماضي' : 'vs last month'}</span>`}
+            ${pct === null ? `<span>${isAr ? 'أول شهر مُسجَّل' : 'First month on record'}</span>` : `<span class="inline-flex items-center gap-1"><i data-lucide="${pct >= 0 ? 'trending-up' : 'trending-down'}" class="w-3.5 h-3.5"></i><bdi dir="ltr">${pct >= 0 ? '+' : ''}${pct}%</bdi> ${isAr ? 'مقابل الشهر الماضي' : 'vs last month'}</span>`}
             <span dir="ltr">≈ ${shellEsc(shellUsd(collectedUsd))}</span>
           </span>` : ''}
         </span>
@@ -23496,7 +23523,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
           const number = shellReceiptNumber(r);
           return `<button type="button" onclick="openReceiptFromHome('${shellEsc(r.id)}')" class="shell-home-recent hub-card hub-row w-full flex items-center gap-3 p-3 text-start touch-target">
             <span class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(customerName))}</span>
-            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `#${shellEsc(number)} · ` : ''}${r.createdAt ? shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale())) : ''}</span></span>
+            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `<bdi>#${shellEsc(number)}</bdi> · ` : ''}${r.createdAt ? `<bdi>${shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale()))}</bdi>` : ''}</span></span>
             <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(shellReceiptLyd(r))) : ''}</span>${shellPill(meta.label, meta.tone)}</span>
           </button>`;
         }).join('')}</div>` : `<div class="hub-card p-5 text-center text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</div>`}
@@ -23580,7 +23607,7 @@ function renderCollectView() {
       ${rows.length ? `<div class="space-y-2">${rows.map(row => `
         <button type="button" onclick="openDebtorCollection('${shellEsc(row.customer.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
           <span class="w-11 h-11 rounded-full ${row.overdue ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'} flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(row.customer.name))}</span>
-          <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500">${row.number ? `#${shellEsc(row.number)} · ` : ''}<span class="${row.overdue ? 'text-rose-600 font-bold' : ''}">${shellEsc(shellAgeText(row.ageDays))}</span></span></span>
+          <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500">${row.number ? `<bdi>#${shellEsc(row.number)}</bdi> · ` : ''}<span class="${row.overdue ? 'text-rose-600 font-bold' : ''}">${shellEsc(shellAgeText(row.ageDays))}</span></span></span>
           <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(row.dueLyd))}</span><span class="block text-[10px] text-slate-400" dir="ltr">${shellEsc(shellUsd(row.dueUsd))}</span></span>
           <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
         </button>`).join('')}</div>`
@@ -23946,7 +23973,7 @@ function shellAdSummaryRow(ad, meta = {}) {
   const statusTones = { Pending: 'amber', Paused: 'slate', Completed: 'emerald', Canceled: 'rose', Lost: 'rose', Stopped: 'blue', Active: 'emerald' };
   const status = String(ad?.status || 'Active');
   const subParts = [];
-  if (meta.adDisplayNum) subParts.push(`#${meta.adDisplayNum}`);
+  if (meta.adDisplayNum) subParts.push(`<bdi>#${meta.adDisplayNum}</bdi>`);
   if (ad?.metaAdName && ad.metaAdName !== name) subParts.push(`<span class="shell-ad-campaign">${shellEsc(ad.metaAdName)}</span>`);
   const pageName = meta.adPage?.name || ad?.metaPageName;
   if (pageName && pageName !== name) subParts.push(`${isAr ? 'الصفحة' : 'Page'}: ${shellEsc(pageName)}`);
@@ -24000,9 +24027,9 @@ function shellReceiptRow(receipt, customer, card, meta = {}) {
     if (meta.canEditThisReceipt) actions += shellRecordAction('editReceipt', id, isAr ? 'تعديل' : 'Edit', 'pencil');
   }
   const subParts = [];
-  if (meta.receiptDisplayNum) subParts.push(`#${meta.receiptDisplayNum}`);
-  if (serial) subParts.push(`${isAr ? 'رقم' : 'No.'} ${shellEsc(serial)}${meta.displayTempNo && !meta.displayFinalNo ? (isAr ? ' (مؤقت)' : ' (temp)') : ''}`);
-  if (when) subParts.push(shellEsc(when));
+  if (meta.receiptDisplayNum) subParts.push(`<bdi>#${meta.receiptDisplayNum}</bdi>`);
+  if (serial) subParts.push(`${isAr ? 'رقم' : 'No.'} <bdi>${shellEsc(serial)}</bdi>${meta.displayTempNo && !meta.displayFinalNo ? (isAr ? ' (مؤقت)' : ' (temp)') : ''}`);
+  if (when) subParts.push(`<bdi>${shellEsc(when)}</bdi>`);
   if (receipt?.collected && !meta.destroyed) subParts.push(isAr ? 'مُحصَّل' : 'collected');
   const open = shellRowIsOpen('receipts', id, (meta.receiptRecordFilter && meta.receiptRecordFilter === id));
   return shellListRow({
@@ -24046,7 +24073,7 @@ function shellCustomerRow(customer, stats, card, meta = {}) {
     open: shellRowIsOpen('customers', id),
     avatar: shellAvatar(shellInitial(customer?.name), tone),
     title: shellEsc(customer?.name || ''),
-    sub: `${meta.displayNum ? `#${meta.displayNum} · ` : ''}${sub}`, trailing, facts, actions
+    sub: `${meta.displayNum ? `<bdi>#${meta.displayNum}</bdi> · ` : ''}${sub}`, trailing, facts, actions
   });
 }
 
@@ -25448,18 +25475,18 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
             <div class="text-xs font-semibold text-slate-500">${isAr ? 'إجمالي الإنفاق' : 'Total spend'}</div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white mt-1">$${summary.totalSpendUSD.toFixed(2)}</div>
-            <div class="text-xs text-slate-500">${summary.totalSpendLYD.toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white mt-1">${fmtUsd(summary.totalSpendUSD)}</div>
+            <div class="text-xs text-slate-500">${fmtLyd(summary.totalSpendLYD)}</div>
           </div>
           <div class="rounded-xl border border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20 p-3">
             <div class="text-xs font-semibold text-emerald-600">${isAr ? 'إنفاق مدفوع' : 'Paid spend'}</div>
-            <div class="text-lg font-bold text-emerald-700 dark:text-emerald-300 mt-1">$${summary.paidSpendUSD.toFixed(2)}</div>
-            <div class="text-xs text-emerald-600">${summary.paidSpendLYD.toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-emerald-700 dark:text-emerald-300 mt-1">${fmtUsd(summary.paidSpendUSD)}</div>
+            <div class="text-xs text-emerald-600">${fmtLyd(summary.paidSpendLYD)}</div>
           </div>
           <div class="rounded-xl border border-rose-200 bg-rose-50 dark:bg-rose-900/20 p-3">
             <div class="text-xs font-semibold text-rose-600">${isAr ? 'إنفاق الإعلانات غير المدفوعة' : 'Spend on unpaid ads'}</div>
-            <div class="text-lg font-bold text-rose-700 dark:text-rose-300 mt-1">$${summary.unpaidSpendUSD.toFixed(2)}</div>
-            <div class="text-xs text-rose-600">${summary.unpaidSpendLYD.toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-rose-700 dark:text-rose-300 mt-1">${fmtUsd(summary.unpaidSpendUSD)}</div>
+            <div class="text-xs text-rose-600">${fmtLyd(summary.unpaidSpendLYD)}</div>
           </div>
         </div>
       `}
@@ -25690,8 +25717,8 @@ function showPageAdsDialog(pageId, triggerButton) {
           const amount = Number(ad.amountUSD || 0);
           return `<div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="font-semibold text-slate-800 dark:text-white break-words">#${Security.escapeHtml(String(ad.displayNumber || ad.id || ''))} — ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</span>
-              <span class="text-sm font-bold ${pending ? 'text-amber-600' : 'text-emerald-600'}">${pending ? (isAr ? 'يحتاج إكمال' : 'Needs setup') : `$${amount.toFixed(2)}`}</span>
+              <span class="font-semibold text-slate-800 dark:text-white break-words"><bdi>#${Security.escapeHtml(String(ad.displayNumber || ad.id || ''))}</bdi> — ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</span>
+              <span class="text-sm font-bold ${pending ? 'text-amber-600' : 'text-emerald-600'}">${pending ? (isAr ? 'يحتاج إكمال' : 'Needs setup') : `${fmtUsd(amount)}`}</span>
             </div>
             <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
               <span>${trStatus(ad.status || '')}</span>
@@ -26841,7 +26868,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const debtUSD = collectionTarget.amountUSD;
   const debtLocal = collectionTarget.amountLocal;
   const deliveryFee = Number(receipt.quotedDeliveryFee || 0) || 0;
-  const money = `${debtLocal.toFixed(2)} LYD${debtUSD > 0 ? ` ($${debtUSD.toFixed(2)})` : ''}`;
+  const money = `${fmtLyd(debtLocal)}${debtUSD > 0 ? ` (${fmtUsd(debtUSD)})` : ''}`;
 
   const lines = isAr ? [
     '🚚 توصيل جديد - البيان',
@@ -26851,7 +26878,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `مكان التوصيل: ${place}`,
     `المندوب: ${driverName}`,
     `المبلغ المطلوب تحصيله: \u2068${money}\u2069`,  // isolated so the ')' stays put in RTL text
-    `رسوم التوصيل: ${deliveryFee.toFixed(2)} LYD`,
+    `رسوم التوصيل: ${fmtLyd(deliveryFee)}`,
     'الحالة: غير مدفوع',
     `ملاحظات: ${instructions}`,
     `أنشأه: ${creatorName}`
@@ -26863,7 +26890,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `Delivery place: ${place}`,
     `Assigned driver: ${driverName}`,
     `Amount to collect: ${money}`,
-    `Delivery fee: ${deliveryFee.toFixed(2)} LYD`,
+    `Delivery fee: ${fmtLyd(deliveryFee)}`,
     'Payment status: Not Paid',
     `Instructions: ${instructions}`,
     `Created by: ${creatorName}`
@@ -27681,7 +27708,7 @@ function updateReceiptDeliveryCompletionComputed() {
   const collected = collectedTotals.totalR1;   // LYD — compared against the debt
   const actualFee = _readDeliveryFeeLyd();     // LYD — compared against the quoted fee
   const totalEl = document.getElementById('delivery-collected-total');
-  if (totalEl) totalEl.textContent = `${collected.toFixed(2)} LYD` + (collectedTotals.totalR2 ? ` ($${collectedTotals.totalR2.toFixed(2)})` : '');
+  if (totalEl) totalEl.textContent = `${fmtLyd(collected)}` + (collectedTotals.totalR2 ? ` (${fmtUsd(collectedTotals.totalR2)})` : '');
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
 
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
@@ -27698,15 +27725,15 @@ function updateReceiptDeliveryCompletionComputed() {
     const feeBase = feeCmp.feeDifferenceStatus === 'SAME'
       ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
-        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(2)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(2)} LYD)`)
-        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(2)} LYD)` : `Fee: HIGHER (${diff.toFixed(2)} LYD)`));
+        ? (isArC ? `قيمة التوصيل: أقل (${fmtLyd(Math.abs(diff))})` : `Fee: LOWER (${fmtLyd(Math.abs(diff))})`)
+        : (isArC ? `قيمة التوصيل: أعلى (${fmtLyd(diff)})` : `Fee: HIGHER (${fmtLyd(diff)})`));
     const feePaidByShop = _readDeliveryFeePaidBy() === 'shop';
     feeEl.textContent = feeBase + (feePaidByShop ? (isArC ? ' • يتحملها المحل' : ' • paid by shop') : '');
   }
   if (debtEl) {
     if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = isArC ? 'الدفع: مطابق تماماً' : 'Payment: PAID EXACT';
-    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (+${debtCmp.overpaidAmount.toFixed(2)} LYD)` : `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(2)} LYD)`;
-    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(2)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(2)} LYD remaining)`;
+    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (${fmtLyd(debtCmp.overpaidAmount, '+')})` : `Payment: OVERPAID (${fmtLyd(debtCmp.overpaidAmount, '+')})`;
+    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${fmtLyd(debtCmp.remainingDue)})` : `Payment: UNDERPAID (${fmtLyd(debtCmp.remainingDue)} remaining)`;
   }
 
   // Validate (allow app-generated auto-serials: S/B/O/E + digits)
@@ -28002,7 +28029,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(2)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${fmtLyd(debt)}</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${fmtLyd(quoted)}</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${phoneLtrHtml(phone)}</span></div>` : ''}
         </div>
 
@@ -28018,7 +28045,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <button type="button" onclick="addDeliveryCollectedRow()" class="text-[11px] font-bold text-indigo-600 hover:text-indigo-700">${isArD ? '+ طريقة أخرى' : '+ Add method'}</button>
           </div>
           <div id="delivery-collected-payments" class="space-y-2">${collectedRowsHtml}</div>
-          <div class="text-[11px] text-slate-500 mt-1">${isArD ? 'إجمالي المُحصَّل' : 'Total collected'}: <span id="delivery-collected-total" class="font-bold text-slate-700 dark:text-slate-200">0 LYD</span></div>
+          <div class="text-[11px] text-slate-500 mt-1">${isArD ? 'إجمالي المُحصَّل' : 'Total collected'}: <span id="delivery-collected-total" class="font-bold text-slate-700 dark:text-slate-200">${fmtLyd(0)}</span></div>
         </div>
 
         <div>
@@ -28428,8 +28455,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             try {
               const debtEl = document.getElementById('delivery-complete-debt');
               const quotedEl = document.getElementById('delivery-complete-quoted');
-              if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(2)} LYD`;
-              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(2)} LYD`;
+              if (debtEl) debtEl.textContent = `${fmtLyd(getReceiptCollectionTarget(latestData).amountLocal)}`;
+              if (quotedEl) quotedEl.textContent = `${fmtLyd((Number(latestData.quotedDeliveryFee ?? 0) || 0))}`;
             } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
             showNotification(
@@ -28821,7 +28848,7 @@ function _isReceiptEligibleForCompanyCoverage(receipt, collectionTarget = null) 
 
 function _companyCoverageMoney(value) {
   const amount = Number(value);
-  return `$${(Number.isFinite(amount) ? Math.max(amount, 0) : 0).toFixed(2)}`;
+  return fmtUsd(Number.isFinite(amount) ? Math.max(amount, 0) : 0);
 }
 
 function _companyCoverageFocusable(modal) {
@@ -29598,9 +29625,9 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
         class="flex min-h-12 w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-violet-400 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-violet-500 dark:hover:bg-violet-950/30">
         <span class="min-w-0">
           <span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${isAr ? 'وصل' : 'Receipt'} ${serial}</span>
-          ${covered > 0.005 ? `<span class="block text-[11px] text-violet-700 dark:text-violet-300">${isAr ? 'غطت الشركة سابقاً' : 'Company covered before'}: $${covered.toFixed(2)}</span>` : ''}
+          ${covered > 0.005 ? `<span class="block text-[11px] text-violet-700 dark:text-violet-300">${isAr ? 'غطت الشركة سابقاً' : 'Company covered before'}: ${fmtUsd(covered)}</span>` : ''}
         </span>
-        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${outstanding.toFixed(2)}</span>
+        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">${fmtUsd(outstanding)}</span>
       </button>`;
   }).join('') + (hasAdDebt ? `
       <button type="button" data-customer-id="${Security.escapeHtml(String(customerId || ''))}"
@@ -29610,7 +29637,7 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
           <span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${isAr ? 'دين إعلانات (بدون وصل)' : 'Ad-spend debt (no receipt)'}</span>
           <span class="block text-[11px] text-slate-500 dark:text-slate-400">${isAr ? `${adDebt.ads.length} إعلان` : `${adDebt.ads.length} ad${adDebt.ads.length === 1 ? '' : 's'}`}</span>
         </span>
-        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${adDebt.totalUSD.toFixed(2)}</span>
+        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">${fmtUsd(adDebt.totalUSD)}</span>
       </button>` : '');
 
   const html = `
@@ -29765,10 +29792,10 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
   const breakdown = _receiptCollectionBreakdown(receipt);
   return `
     <div class="text-sm text-slate-600 dark:text-slate-400 mb-1">
-      ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
+      ${isAr ? 'الوصل' : 'Receipt'} <bdi>#${Security.escapeHtml(String(serialTxt))}</bdi> — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${fmtLyd(targetLYD)}</span>
     </div>
     <div class="text-xs text-slate-500 mb-4">
-      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${p.amount.toFixed(2)} LYD`).join(' • ')}
+      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${fmtLyd(p.amount)}`).join(' • ')}
     </div>
     ${getReceiptPaymentState(receipt) === 'not_paid' ? `<p class="text-xs text-amber-700 mb-3">${isAr ? 'يسجّل التسليم فقط ولا يجعل الوصل مدفوعاً.' : 'This records the handover only; it does not mark the receipt Paid.'}</p>` : ''}
     <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
@@ -29827,15 +29854,15 @@ function _collectEditorView(receiptId, receipt) {
   const left = Math.max(target - total, 0);
   return `
     <div class="text-sm text-slate-600 dark:text-slate-400 mb-3">
-      ${isAr ? 'الإجمالي المطلوب' : 'Total due'}: <span class="font-bold text-slate-800 dark:text-white">${target.toFixed(2)} LYD</span>
+      ${isAr ? 'الإجمالي المطلوب' : 'Total due'}: <span class="font-bold text-slate-800 dark:text-white">${fmtLyd(target)}</span>
     </div>
     <div class="space-y-2" id="collect-rows">${rows}</div>
     <button type="button" onclick="addCollectPaymentRow()" class="mt-2 text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1">
       <i data-lucide="plus-circle" class="w-4 h-4"></i>${isAr ? 'إضافة طريقة' : 'Add method'}
     </button>
     <div class="mt-3 bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 space-y-1 text-sm">
-      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'إجمالي المُحصَّل' : 'Total collected'}:</span><span class="font-bold text-emerald-600" id="collect-total">${total.toFixed(2)} LYD</span></div>
-      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span><span class="font-bold text-orange-600" id="collect-left">${left.toFixed(2)} LYD</span></div>
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'إجمالي المُحصَّل' : 'Total collected'}:</span><span class="font-bold text-emerald-600" id="collect-total">${fmtLyd(total)}</span></div>
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span><span class="font-bold text-orange-600" id="collect-left">${fmtLyd(left)}</span></div>
     </div>
     <div class="flex space-x-3 pt-4">
       <button onclick="collectReceiptCustomBack('${receiptId}')" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'رجوع' : 'Back'}</button>
@@ -29853,8 +29880,8 @@ function _refreshCollectTotals() {
   const total = _tempCollectPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
   const totalEl = document.getElementById('collect-total');
   const leftEl = document.getElementById('collect-left');
-  if (totalEl) totalEl.textContent = total.toFixed(2) + ' LYD';
-  if (leftEl) leftEl.textContent = Math.max(_collectTargetLYD - total, 0).toFixed(2) + ' LYD';
+  if (totalEl) totalEl.textContent = fmtLyd(total);
+  if (leftEl) leftEl.textContent = fmtLyd(Math.max(_collectTargetLYD - total, 0));
 }
 
 // Row edits: amount just refreshes the totals (no re-render, keeps typing focus);
@@ -29911,7 +29938,7 @@ async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceip
   const isAr = state.language === 'ar';
   showNotification(
     isAr ? 'تم التحصيل' : 'Collected',
-    (isAr ? `تم تسجيل ${totalLYD.toFixed(2)} LYD` : `Recorded ${totalLYD.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
+    (isAr ? `تم تسجيل ${fmtLyd(totalLYD)}` : `Recorded ${fmtLyd(totalLYD)}`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${fmtLyd(leftLYD)}` : ` — ${fmtLyd(leftLYD)} left`) : ''),
     'success'
   );
   render();
@@ -30252,8 +30279,8 @@ function showReceiptTransferHistory(receiptId) {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
     const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
     return isArT
-      ? `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
-      : `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
+      ? `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} إلى ${name}`
+      : `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} to ${name}`;
   }).join('\n');
   showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
@@ -30301,7 +30328,7 @@ function showReceiptEditHistory(receiptId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex min-w-0 items-center gap-2">
-                  <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} <bdi>#${editHistory.length - idx}</bdi></span>
                   <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy || (isArH ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
@@ -30541,7 +30568,7 @@ function showAdEditHistory(adId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
                 <div class="flex min-w-0 items-center gap-2">
-                  <span class="shrink-0 text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="shrink-0 text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} <bdi>#${editHistory.length - idx}</bdi></span>
                   <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy)}</span>
                 </div>
                 <span class="text-xs text-slate-400">${Security.escapeHtml(_formatAdEditHistoryDate(edit.editedAt, isArH))}</span>
@@ -30631,7 +30658,7 @@ function showMetaAdHistory(adId) {
     const eventLabel = entry.eventType ? tr(entry.eventType).split('_').join(' ') : '';
     return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(tr(entry.editedBy))}</p></div>
+        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} <bdi>#${history.length - index}</bdi></span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(tr(entry.editedBy))}</p></div>
         <time class="text-xs text-slate-500">${Security.escapeHtml(_formatAdEditHistoryDate(entry.editedAt, isAr))}</time>
       </div>
       ${(eventLabel || entry.tool) ? `<div class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">${eventLabel ? `<span>${Security.escapeHtml(eventLabel)}</span>` : ''}${entry.tool ? `<span>• ${Security.escapeHtml(entry.tool)}</span>` : ''}</div>` : ''}
@@ -30826,8 +30853,8 @@ async function saveReceiptTransfer() {
         else showNotification(
           state.language === 'ar' ? 'تم التحويل' : 'Transferred',
           state.language === 'ar'
-            ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
-            : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+            ? `تم تحويل ${fmtUsd(amountUSD)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+            : `Transferred ${fmtUsd(amountUSD)} to ${targetName} — a transfer receipt was created and is ready to use.`,
           'success'
         );
         closeModal();
@@ -30869,8 +30896,8 @@ async function saveReceiptTransfer() {
   showNotification(
     state.language === 'ar' ? 'تم التحويل' : 'Transferred',
     state.language === 'ar'
-      ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
-      : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+      ? `تم تحويل ${fmtUsd(amountUSD)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+      : `Transferred ${fmtUsd(amountUSD)} to ${targetName} — a transfer receipt was created and is ready to use.`,
     'success'
   );
   closeModal();
@@ -31020,8 +31047,8 @@ async function saveSplitPayments() {
     showNotification(
       state.language === 'ar' ? 'غير ممكن' : 'Not possible',
       state.language === 'ar'
-        ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalR2.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
-        : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalR2.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+        ? `${fmtUsd(committedUSD)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى ${fmtUsd(totalR2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+        : `${fmtUsd(committedUSD)} of this receipt is already used (ads + transfers) — the total cannot go down to ${fmtUsd(totalR2)}. Free the money first (edit/stop the ads or delete the transfer).`,
       'error'
     );
     return;
@@ -31156,7 +31183,7 @@ function _refreshTopUpPreview() {
   const base = parseFloat(ad.initialAmountUSD || ad.amountUSD) || 0;
   const workingTotal = tempTopUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0) + typedAmount;
   const newEl = document.getElementById('topup-preview-new');
-  if (newEl) newEl.textContent = `$${(base + workingTotal).toFixed(2)}`;
+  if (newEl) newEl.textContent = `${fmtUsd((base + workingTotal))}`;
 
   const baseEnd = ad.initialEndDate || ad.endDate || '';
   const endEl = document.getElementById('topup-preview-end');
@@ -31176,7 +31203,7 @@ function _refreshTopUpPreview() {
     const avail = _topUpAvailableNow(tempTopUps);
     if (avail !== null) {
       const after = Math.round((avail - typedAmount) * 100) / 100;
-      availEl.textContent = `$${after.toFixed(2)}`;
+      availEl.textContent = `${fmtUsd(after)}`;
       availEl.className = after < -0.009 ? 'text-rose-600' : (after < 0.01 ? 'text-amber-600' : 'text-emerald-600');
     }
   }
@@ -31204,8 +31231,8 @@ function addNewTopUp() {
       showNotification(
         state.language === 'ar' ? 'رصيد غير كافٍ' : 'Not enough balance',
         state.language === 'ar'
-          ? `المتبقي في وصولات التمويل $${available.toFixed(2)} فقط — لا يمكن إضافة $${entry.amount.toFixed(2)}`
-          : `The funding receipt(s) only have $${available.toFixed(2)} left — cannot add $${entry.amount.toFixed(2)}`,
+          ? `المتبقي في وصولات التمويل ${fmtUsd(available)} فقط — لا يمكن إضافة ${fmtUsd(entry.amount)}`
+          : `The funding receipt(s) only have ${fmtUsd(available)} left — cannot add ${fmtUsd(entry.amount)}`,
         'error'
       );
       return;
@@ -31336,8 +31363,8 @@ async function saveTopUps() {
     showNotification(
       isArTU ? 'رصيد غير كافٍ' : 'Not enough balance',
       isArTU
-        ? `التعبئة تحتاج $${delta.toFixed(2)} والمتبقي في وصولات التمويل $${funding.totalRemaining.toFixed(2)} فقط`
-        : `These top-ups need $${delta.toFixed(2)} but the funding receipt(s) only have $${funding.totalRemaining.toFixed(2)} left`,
+        ? `التعبئة تحتاج ${fmtUsd(delta)} والمتبقي في وصولات التمويل ${fmtUsd(funding.totalRemaining)} فقط`
+        : `These top-ups need ${fmtUsd(delta)} but the funding receipt(s) only have ${fmtUsd(funding.totalRemaining)} left`,
       'error'
     );
     return;
@@ -31436,7 +31463,7 @@ async function saveTopUps() {
   tempTopUps = [];
   showNotification(
     isArTU ? 'تم الحفظ' : 'Saved',
-    (isArTU ? `تم حفظ التعبئة. المبلغ الجديد: $${newAmountUSD.toFixed(2)}` : `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`)
+    (isArTU ? `تم حفظ التعبئة. المبلغ الجديد: ${fmtUsd(newAmountUSD)}` : `Top-ups saved. New amount: ${fmtUsd(newAmountUSD)}`)
       + (newEndDisplay ? (isArTU ? ` — ينتهي: ${newEndDisplay}` : ` — ends: ${newEndDisplay}`) : ''),
     'success'
   );
@@ -31760,7 +31787,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${esc(paymentRate1Value(payment))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
-                  <span class="payment-r1-display text-sm font-bold text-indigo-600">0.00 LYD</span>
+                  <span class="payment-r1-display text-sm font-bold text-indigo-600">${fmtLyd(0)}</span>
                 </div>
               </div>
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
@@ -31768,7 +31795,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${esc(payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate)}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R2:</div>
-                  <span class="payment-r2-display text-sm font-bold text-emerald-600">0.00 USD</span>
+                  <span class="payment-r2-display text-sm font-bold text-emerald-600">${fmtUsd(0)}</span>
                 </div>
               </div>
             </div>
@@ -31782,7 +31809,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
                 <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
                 <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
                   <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
-                  <div class="text-[10px] font-bold text-slate-400 mt-1">LYD</div>
+                  <div class="text-[10px] font-bold text-slate-400 mt-1">${state.language === 'ar' ? 'د.ل' : 'LYD'}</div>
                 </div>
               </div>
               <div>
@@ -31798,7 +31825,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="flex justify-between items-center pt-2 text-[10px] text-slate-400">
               <div>
                 <div class="font-bold">${isArF ? 'صافي المدفوع (بعد الرسوم):' : 'Net Paid (After Fees):'}</div>
-                <div id="receipt-net-paid" class="text-indigo-600 font-bold text-xs">0.00 LYD</div>
+                <div id="receipt-net-paid" class="text-indigo-600 font-bold text-xs">${fmtLyd(0)}</div>
               </div>
               <div class="text-right">
                 <div>${isArF ? 'سعر السوق' : 'Market Rate'}: <span id="receipt-market-rate" class="text-slate-600 dark:text-slate-300 font-bold">${state.defaultExchangeRate.toFixed(2)}</span></div>
@@ -31848,7 +31875,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${esc(paymentRate1Value(payment))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
-                <span class="payment-r1-display text-xs font-bold text-indigo-600">0.00 LYD</span>
+                <span class="payment-r1-display text-xs font-bold text-indigo-600">${fmtLyd(0)}</span>
               </div>
             </div>
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
@@ -31856,7 +31883,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${esc(payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate)}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R2: </span>
-                <span class="payment-r2-display text-xs font-bold text-emerald-600">0.00 USD</span>
+                <span class="payment-r2-display text-xs font-bold text-emerald-600">${fmtUsd(0)}</span>
               </div>
             </div>
           </div>
@@ -31880,7 +31907,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
             <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
               <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
-              <div class="text-[10px] font-bold text-slate-400 mt-1">LYD</div>
+              <div class="text-[10px] font-bold text-slate-400 mt-1">${state.language === 'ar' ? 'د.ل' : 'LYD'}</div>
             </div>
           </div>
           <div>
@@ -31896,7 +31923,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           <div class="flex justify-between items-center text-xs">
             <div>
               <span class="text-slate-500 font-bold">${isArF ? 'صافي المدفوع:' : 'Net Paid:'}</span>
-              <span id="receipt-net-paid" class="text-indigo-600 font-bold ml-1">0.00 LYD</span>
+              <span id="receipt-net-paid" class="text-indigo-600 font-bold ml-1">${fmtLyd(0)}</span>
             </div>
             <div>
               <span class="text-slate-500 font-bold">${isArF ? 'سعر السوق:' : 'Market Rate:'}</span>
@@ -32218,7 +32245,7 @@ function _receiptCustomerRiskSectionHtml(kind, notices, isAr) {
           const receipt = notice.receipt || {};
           const number = String(receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || '').trim();
           const numberLabel = number
-            ? `#${Security.escapeHtml(number)}`
+            ? `<bdi>#${Security.escapeHtml(number)}</bdi>`
             : `${isAr ? 'وصل' : 'Receipt'} ${index + 1}`;
           const rate = Number(receipt.exchangeRate || state.defaultExchangeRate || 0) || 0;
           const amountUSD = notice.cents / 100;
@@ -32233,7 +32260,7 @@ function _receiptCustomerRiskSectionHtml(kind, notices, isAr) {
               <div class="min-w-0">
                 <div class="font-extrabold text-slate-800 dark:text-white">${numberLabel}</div>
                 <div class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${detail}</div>
-                <div class="mt-1 text-sm font-bold ${headingClasses}">$${amountUSD.toFixed(2)}${rate > 0 ? ` • ${amountLocal.toFixed(2)} LYD` : ''}</div>
+                <div class="mt-1 text-sm font-bold ${headingClasses}">${fmtUsd(amountUSD)}${rate > 0 ? ` • ${fmtLyd(amountLocal)}` : ''}</div>
               </div>
               <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" onclick="viewReceiptFromCustomerRiskWarning(this.dataset.receiptId)" class="min-h-11 shrink-0 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-200" aria-label="${Security.escapeHtml(isAr ? `عرض الوصل ${number || index + 1}` : `View receipt ${number || index + 1}`)}">
                 ${isAr ? 'عرض الوصل' : 'View receipt'}
@@ -33131,8 +33158,8 @@ function updateReceiptTotals() {
     }
 
     // Update displays
-    if (r1Display) r1Display.textContent = r1.toFixed(2) + ' LYD';
-    if (r2Display) r2Display.textContent = r2.toFixed(2) + ' USD';
+    if (r1Display) r1Display.textContent = fmtLyd(r1);
+    if (r2Display) r2Display.textContent = fmtUsd(r2);
 
     // Add to totals
     totalR1 += r1;
@@ -33155,8 +33182,8 @@ function updateReceiptTotals() {
   const netPaidEl = document.getElementById('receipt-net-paid');
   const savingsEl = document.getElementById('receipt-savings-display');
   
-  if (totalLydEl) totalLydEl.textContent = totalR1.toFixed(2);
-  if (totalUsdEl) totalUsdEl.textContent = '$' + totalR2.toFixed(2);
+  if (totalLydEl) totalLydEl.textContent = fmt2(totalR1);
+  if (totalUsdEl) totalUsdEl.textContent = fmtUsd(totalR2);
   
   // Calculate the effective average rate the customer transacted at. Use the
   // UN-rounded USD basis so a payment made exactly at the market rate shows an
@@ -33167,7 +33194,7 @@ function updateReceiptTotals() {
   // Calculate net paid (total - processing fee if any)
   const processingFee = BUSINESS_CONFIG.RECEIPT_PROCESSING_FEE_LYD || 0;
   const netPaid = totalR1 - processingFee;
-  if (netPaidEl) netPaidEl.textContent = netPaid.toFixed(2) + ' LYD';
+  if (netPaidEl) netPaidEl.textContent = fmtLyd(netPaid);
   
   // Calculate savings or extra paid compared to market rate
   const marketRate = state.defaultExchangeRate;
@@ -33188,13 +33215,13 @@ function updateReceiptTotals() {
     } else if (difference > 0) {
       // Customer saved money (paid less than market rate)
       savingsEl.className = 'mt-2 p-2 rounded-lg text-center text-sm font-bold bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400';
-      savingsEl.innerHTML = `<i data-lucide="trending-down" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'وفّر العميل' : 'Customer Saved'}: <span class="text-emerald-600 font-bold">${Security.escapeHtml(difference.toFixed(2))} LYD</span>`;
+      savingsEl.innerHTML = `<i data-lucide="trending-down" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'وفّر العميل' : 'Customer Saved'}: <span class="text-emerald-600 font-bold">${fmtLyd(difference)}</span>`;
       savingsEl.classList.remove('hidden');
     } else {
       // Customer paid extra (paid more than market rate)
       const extra = Math.abs(difference);
       savingsEl.className = 'mt-2 p-2 rounded-lg text-center text-sm font-bold bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-400';
-      savingsEl.innerHTML = `<i data-lucide="trending-up" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'دفع زيادة' : 'Paid Extra'}: <span class="text-rose-600 font-bold">${Security.escapeHtml(extra.toFixed(2))} LYD</span>`;
+      savingsEl.innerHTML = `<i data-lucide="trending-up" class="w-4 h-4 inline mr-1"></i> ${isArSav ? 'دفع زيادة' : 'Paid Extra'}: <span class="text-rose-600 font-bold">${fmtLyd(extra)}</span>`;
       savingsEl.classList.remove('hidden');
     }
     
@@ -33813,8 +33840,8 @@ async function _saveReceiptFromModalInner(sure) {
       showNotification(
         state.language === 'ar' ? 'غير ممكن' : 'Not possible',
         state.language === 'ar'
-          ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalUSD.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
-          : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalUSD.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+          ? `${fmtUsd(committedUSD)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى ${fmtUsd(totalUSD)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+          : `${fmtUsd(committedUSD)} of this receipt is already used (ads + transfers) — the total cannot go down to ${fmtUsd(totalUSD)}. Free the money first (edit/stop the ads or delete the transfer).`,
         'error'
       );
       return;
@@ -34114,7 +34141,7 @@ function showDuplicateReceiptWarning(receiptNumber, customerName, customerId) {
         <div>
           <h3 class="text-xl font-bold text-slate-800 dark:text-white mb-2">${isArDup ? 'رقم الوصل موجود بالفعل' : 'Receipt Number Already Exists'}</h3>
           <p class="text-sm text-slate-600 dark:text-slate-400">
-            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600">#${Security.escapeHtml(String(receiptNumber))}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
+            ${isArDup ? 'رقم الوصل' : 'Receipt number'} <span class="font-mono font-bold text-rose-600" dir="ltr">#${Security.escapeHtml(String(receiptNumber))}</span> ${isArDup ? 'محفوظ بالفعل.' : 'is already saved.'}
           </p>
         </div>
       </div>
@@ -34578,13 +34605,13 @@ function refreshAdMixedReceiptShortfallAction() {
   const isAr = state.language === 'ar';
   if (label) {
     label.textContent = isAr
-      ? `استخدم المدفوع $${plan.paidTotal.toFixed(2)} + غير المدفوع $${plan.shortfall.toFixed(2)}`
-      : `Use Paid $${plan.paidTotal.toFixed(2)} + Unpaid $${plan.shortfall.toFixed(2)}`;
+      ? `استخدم المدفوع ${fmtUsd(plan.paidTotal)} + غير المدفوع ${fmtUsd(plan.shortfall)}`
+      : `Use Paid ${fmtUsd(plan.paidTotal)} + Unpaid ${fmtUsd(plan.shortfall)}`;
   }
   if (help) {
     help.textContent = isAr
-      ? `فقط الفرق $${plan.shortfall.toFixed(2)} سيصبح ديناً على الوصل غير المدفوع.`
-      : `Only the $${plan.shortfall.toFixed(2)} difference becomes debt on the unpaid receipt.`;
+      ? `فقط الفرق ${fmtUsd(plan.shortfall)} سيصبح ديناً على الوصل غير المدفوع.`
+      : `Only the ${fmtUsd(plan.shortfall)} difference becomes debt on the unpaid receipt.`;
   }
 }
 
@@ -34651,11 +34678,11 @@ function startAdMixedReceiptFunding() {
       isAr ? 'لا يوجد وصل غير مدفوع كافٍ' : 'No Suitable Unpaid Receipt',
       isAr
         ? (hasAnyUnpaidReceipt
-            ? `لا يوجد وصل «غير مدفوع - في المحل» لديه رصيد كافٍ لتغطية الفرق $${shortfall.toFixed(2)}. أنشئ وصلاً بالمبلغ الكافي أولاً.`
-            : `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.`)
+            ? `لا يوجد وصل «غير مدفوع - في المحل» لديه رصيد كافٍ لتغطية الفرق ${fmtUsd(shortfall)}. أنشئ وصلاً بالمبلغ الكافي أولاً.`
+            : `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق ${fmtUsd(shortfall)}.`)
         : (hasAnyUnpaidReceipt
-            ? `No eligible “Not Paid - In Shop” receipt can record the $${shortfall.toFixed(2)} difference. Check the receipt status and collection method.`
-            : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`),
+            ? `No eligible “Not Paid - In Shop” receipt can record the ${fmtUsd(shortfall)} difference. Check the receipt status and collection method.`
+            : `Create a “Not Paid - In Shop” receipt for this customer to cover the ${fmtUsd(shortfall)} difference.`),
       'error'
     );
     return;
@@ -34689,11 +34716,11 @@ function startAdMixedReceiptFunding() {
     isAr ? (autoSelected ? 'التمويل جاهز' : 'اختر الوصل غير المدفوع') : (autoSelected ? 'Funding Ready' : 'Select the Unpaid Receipt'),
     isAr
       ? (autoSelected
-          ? `سيُستخدم $${paidTotal.toFixed(2)} من الوصل المدفوع، وسيصبح الفرق $${shortfall.toFixed(2)} ديناً على الوصل غير المدفوع. اضغط حفظ التغييرات.`
-          : `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`)
+          ? `سيُستخدم ${fmtUsd(paidTotal)} من الوصل المدفوع، وسيصبح الفرق ${fmtUsd(shortfall)} ديناً على الوصل غير المدفوع. اضغط حفظ التغييرات.`
+          : `سيُستخدم ${fmtUsd(paidTotal)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق ${fmtUsd(shortfall)}.`)
       : (autoSelected
-          ? `$${paidTotal.toFixed(2)} uses paid credit and only $${shortfall.toFixed(2)} becomes debt on the unpaid receipt. Press Save Changes.`
-          : `$${paidTotal.toFixed(2)} uses paid credit. Now choose an unpaid receipt for the $${shortfall.toFixed(2)} difference.`),
+          ? `${fmtUsd(paidTotal)} uses paid credit and only ${fmtUsd(shortfall)} becomes debt on the unpaid receipt. Press Save Changes.`
+          : `${fmtUsd(paidTotal)} uses paid credit. Now choose an unpaid receipt for the ${fmtUsd(shortfall)} difference.`),
     'info'
   );
   setTimeout(() => {
@@ -35209,11 +35236,11 @@ function refreshAdTempReceiptOptions() {
       const place = String(r.deliveryPlaceName || '').trim();
       const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
       const growthLabel = debtIncreaseUSD > 0.009
-        ? ` • ${isArT ? 'دين جديد' : 'adds debt'} $${debtIncreaseUSD.toFixed(2)} • ${isArT ? 'الإجمالي الجديد' : 'new total'} $${(reusableInfo.totalDebtUSD + debtIncreaseUSD).toFixed(2)}`
+        ? ` • ${isArT ? 'دين جديد' : 'adds debt'} ${fmtUsd(debtIncreaseUSD)} • ${isArT ? 'الإجمالي الجديد' : 'new total'} ${fmtUsd((reusableInfo.totalDebtUSD + debtIncreaseUSD))}`
         : '';
       const shopBalances = isShop
-        ? ` • ${isArT ? 'إجمالي الدين' : 'debt total'} $${reusableInfo.totalDebtUSD.toFixed(2)} • ${isArT ? 'مخصص' : 'allocated'} $${reusableInfo.usedDebtUSD.toFixed(2)} • ${isArT ? 'متاح' : 'available'} $${availableUSD.toFixed(2)}`
-        : ` • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+        ? ` • ${isArT ? 'إجمالي الدين' : 'debt total'} ${fmtUsd(reusableInfo.totalDebtUSD)} • ${isArT ? 'مخصص' : 'allocated'} ${fmtUsd(reusableInfo.usedDebtUSD)} • ${isArT ? 'متاح' : 'available'} ${fmtUsd(availableUSD)}`
+        : ` • ${fmtUsd(availableUSD)} ${isArT ? 'متاح' : 'available'}`;
       const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''}${shopBalances}${growthLabel}`;
       const selected = String(r.id) === current ? 'selected' : '';
       return `<option value="${r.id}" ${selected}>${Security.escapeHtml(optionLabel)}</option>`;
@@ -35326,11 +35353,11 @@ function onAdTempReceiptChange(receiptId) {
     const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArC ? 'وصل بدون رقم' : 'Unnumbered receipt');
     const projectedDebtUSD = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncreaseUSD;
     const growthText = debtIncreaseUSD > 0
-      ? ` • ${isArC ? 'دين جديد عند الحفظ' : 'new debt on Save'}: $${debtIncreaseUSD.toFixed(2)} • ${isArC ? 'إجمالي الدين الجديد' : 'new debt total'}: $${projectedDebtUSD.toFixed(2)}`
+      ? ` • ${isArC ? 'دين جديد عند الحفظ' : 'new debt on Save'}: ${fmtUsd(debtIncreaseUSD)} • ${isArC ? 'إجمالي الدين الجديد' : 'new debt total'}: ${fmtUsd(projectedDebtUSD)}`
       : '';
     const txt = isShop
-      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • ${isArC ? 'إجمالي الدين' : 'debt total'} $${(Number(reusableInfo.totalDebtUSD) || 0).toFixed(2)} • ${isArC ? 'مخصص' : 'allocated'} $${(Number(reusableInfo.usedDebtUSD) || 0).toFixed(2)} • ${isArC ? 'متاح' : 'available'} $${availableUSD.toFixed(2)}${growthText}`
-      : `${receiptNumber}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
+      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • ${isArC ? 'إجمالي الدين' : 'debt total'} ${fmtUsd((Number(reusableInfo.totalDebtUSD) || 0))} • ${isArC ? 'مخصص' : 'allocated'} ${fmtUsd((Number(reusableInfo.usedDebtUSD) || 0))} • ${isArC ? 'متاح' : 'available'} ${fmtUsd(availableUSD)}${growthText}`
+      : `${receiptNumber}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fmtLyd(fee)}`;
     if (hint) hint.textContent = txt;
     
     // Reusable In-Shop receipts stay editable even at $0 available: typing a
@@ -35338,8 +35365,8 @@ function onAdTempReceiptChange(receiptId) {
     if (maxDueUSD > 0.01 || (isShop && reusableInfo.eligible)) {
       if (dueSection) dueSection.classList.remove('hidden');
       if (dueAvailable) dueAvailable.textContent = debtIncreaseUSD > 0
-        ? `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} • ${isArC ? 'دين جديد' : 'New debt'}: $${debtIncreaseUSD.toFixed(2)} • ${isArC ? 'الإجمالي الجديد' : 'New total'}: $${projectedDebtUSD.toFixed(2)}`
-        : `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
+        ? `${isArC ? 'المتاح' : 'Available'}: ${fmtUsd(availableUSD)} • ${isArC ? 'دين جديد' : 'New debt'}: ${fmtUsd(debtIncreaseUSD)} • ${isArC ? 'الإجمالي الجديد' : 'New total'}: ${fmtUsd(projectedDebtUSD)}`
+        : `${isArC ? 'المتاح' : 'Available'}: ${fmtUsd(availableUSD)} (${fmtLyd(availableUSD * exchangeRate)})`;
       if (dueInput) {
         // Store the max due amount in USD for validation
         dueInput.dataset.maxDue = maxDueUSD.toString();
@@ -35436,9 +35463,9 @@ function onAdTempReceiptChange(receiptId) {
 function getAdReceiptDisplayLabel(receiptId) {
   const rid = String(receiptId || '');
   const receipt = (state.receipts || []).find(row => row && String(row.id) === rid);
-  if (!receipt) return rid ? `#${rid.slice(0, 8)}` : '';
+  if (!receipt) return rid ? codePiece(`#${rid.slice(0, 8)}`) : '';
   const serial = receipt.finalReceiptNo || receipt.serialNumber || receipt.tempReceiptNo || rid.slice(0, 8);
-  return `#${serial}`;
+  return codePiece(`#${serial}`);
 }
 
 function getOriginalAdDueAllocationUSD() {
@@ -35483,8 +35510,8 @@ function renderAdDueReceiptReplacementNotice() {
   const isAr = state.language === 'ar';
   notice.classList.remove('hidden');
   notice.textContent = isAr
-    ? `عند الحفظ: سيعود $${oldAmount.toFixed(2)} إلى ${oldLabel} وسيُحجز $${newAmount.toFixed(2)} من ${newLabel}. يتم التغيير معاً دون خصم مزدوج.`
-    : `On Save: $${oldAmount.toFixed(2)} returns to ${oldLabel}, and $${newAmount.toFixed(2)} is reserved from ${newLabel}. Both changes happen together with no double charge.`;
+    ? `عند الحفظ: سيعود ${fmtUsd(oldAmount)} إلى ${oldLabel} وسيُحجز ${fmtUsd(newAmount)} من ${newLabel}. يتم التغيير معاً دون خصم مزدوج.`
+    : `On Save: ${fmtUsd(oldAmount)} returns to ${oldLabel}, and ${fmtUsd(newAmount)} is reserved from ${newLabel}. Both changes happen together with no double charge.`;
 }
 
 function syncShopDueAllocationToFunding() {
@@ -35559,8 +35586,8 @@ function onAdDueAmountChange() {
           const newTotalUSD = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncreaseUSD;
           const isAr = state.language === 'ar';
           dueAvailable.textContent = debtIncreaseUSD > 0.009
-            ? `${isAr ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} • ${isAr ? 'دين جديد' : 'New debt'}: $${debtIncreaseUSD.toFixed(2)} • ${isAr ? 'الإجمالي الجديد' : 'New total'}: $${newTotalUSD.toFixed(2)}`
-            : `${isAr ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)}`;
+            ? `${isAr ? 'المتاح' : 'Available'}: ${fmtUsd(availableUSD)} • ${isAr ? 'دين جديد' : 'New debt'}: ${fmtUsd(debtIncreaseUSD)} • ${isAr ? 'الإجمالي الجديد' : 'New total'}: ${fmtUsd(newTotalUSD)}`
+            : `${isAr ? 'المتاح' : 'Available'}: ${fmtUsd(availableUSD)}`;
         }
       }
     }
@@ -35630,12 +35657,12 @@ function updateAdDueSummary() {
       const paidPart = getTempMergeFundingTotalUSD();
       const combined = Math.round((paidPart + usingUSD) * 100) / 100;
       summary.innerHTML = isArD
-        ? `المدفوع: <span class="font-medium text-blue-700">$${paidPart.toFixed(2)}</span> + الدين: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> = الميزانية: <strong>$${combined.toFixed(2)}</strong>. <span class="text-amber-700">الفرق فقط يبقى بالسالب حتى يدفع العميل.</span>`
-        : `Paid: <span class="font-medium text-blue-700">$${paidPart.toFixed(2)}</span> + debt: <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> = budget: <strong>$${combined.toFixed(2)}</strong>. <span class="text-amber-700">Only the difference stays minus until the customer pays.</span>`;
+        ? `المدفوع: <span class="font-medium text-blue-700">${fmtUsd(paidPart)}</span> + الدين: <span class="font-medium text-violet-700">${fmtUsd(usingUSD)}</span> = الميزانية: <strong>${fmtUsd(combined)}</strong>. <span class="text-amber-700">الفرق فقط يبقى بالسالب حتى يدفع العميل.</span>`
+        : `Paid: <span class="font-medium text-blue-700">${fmtUsd(paidPart)}</span> + debt: <span class="font-medium text-violet-700">${fmtUsd(usingUSD)}</span> = budget: <strong>${fmtUsd(combined)}</strong>. <span class="text-amber-700">Only the difference stays minus until the customer pays.</span>`;
     } else {
       summary.innerHTML = isArD
-      ? `سيتم استخدام <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى $${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
-      : `Using <span class="font-medium text-violet-700">$${usingUSD.toFixed(2)}</span> (${usingLYD.toFixed(0)} LYD) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">$${remainingUSD.toFixed(2)} (${remainingLYD.toFixed(0)} LYD) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
+      ? `سيتم استخدام <span class="font-medium text-violet-700">${fmtUsd(usingUSD)}</span> (${fmtLyd(usingLYD)}) من المستحق. ${remainingUSD > 0 ? `<span class="text-slate-400">سيتبقى ${fmtUsd(remainingUSD)} (${fmtLyd(remainingLYD)}).</span>` : '<span class="text-emerald-600">سيتم استخدام الرصيد بالكامل.</span>'}`
+      : `Using <span class="font-medium text-violet-700">${fmtUsd(usingUSD)}</span> (${fmtLyd(usingLYD)}) from due. ${remainingUSD > 0 ? `<span class="text-slate-400">${fmtUsd(remainingUSD)} (${fmtLyd(remainingLYD)}) will remain.</span>` : '<span class="text-emerald-600">Full credit will be used.</span>'}`;
     }
   } else {
     summary.innerHTML = `<span class="text-amber-600">${isArD ? 'أدخل المبلغ المراد استخدامه من الوصل المستحق.' : 'Enter amount to use from due receipt.'}</span>`;
@@ -35746,8 +35773,8 @@ function syncMixedShopReceiptDifference() {
   if (dueAvailable) {
     const newTotal = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncrease;
     dueAvailable.textContent = debtIncrease > 0.009
-      ? `Available: $${available.toFixed(2)} • New debt: $${debtIncrease.toFixed(2)} • New total: $${newTotal.toFixed(2)}`
-      : `Available: $${available.toFixed(2)}`;
+      ? `Available: ${fmtUsd(available)} • New debt: ${fmtUsd(debtIncrease)} • New total: ${fmtUsd(newTotal)}`
+      : `Available: ${fmtUsd(available)}`;
   }
   updateAdDueSummary();
   syncShopDueAllocationToFunding();
@@ -35800,7 +35827,7 @@ function renderAdMergedFundingList() {
       const usage = getReceiptUsageStats(r);
       const avail = Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(r.id, 'merged')) * 100) / 100;
       const serial = r.serialNumber || r.finalReceiptNo || (r.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : (r.id ? String(r.id).slice(0,6) : '???'));
-      const label = `#${serial} • $${avail.toFixed(2)} ${isArM ? 'متاح' : 'avail'}`;
+      const label = `${codePiece(`#${serial}`)} • ${fmtUsd(avail)} ${isArM ? 'متاح' : 'avail'}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
 
@@ -35834,7 +35861,7 @@ function renderAdMergedFundingList() {
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400">
-            ${isArM ? 'المتاح' : 'Available'}: <span class="text-emerald-600 font-medium">$${receiptRemaining.toFixed(2)}</span>
+            ${isArM ? 'المتاح' : 'Available'}: <span class="text-emerald-600 font-medium">${fmtUsd(receiptRemaining)}</span>
           </div>
         ` : ''}
       </div>
@@ -35861,7 +35888,7 @@ function refreshAdMergedFundingSummary() {
   const totalUSD = allocations.reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
   summary.innerHTML = `<div class="flex items-center justify-between py-1">
     <span class="text-xs text-blue-600">${state.language === 'ar' ? 'الإجمالي من الوصولات المدفوعة' : 'Total from Paid Receipts'}</span>
-    <span class="text-sm font-semibold text-blue-700">$${totalUSD.toFixed(2)}</span>
+    <span class="text-sm font-semibold text-blue-700">${fmtUsd(totalUSD)}</span>
   </div>`;
 }
 
@@ -36063,8 +36090,8 @@ function updateAdDriverBudgetSummary() {
     return;
   }
   summary.textContent = isAr
-    ? `الميزانية: $${budget.toFixed(2)} ≈ ${(budget * rate).toFixed(2)} LYD`
-    : `Budget: $${budget.toFixed(2)} ≈ ${(budget * rate).toFixed(2)} LYD`;
+    ? `الميزانية: ${fmtUsd(budget)} ≈ ${fmtLyd((budget * rate))}`
+    : `Budget: ${fmtUsd(budget)} ≈ ${fmtLyd((budget * rate))}`;
 }
 
 // Set Ad Payment Status (Paid / Not Paid)
@@ -36829,8 +36856,8 @@ function renderAdPaidReceiptReplacementNotice() {
   const to = addedLabels.join(', ') || (isAr ? 'الوصل المحدد' : 'the selected receipt');
   notice.classList.remove('hidden');
   notice.textContent = isAr
-    ? `عند الحفظ: سيعود $${returned.toFixed(2)} إلى ${from} وسيُستخدم $${used.toFixed(2)} من ${to}. الإعلان وأرصدة الوصولات تتحدث معاً دون خصم مزدوج.`
-    : `On Save: $${returned.toFixed(2)} returns to ${from}, and $${used.toFixed(2)} is used from ${to}. The ad and both receipt balances update together with no double charge.`;
+    ? `عند الحفظ: سيعود ${fmtUsd(returned)} إلى ${from} وسيُستخدم ${fmtUsd(used)} من ${to}. الإعلان وأرصدة الوصولات تتحدث معاً دون خصم مزدوج.`
+    : `On Save: ${fmtUsd(returned)} returns to ${from}, and ${fmtUsd(used)} is used from ${to}. The ad and both receipt balances update together with no double charge.`;
 }
 
 function refreshAdFundingRow(idx) {
@@ -36856,11 +36883,11 @@ function refreshAdFundingRow(idx) {
   const balance = Math.round((receiptRemaining - plannedSpend) * 100) / 100;
   const receiptRate = receipt?.exchangeRate || state.defaultExchangeRate || '-';
 
-  if (remainingEl) remainingEl.textContent = `$${Number(receiptRemaining || 0).toFixed(2)}`;
+  if (remainingEl) remainingEl.textContent = `${fmtUsd(Number(receiptRemaining || 0))}`;
   if (balanceEl) {
     balanceEl.textContent = balance < -0.005
-      ? `${state.language === 'ar' ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`
-      : `$${Number(balance || 0).toFixed(2)}`;
+      ? `${state.language === 'ar' ? 'عجز' : 'Short'} ${fmtUsd(Math.abs(balance))}`
+      : `${fmtUsd(Number(balance || 0))}`;
     balanceEl.className = balance < -0.005
       ? 'text-rose-600 dark:text-rose-400 font-bold'
       : 'text-blue-600 dark:text-blue-400 font-medium';
@@ -36971,7 +36998,7 @@ function renderAdFundingList() {
       // share), never the receipt's face value: a paid receipt whose credit
       // already funded other ads must not read as fresh money.
       const rSpendable = Math.round((Math.max(Number(getReceiptUsageStats(r)?.remainingUSD) || 0, 0) + getEditingAdExistingAllocationUSD(r.id)) * 100) / 100;
-      const label = `#${serial} • $${rSpendable.toFixed(2)}${staleLabel}`;
+      const label = `${codePiece(`#${serial}`)} • ${fmtUsd(rSpendable)}${staleLabel}`;
       return `<option value="${r.id || ''}" ${alloc.receiptId === r.id ? 'selected' : ''}>${Security.escapeHtml(label)}</option>`;
     }).join('');
     
@@ -36990,8 +37017,8 @@ function renderAdFundingList() {
     const plannedSpend = parseFloat(alloc.amountUSD) || 0;
     const balance = Math.round((receiptRemaining - plannedSpend) * 100) / 100;
     const balanceText = balance < -0.005
-      ? `${isArL ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`
-      : `$${balance.toFixed(2)}`;
+      ? `${isArL ? 'عجز' : 'Short'} ${fmtUsd(Math.abs(balance))}`
+      : `${fmtUsd(balance)}`;
     
     return `
       <div class="space-y-2">
@@ -37014,7 +37041,7 @@ function renderAdFundingList() {
         </div>
         ${receipt ? `
           <div class="text-[10px] text-slate-400 space-y-0.5">
-            <div>${isArL ? 'المتبقي' : 'Remaining'}: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">$${receiptRemaining.toFixed(2)}</span></div>
+            <div>${isArL ? 'المتبقي' : 'Remaining'}: <span id="ad-funding-remaining-${idx}" class="text-emerald-600 dark:text-emerald-400 font-medium">${fmtUsd(receiptRemaining)}</span></div>
             <div>${isArL ? 'الرصيد' : 'Balance'}: <span id="ad-funding-balance-${idx}" class="${balance < -0.005 ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-blue-600 dark:text-blue-400 font-medium'}">${balanceText}</span></div>
             <div>${isArL ? 'السعر' : 'Rate'}: <span id="ad-funding-rate-${idx}" class="text-slate-600 dark:text-slate-300">${receiptRate}</span></div>
           </div>
@@ -37065,7 +37092,7 @@ function refreshAdFundingSummary() {
   summary.innerHTML = `
     <div class="flex items-center justify-between py-1.5">
       <span class="text-xs text-slate-500">${state.language === 'ar' ? 'إجمالي الرصيد' : 'Total Balance'}</span>
-      <span class="text-sm font-semibold ${totalBalance > 0 ? 'text-emerald-600' : 'text-slate-500'}">$${totalBalance.toFixed(2)}</span>
+      <span class="text-sm font-semibold ${totalBalance > 0 ? 'text-emerald-600' : 'text-slate-500'}">${fmtUsd(totalBalance)}</span>
     </div>
   `;
 }
@@ -37967,19 +37994,19 @@ function renderModal() {
                 <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الميزانية الأصلية' : 'Original planned budget'}</div>
-                    <div class="font-bold">$${stoppedPlannedUSD.toFixed(2)}</div>
+                    <div class="font-bold">${fmtUsd(stoppedPlannedUSD)}</div>
                   </div>
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'المصروف الفعلي النهائي' : 'Final actual spend'}</div>
-                    <div class="font-bold text-orange-700 dark:text-orange-300">$${stoppedFinalUSD.toFixed(2)}</div>
+                    <div class="font-bold text-orange-700 dark:text-orange-300">${fmtUsd(stoppedFinalUSD)}</div>
                   </div>
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'تمويل الوصولات الملتزم' : 'Receipt funding committed'}</div>
-                    <div class="font-bold text-blue-700 dark:text-blue-300">$${stoppedCommittedUSD.toFixed(2)}</div>
+                    <div class="font-bold text-blue-700 dark:text-blue-300">${fmtUsd(stoppedCommittedUSD)}</div>
                   </div>
                   <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
                     <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الرصيد المُعاد' : 'Balance returned'}</div>
-                    <div class="font-bold text-emerald-700 dark:text-emerald-300">$${stoppedReturnedUSD.toFixed(2)}</div>
+                    <div class="font-bold text-emerald-700 dark:text-emerald-300">${fmtUsd(stoppedReturnedUSD)}</div>
                   </div>
                 </div>
               </div>
@@ -38147,8 +38174,8 @@ function renderModal() {
                     />
                     ${metaBudget > 0 ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isArAd ? 'تلقائي من Meta — نفس الميزانية المخططة الحقيقية للإعلان' : "Automatic from Meta — the ad's real planned budget"}</span></div>` : ''}
                     ${metaBudgetBlocked ? `<div class="mt-1 flex items-start gap-1 rounded-lg bg-amber-100 p-2 text-[11px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="alert-triangle" class="h-3 w-3 shrink-0 mt-0.5"></i><span>${isArAd
-                      ? `ميزانية Meta ($${metaBudgetRaw.toFixed(2)}) أقل من المبلغ المحجوز على وصولات هذا الإعلان ($${committedUSD.toFixed(2)})، لذلك تُترك الميزانية للتعديل اليدوي. صحّح مبلغ الوصل أو الميزانية في Meta.`
-                      : `Meta's budget ($${metaBudgetRaw.toFixed(2)}) is lower than the money already reserved on this ad's receipts ($${committedUSD.toFixed(2)}), so the budget stays editable. Fix the receipt amount or the budget in Meta.`}</span></div>` : ''}`;
+                      ? `ميزانية Meta (${fmtUsd(metaBudgetRaw)}) أقل من المبلغ المحجوز على وصولات هذا الإعلان (${fmtUsd(committedUSD)})، لذلك تُترك الميزانية للتعديل اليدوي. صحّح مبلغ الوصل أو الميزانية في Meta.`
+                      : `Meta's budget (${fmtUsd(metaBudgetRaw)}) is lower than the money already reserved on this ad's receipts (${fmtUsd(committedUSD)}), so the budget stays editable. Fix the receipt amount or the budget in Meta.`}</span></div>` : ''}`;
                     })()}
                     <input type="hidden" id="ad-driver-budget-rate" value="${Security.escapeHtml(String(adData.exchangeRate || state.defaultExchangeRate || 1))}" />
                     <div id="ad-driver-budget-summary" class="text-[11px] text-violet-600 dark:text-violet-300"></div>
@@ -38263,8 +38290,8 @@ function renderModal() {
               </div>
               <div id="ad-driver-settlement-hint" class="hidden p-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-xs text-amber-700 dark:text-amber-300">
                 ${isArAd
-                  ? `المبلغ المطلوب تسويته: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
-                  : `Amount to settle: <strong>$${adSettleTargetUSD.toFixed(2)}</strong>. Paid receipt funding must total this amount.`}
+                  ? `المبلغ المطلوب تسويته: <strong>${fmtUsd(adSettleTargetUSD)}</strong>. يجب أن يساوي مجموع الوصولات المدفوعة هذا المبلغ.`
+                  : `Amount to settle: <strong>${fmtUsd(adSettleTargetUSD)}</strong>. Paid receipt funding must total this amount.`}
               </div>
               <div id="ad-funding-list" class="space-y-2 bg-white dark:bg-slate-900 rounded-lg p-2 min-h-[60px]">
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
@@ -39059,8 +39086,8 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
             <div class="text-xs text-slate-500 mb-1">${isArT ? 'الرصيد المتاح' : 'Available Balance'}</div>
-            <div class="text-lg font-bold text-blue-700 dark:text-blue-200">$${availableUSD.toFixed(2)} USD</div>
-            <div class="text-xs text-slate-500">~ ${(availableUSD * (transferReceipt.exchangeRate || state.defaultExchangeRate || 1)).toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-blue-700 dark:text-blue-200">${fmtUsd(availableUSD)}</div>
+            <div class="text-xs text-slate-500">~ ${fmtLyd((availableUSD * (transferReceipt.exchangeRate || state.defaultExchangeRate || 1)))}</div>
           </div>
 
           ${transferCustomers.length === 0 ? `
@@ -39078,7 +39105,7 @@ function renderModal() {
             <div>
               <label class="block text-sm font-medium mb-2">${isArT ? 'المبلغ (USD) *' : 'Amount (USD) *'}</label>
               <input type="text" inputmode="decimal" id="transfer-amount-usd" value="${availableUSD.toFixed(2)}" class="w-full glass-input px-4 py-2 rounded-xl" min="0" max="${availableUSD.toFixed(2)}" oninput="sanitizeMoneyInput(this)" />
-              <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} $${availableUSD.toFixed(2)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isArT ? 'المتاح:' : 'Available:'} ${fmtUsd(availableUSD)}</p>
               </div>
             <div>
               <label class="block text-sm font-medium mb-2">${isArT ? 'ملاحظة (اختياري)' : 'Note (optional)'}</label>
@@ -39097,7 +39124,7 @@ function renderModal() {
                   const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown')));
                   return `<div class="flex justify-between">
                     <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
-                    <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
+                    <span class="font-medium">${fmtUsd((t.amountUSD || 0))} ${isArT ? '←' : '→'} ${name}</span>
                   </div>`;
                 }).join('')}
               </div>
@@ -39130,7 +39157,7 @@ function renderModal() {
           <input type="hidden" id="split-payments-receipt-id" value="${Security.escapeHtml(String(splitReceipt.id || ''))}" />
           <div class="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl">
             <div class="text-sm font-medium text-indigo-700 dark:text-indigo-300 mb-2">${isArS ? 'إجمالي الوصل' : 'Receipt Total'}</div>
-            <div class="text-2xl font-bold text-indigo-600">$${splitReceipt.amountUSD?.toFixed(2)} = ${splitReceipt.amountLocal?.toFixed(2)} LYD</div>
+            <div class="text-2xl font-bold text-indigo-600">${fmtUsd(splitReceipt.amountUSD)} = ${fmtLyd(splitReceipt.amountLocal)}</div>
             <div class="text-xs text-slate-500 mt-1">${isArS ? 'سعر الصرف:' : 'Exchange Rate:'} ${splitReceipt.exchangeRate}</div>
           </div>
 
@@ -39224,17 +39251,17 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl">
             <div class="text-sm font-medium text-blue-700 dark:text-blue-300">${isArTU ? 'تفاصيل الإعلان' : 'Ad Details'}</div>
-            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: $${(parseFloat(topUpBase) || 0).toFixed(2)} → ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">$${((parseFloat(topUpBase) || 0) + topUpWorkingTotal).toFixed(2)}</span></div>
+            <div class="text-lg font-bold text-blue-600 mt-1">${isArTU ? 'الأصلي' : 'Original'}: ${fmtUsd((parseFloat(topUpBase) || 0))} ${isArTU ? '←' : '→'} ${isArTU ? 'الجديد' : 'New'}: <span id="topup-preview-new">${fmtUsd(((parseFloat(topUpBase) || 0) + topUpWorkingTotal))}</span></div>
             ${topUpBaseEndOk ? `<div class="text-sm font-medium text-blue-700 dark:text-blue-300 mt-1">${isArTU ? 'النهاية' : 'End'}: <span id="topup-preview-end" class="font-bold">${topUpNewEnd.toLocaleDateString(appDateLocale())}</span> <span id="topup-preview-end-extra" class="text-xs">${topUpWorkingDays > 0 ? (isArTU ? `(الأصلية ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} يوم)` : `(original ${new Date(topUpBaseEnd).toLocaleDateString(appDateLocale())} + ${topUpWorkingDays} day${topUpWorkingDays > 1 ? 's' : ''})`) : ''}</span></div>` : ''}
-            ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">$${topUpAvailable.toFixed(2)}</span></div>` : ''}
-            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: $${topUpWorkingTotal.toFixed(2)}</div>` : ''}
+            ${topUpAvailable !== null ? `<div class="text-sm font-bold mt-1 text-blue-700 dark:text-blue-300">${isArTU ? 'المتاح من وصولات التمويل' : 'Available on funding receipt(s)'}: <span id="topup-preview-available" class="${topUpAvailable < 0.01 ? 'text-rose-600' : 'text-emerald-600'}">${fmtUsd(topUpAvailable)}</span></div>` : ''}
+            ${existingTopUps.length > 0 ? `<div class="text-xs text-slate-500 mt-1">${isArTU ? 'إجمالي الشحنات' : 'Total top-ups'}: ${fmtUsd(topUpWorkingTotal)}</div>` : ''}
           </div>
 
           <div id="topups-container" class="space-y-2">
             ${existingTopUps.map((topup, idx) => `
               <div class="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
-                  <div class="font-medium">$${topup.amount}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
+                  <div class="font-medium">${fmtUsd(topup.amount)}${(parseInt(topup.extendDays, 10) || 0) > 0 ? ` <span class="text-xs font-bold text-emerald-600">${isArTU ? `+${topup.extendDays} يوم` : `+${topup.extendDays} day${topup.extendDays > 1 ? 's' : ''}`}</span>` : ''}</div>
                   <div class="text-xs text-slate-500">${new Date(topup.date).toLocaleDateString(appDateLocale())} - ${Security.escapeHtml(topup.note || '')}</div>
                 </div>
                 <button type="button" onclick="removeTopUp(${idx})" class="text-rose-500 hover:text-rose-700">
@@ -39290,9 +39317,9 @@ function renderModal() {
         <div class="space-y-4">
           <div class="p-4 bg-rose-50 dark:bg-rose-900/20 rounded-xl">
             <div class="text-sm font-medium text-rose-700 dark:text-rose-300">${isArRf ? 'مبلغ الإعلان' : 'Ad Amount'}</div>
-            <div class="text-2xl font-bold text-rose-600">$${refundAd.amountUSD} (${refundAd.amountLocal} LYD)</div>
+            <div class="text-2xl font-bold text-rose-600">${fmtUsd(refundAd.amountUSD)} (${fmtLyd(refundAd.amountLocal)})</div>
             ${refundAd.refundType && refundAd.refundType !== 'None' ? `
-              <div class="text-xs text-slate-500 mt-2">${isArRf ? 'الاسترجاع الحالي' : 'Current Refund'}: ${trStatus(refundAd.refundType)} - $${refundAd.refundAmount || 0} (${trStatus(refundAd.refundStatus || 'Pending')})</div>
+              <div class="text-xs text-slate-500 mt-2">${isArRf ? 'الاسترجاع الحالي' : 'Current Refund'}: ${trStatus(refundAd.refundType)} - ${fmtUsd(refundAd.refundAmount)} (${trStatus(refundAd.refundStatus || 'Pending')})</div>
             ` : ''}
           </div>
 
@@ -39556,7 +39583,7 @@ function renderModal() {
         if (d === 365 || d === 360) return isRTL ? '/ سنة' : '/ year';
         return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
       };
-      const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
+      const lockMoney = (minor) => walletShow(Math.max(0, Number(minor) || 0), 'LYD');
       const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(${Math.max(0, (Number(lockPlans[0]?.priceMinor) || 0) - lydBalanceMinor)}); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
       // Charge wallet is admin-only outside the Ads Studio: others ask the office.
       const lockCanCharge = isCurrentUserAdmin() || (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL);
@@ -39722,7 +39749,7 @@ function renderModal() {
     case 'wallet-topup': {
       const isArW = state.language === 'ar';
       const topupUser = state.users.find(u => u.id === state.modalData?.userId);
-      const balanceLabel = topupUser ? walletFormatMinor(WALLET.getBalanceMinor(topupUser.id), WALLET.currency) : '';
+      const balanceLabel = topupUser ? walletShow(WALLET.getBalanceMinor(topupUser.id), WALLET.currency) : '';
       modalContent = `
         <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
           <i data-lucide="banknote" class="w-6 h-6 text-emerald-600"></i>
@@ -40435,7 +40462,7 @@ async function handleModalSubmit() {
         });
         showNotification(
           isArW ? 'تم الشحن' : 'Credited',
-          isArW ? `تمت إضافة ${walletFormatMinor(tx.amountMinor, tx.currency)} إلى المحفظة.` : `${walletFormatMinor(tx.amountMinor, tx.currency)} added to the wallet.`,
+          isArW ? `تمت إضافة ${walletShow(tx.amountMinor, tx.currency)} إلى المحفظة.` : `${walletShow(tx.amountMinor, tx.currency)} added to the wallet.`,
           'success'
         );
       } catch (e) {
@@ -40816,11 +40843,11 @@ async function handleModalSubmit() {
             isArSubAd ? 'تنبيه' : 'Validation',
             isTerminalSettle
               ? (isArSubAd
-                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) المبلغ المُنفَق المستحق على هذا الإعلان المنتهي ($${requiredSettleUSD.toFixed(2)}).`
-                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal this finished ad's committed spend ($${requiredSettleUSD.toFixed(2)}).`)
+                ? `يجب أن يساوي مجموع تمويل الوصولات (${fmtUsd(totalAllocated)}) المبلغ المُنفَق المستحق على هذا الإعلان المنتهي (${fmtUsd(requiredSettleUSD)}).`
+                : `Receipt funding (${fmtUsd(totalAllocated)}) must equal this finished ad's committed spend (${fmtUsd(requiredSettleUSD)}).`)
               : (isArSubAd
-                ? `يجب أن يساوي مجموع تمويل الوصولات ($${totalAllocated.toFixed(2)}) مبلغ الإعلان غير المدفوع ($${requiredSettleUSD.toFixed(2)}).`
-                : `Receipt funding ($${totalAllocated.toFixed(2)}) must equal the unpaid ad amount ($${requiredSettleUSD.toFixed(2)}).`),
+                ? `يجب أن يساوي مجموع تمويل الوصولات (${fmtUsd(totalAllocated)}) مبلغ الإعلان غير المدفوع (${fmtUsd(requiredSettleUSD)}).`
+                : `Receipt funding (${fmtUsd(totalAllocated)}) must equal the unpaid ad amount (${fmtUsd(requiredSettleUSD)}).`),
             'error'
           );
           return;
@@ -40874,8 +40901,8 @@ async function handleModalSubmit() {
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ $${shortfall.toFixed(2)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
-                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by $${shortfall.toFixed(2)}. Add a second receipt or choose one with enough balance.`,
+                ? `مبلغ الإعلان لم يتغير. ينقص الوصل ${receipt.serialNumber || receipt.id} مبلغ ${fmtUsd(shortfall)}. أضف وصلاً ثانياً أو اختر وصلاً برصيد كافٍ.`
+                : `The ad amount was not changed. Receipt ${receipt.serialNumber || receipt.id} is short by ${fmtUsd(shortfall)}. Add a second receipt or choose one with enough balance.`,
               'error'
             );
             return;
@@ -40998,8 +41025,8 @@ async function handleModalSubmit() {
               showNotification(
                 isArSubAd ? 'تنبيه' : 'Validation',
                 isArSubAd
-                  ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
-                  : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
+                  ? `صرف الرصيد المستحق (${fmtUsd(dueAmountToUseUSD)}) يتجاوز المتاح (${fmtUsd(effectiveAvailable)}).`
+                  : `Due credit spend (${fmtUsd(dueAmountToUseUSD)}) exceeds available (${fmtUsd(effectiveAvailable)}).`,
                 'error'
               );
               return;
@@ -41070,8 +41097,8 @@ async function handleModalSubmit() {
             showNotification(
               isArSubAd ? 'تنبيه' : 'Validation',
               isArSubAd
-                ? `الصرف المدمج ($${plannedTotal.toFixed(2)}) يتجاوز الرصيد المتاح ($${remaining.toFixed(2)}) للوصل ${receipt.serialNumber || receipt.id}.`
-                : `Merged spend ($${plannedTotal.toFixed(2)}) exceeds available balance ($${remaining.toFixed(2)}) for receipt ${receipt.serialNumber || receipt.id}.`,
+                ? `الصرف المدمج (${fmtUsd(plannedTotal)}) يتجاوز الرصيد المتاح (${fmtUsd(remaining)}) للوصل ${receipt.serialNumber || receipt.id}.`
+                : `Merged spend (${fmtUsd(plannedTotal)}) exceeds available balance (${fmtUsd(remaining)}) for receipt ${receipt.serialNumber || receipt.id}.`,
               'error'
             );
             return;
@@ -41112,8 +41139,8 @@ async function handleModalSubmit() {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isArSubAd
-              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي $${amountUSD.toFixed(2)} من الميزانية المطلوبة $${intendedBudget.toFixed(2)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
-              : `The unpaid receipt does not cover the full difference. Current funding is $${amountUSD.toFixed(2)} of the intended $${intendedBudget.toFixed(2)}. Choose another receipt or enter a smaller budget.`,
+              ? `الوصل غير المدفوع لا يغطي الفرق كاملاً. التمويل الحالي ${fmtUsd(amountUSD)} من الميزانية المطلوبة ${fmtUsd(intendedBudget)}. اختر وصلاً آخر أو أدخل ميزانية أصغر.`
+              : `The unpaid receipt does not cover the full difference. Current funding is ${fmtUsd(amountUSD)} of the intended ${fmtUsd(intendedBudget)}. Choose another receipt or enter a smaller budget.`,
             'error'
           );
           return;
@@ -41128,8 +41155,8 @@ async function handleModalSubmit() {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isArSubAd
-              ? `إجمالي التمويل ($${fundedTotal.toFixed(2)}) أكبر من ميزانية الإعلان ($${amountUSD.toFixed(2)}).`
-              : `Receipt funding ($${fundedTotal.toFixed(2)}) exceeds the ad budget ($${amountUSD.toFixed(2)}).`,
+              ? `إجمالي التمويل (${fmtUsd(fundedTotal)}) أكبر من ميزانية الإعلان (${fmtUsd(amountUSD)}).`
+              : `Receipt funding (${fmtUsd(fundedTotal)}) exceeds the ad budget (${fmtUsd(amountUSD)}).`,
             'error'
           );
           return;
@@ -42134,7 +42161,7 @@ async function deleteReceipt(id, seen) {
     return;
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
-  const amountUSD = (Number(receipt?.amountUSD) || 0).toFixed(2);
+  const amountUSD = fmtUsd(receipt?.amountUSD);
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
@@ -42164,8 +42191,8 @@ async function deleteReceipt(id, seen) {
     return;
   }
   let warning = isArDel
-    ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} ($${amountUSD})؟`
-    : `Are you sure you want to delete receipt #${serialNo} ($${amountUSD})?`;
+    ? `هل أنت متأكد من حذف الوصل رقم ${serialNo} (${amountUSD})؟`
+    : `Are you sure you want to delete receipt #${serialNo} (${amountUSD})?`;
   if (linkedAds.length > 0) {
     warning += isArDel
       ? `\n\n⚠️ تحذير: ${linkedAds.length} إعلان(ات) ممولة من هذا الوصل. سيتم تنظيف ارتباطات التمويل الخاصة بها.`
@@ -42174,8 +42201,8 @@ async function deleteReceipt(id, seen) {
   if (transferSource) {
     const srcLabel = transferSource.serialNumber || transferSource.id.slice(0, 8);
     warning += isArDel
-      ? `\n\n↩️ هذا وصل محوَّل — سيعود مبلغه ($${amountUSD}) إلى الوصل الأصلي رقم ${srcLabel}.`
-      : `\n\n↩️ This is a transferred-in receipt — its $${amountUSD} will return to source receipt #${srcLabel}.`;
+      ? `\n\n↩️ هذا وصل محوَّل — سيعود مبلغه (${amountUSD}) إلى الوصل الأصلي رقم ${srcLabel}.`
+      : `\n\n↩️ This is a transferred-in receipt — its ${amountUSD} will return to source receipt #${srcLabel}.`;
   }
   if (outgoingTargets.length > 0) {
     warning += isArDel
@@ -42194,7 +42221,7 @@ async function deleteReceipt(id, seen) {
     if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
     let detail = isArDel ? 'تم حذف الوصل' : 'Receipt deleted';
     if (linkedAds.length > 0) detail += isArDel ? ` (تم تنظيف ${linkedAds.length} ارتباط تمويل)` : ` (${linkedAds.length} ad allocation(s) cleaned up)`;
-    if (returnedTo) detail += isArDel ? ` — عاد $${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — $${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
+    if (returnedTo) detail += isArDel ? ` — عاد ${amountUSD} إلى الوصل رقم ${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}` : ` — ${amountUSD} returned to receipt #${returnedTo.serialNumber || returnedTo.id.slice(0, 8)}`;
     if (cascadeCount > 0) detail += isArDel ? ` — تم حذف ${cascadeCount} وصل محوَّل مرتبط` : ` — ${cascadeCount} linked transferred-in receipt(s) deleted`;
     showNotification(isArDel ? 'تم الحذف' : 'Deleted', detail, 'success');
     render();
@@ -42215,26 +42242,26 @@ async function deleteAd(id, seen) {
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
-  const amountUSD = (Number(ad?.amountUSD) || 0).toFixed(2);
+  const amountUSD = fmtUsd(ad?.amountUSD);
   // Say where the money goes: a deleted ad's allocations stop counting, so its funded amount is free again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
     : 0;
   let warning = isAr
-    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}`
-    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}`;
+    ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: ${amountUSD}`
+    : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: ${amountUSD}`;
   if (fundedUSD > 0) {
     warning += isAr
-      ? `\n\n↩️ سيعود $${fundedUSD.toFixed(2)} إلى رصيد وصل(وصولات) التمويل.`
-      : `\n\n↩️ $${fundedUSD.toFixed(2)} will return to the funding receipt(s) balance.`;
+      ? `\n\n↩️ سيعود ${fmtUsd(fundedUSD)} إلى رصيد وصل(وصولات) التمويل.`
+      : `\n\n↩️ ${fmtUsd(fundedUSD)} will return to the funding receipt(s) balance.`;
   }
   // Unpaid In-Shop: the server takes this ad's debt off the open receipt at once (due rows, else the legacy mirror).
   if (ad?.paymentStatus === 'not_paid' && ad.collectionMethod === 'in_shop' && ad.receiptId) {
     const rows = (Array.isArray(ad.dueAllocations) ? ad.dueAllocations : []).filter(r => r?.receiptId === ad.receiptId);
     const dueUSD = rows.length ? _relinkPoolSum(rows) : Number(ad.dueAmountToUseUSD) || 0;
     if (Math.round(dueUSD * 100) > 0) warning += isAr
-      ? `\n\n↩️ سيُزال دين هذا الإعلان غير المدفوع (حتى $${dueUSD.toFixed(2)}) من وصل العميل المفتوح.`
-      : `\n\n↩️ This ad's unpaid debt (up to $${dueUSD.toFixed(2)}) will be removed from the customer's open receipt.`;
+      ? `\n\n↩️ سيُزال دين هذا الإعلان غير المدفوع (حتى ${fmtUsd(dueUSD)}) من وصل العميل المفتوح.`
+      : `\n\n↩️ This ad's unpaid debt (up to ${fmtUsd(dueUSD)}) will be removed from the customer's open receipt.`;
   }
   warning += isAr
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
@@ -42489,12 +42516,14 @@ function metaAdsFindLocalAd(adId) {
 function metaAdsFormatMoney(minor, currency) {
   const amount = Math.max(0, Number(minor) || 0) / 100;
   const code = String(currency || 'USD').toUpperCase().slice(0, 12);
+  // In Arabic the amount is one left-to-right piece, so "$" stays in front of its number (moneyPiece, 07).
+  const piece = text => (typeof moneyPiece === 'function' ? moneyPiece(text) : text);
   try {
-    return new Intl.NumberFormat('en-US', {  // en-US in Arabic too: ar-LY prints 1.250,00
+    return piece(new Intl.NumberFormat('en-US', {  // en-US in Arabic too: ar-LY prints 1.250,00
       style: 'currency', currency: code, minimumFractionDigits: 2, maximumFractionDigits: 2
-    }).format(amount);
+    }).format(amount));
   } catch (_) {
-    return `${amount.toFixed(2)} ${code}`;
+    return piece(`${amount.toFixed(2)} ${code}`);
   }
 }
 
@@ -43383,8 +43412,8 @@ function stopAd(id) {
           <div>
             <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">
               <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
-              <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> $${adAmountUSD.toFixed(2)}<br>
-              <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> $${totalAllocated.toFixed(2)}
+              <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> ${fmtUsd(adAmountUSD)}<br>
+              <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> ${fmtUsd(totalAllocated)}
               ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString(appDateLocale())}` : ''}
             </p>
           </div>
@@ -43393,8 +43422,8 @@ function stopAd(id) {
             <div class="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-xl p-3">
               <div class="text-xs font-medium text-orange-800 dark:text-orange-200 mb-2">${isAr ? 'الإدخال السابق:' : 'Previous Entry:'}</div>
               <div class="text-xs text-slate-600 dark:text-slate-400 space-y-1">
-                <div>${isAr ? 'المصروف' : 'Spent'}: <span class="font-bold text-orange-600">$${currentSpentUSD.toFixed(2)}</span></div>
-                <div>${isAr ? 'المتبقي المُرجَع' : 'Remaining Returned'}: <span class="font-bold text-emerald-600">$${previousRemaining.toFixed(2)}</span></div>
+                <div>${isAr ? 'المصروف' : 'Spent'}: <span class="font-bold text-orange-600">${fmtUsd(currentSpentUSD)}</span></div>
+                <div>${isAr ? 'المتبقي المُرجَع' : 'Remaining Returned'}: <span class="font-bold text-emerald-600">${fmtUsd(previousRemaining)}</span></div>
               </div>
             </div>
           ` : ''}
@@ -43415,24 +43444,24 @@ function stopAd(id) {
               placeholder="0.00"
             />
             <p id="stop-ad-spent-help" class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : (manualSpentOverride ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500')}">${manualSpentOverride
-              ? (isAr ? `هذا هو التصحيح النهائي المحفوظ: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (تعرض Meta الآن $${metaSpendUSD.toFixed(2)}).`}` : `This is the saved final correction: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (Meta currently reports $${metaSpendUSD.toFixed(2)}).`}`)
+              ? (isAr ? `هذا هو التصحيح النهائي المحفوظ: ${fmtUsd(currentSpentUSD)}${metaSpendUSD === null ? '.' : ` (تعرض Meta الآن ${fmtUsd(metaSpendUSD)}).`}` : `This is the saved final correction: ${fmtUsd(currentSpentUSD)}${metaSpendUSD === null ? '.' : ` (Meta currently reports ${fmtUsd(metaSpendUSD)}).`}`)
               : metaSpendAuto
-              ? (isAr ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه قبل الحفظ إذا كان المبلغ النهائي في Facebook مختلفاً.` : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if Facebook's final amount is different.`)
+              ? (isAr ? `معبأ من Meta: ${fmtUsd(metaSpendUSD)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه قبل الحفظ إذا كان المبلغ النهائي في Facebook مختلفاً.` : `Prefilled from Meta: ${fmtUsd(metaSpendUSD)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if Facebook's final amount is different.`)
               : (isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad'))}</p>
           </div>
           
           <div id="stop-ad-calculations" class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 space-y-2">
             <div class="flex justify-between text-sm">
               <span class="text-slate-600 dark:text-slate-400">${isAr ? 'مبلغ الإعلان:' : 'Ad Amount:'}</span>
-              <span class="font-bold">$${adAmountUSD.toFixed(2)}</span>
+              <span class="font-bold">${fmtUsd(adAmountUSD)}</span>
             </div>
             <div class="flex justify-between text-sm">
               <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ المصروف:' : 'Amount Spent:'}</span>
-              <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${initialSpentUSD.toFixed(2)}</span>
+              <span class="font-bold text-orange-600" id="stop-ad-spent-display">${fmtUsd(initialSpentUSD)}</span>
             </div>
             <div class="border-t border-slate-200 dark:border-slate-700 pt-2 flex justify-between">
               <span class="text-sm font-medium text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'} ${isAlreadyStopped ? (isAr ? '(سيتم تحديثه)' : '(will be updated)') : (isAr ? '(سيتم إرجاعه)' : '(will be returned)')}:</span>
-              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - initialSpentUSD).toFixed(2)}</span>
+              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">${fmtUsd((adAmountUSD - initialSpentUSD))}</span>
             </div>
           </div>
 
@@ -43448,8 +43477,8 @@ function stopAd(id) {
               <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
               <span id="stop-ad-customer-informed-help" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
                 ? (isAr
-                    ? `تغيّر المبلغ المتبقي إلى $${(adAmountUSD - initialSpentUSD).toFixed(2)} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
-                    : `The remaining amount changed to $${(adAmountUSD - initialSpentUSD).toFixed(2)} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                    ? `تغيّر المبلغ المتبقي إلى ${fmtUsd((adAmountUSD - initialSpentUSD))} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                    : `The remaining amount changed to ${fmtUsd((adAmountUSD - initialSpentUSD))} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
                 : (informedApplies && ad.remainingCustomerInformedAt
                     ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
                     : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.'))}</span>
@@ -43504,8 +43533,8 @@ function stopAd(id) {
         return;
       }
       const remaining = Math.max(adAmountUSD - spent, 0);
-      spentDisplay.textContent = '$' + spent.toFixed(2);
-      remainingDisplay.textContent = '$' + remaining.toFixed(2);
+      spentDisplay.textContent = fmtUsd(spent);
+      remainingDisplay.textContent = fmtUsd(remaining);
       if (metaSpendAuto && spentHelp) {
         const manuallyCorrected = Math.abs(spent - metaSpendUSD) > 0.005;
         spentHelp.className = `text-xs mt-1 font-bold ${manuallyCorrected
@@ -43513,11 +43542,11 @@ function stopAd(id) {
           : 'text-blue-700 dark:text-blue-300'}`;
         spentHelp.textContent = manuallyCorrected
           ? (isAr
-              ? `تصحيح يدوي: $${spent.toFixed(2)}. أبلغت Meta بمبلغ $${metaSpendUSD.toFixed(2)}، وسيستخدم النظام المبلغ الذي تحفظه للرصيد النهائي.`
-              : `Manual correction: $${spent.toFixed(2)}. Meta reported $${metaSpendUSD.toFixed(2)}; the amount you save will be used for the final balance.`)
+              ? `تصحيح يدوي: ${fmtUsd(spent)}. أبلغت Meta بمبلغ ${fmtUsd(metaSpendUSD)}، وسيستخدم النظام المبلغ الذي تحفظه للرصيد النهائي.`
+              : `Manual correction: ${fmtUsd(spent)}. Meta reported ${fmtUsd(metaSpendUSD)}; the amount you save will be used for the final balance.`)
           : (isAr
-              ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه إذا لزم الأمر.`
-              : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). You can correct it if needed.`);
+              ? `معبأ من Meta: ${fmtUsd(metaSpendUSD)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه إذا لزم الأمر.`
+              : `Prefilled from Meta: ${fmtUsd(metaSpendUSD)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). You can correct it if needed.`);
       }
       const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
       if (informedHelp) {
@@ -43679,8 +43708,8 @@ async function confirmStopAd(id, source = 'modal') {
     // Company money above the real spend goes back to company funds; never re-applied on its own.
     const companyOnAdUSD = getAdCompanyCoveredUSD(storedAd);
     if (spentUSD + 0.005 < companyOnAdUSD && !await appConfirm(isAr
-      ? `أموال الشركة المسجّلة على هذا الإعلان $${companyOnAdUSD.toFixed(2)}، والمصروف الذي أدخلته $${spentUSD.toFixed(2)}.\nسيرجع $${(companyOnAdUSD - spentUSD).toFixed(2)} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
-      : `Company funds recorded on this ad: $${companyOnAdUSD.toFixed(2)}. Spend you entered: $${spentUSD.toFixed(2)}.\n$${(companyOnAdUSD - spentUSD).toFixed(2)} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
+      ? `أموال الشركة المسجّلة على هذا الإعلان ${fmtUsd(companyOnAdUSD)}، والمصروف الذي أدخلته ${fmtUsd(spentUSD)}.\nسيرجع ${fmtUsd((companyOnAdUSD - spentUSD))} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
+      : `Company funds recorded on this ad: ${fmtUsd(companyOnAdUSD)}. Spend you entered: ${fmtUsd(spentUSD)}.\n${fmtUsd((companyOnAdUSD - spentUSD))} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
     let attempt;
     try {
       // The modal is never re-rendered: send the version it was built from (data-v).
@@ -43844,8 +43873,8 @@ async function confirmStopAd(id, source = 'modal') {
         showNotification(
           isAr ? 'تحقق' : 'Validation',
           isAr
-            ? `لا يمكن زيادة المصروف: الوصل ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
-            : `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+            ? `لا يمكن زيادة المصروف: الوصل ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} لم يتبقَّ فيه سوى ${fmtUsd(remaining)} (يحتاج ${fmtUsd(inc)} إضافية).`
+            : `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has ${fmtUsd(remaining)} left (needs ${fmtUsd(inc)} more).`,
           'error'
         );
         return;
@@ -43866,8 +43895,8 @@ async function confirmStopAd(id, source = 'modal') {
         showNotification(
           isAr ? 'تحقق' : 'Validation',
           isAr
-            ? `لا يمكن زيادة المصروف: رصيد الاستحقاق لوصل التوصيل لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
-            : `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+            ? `لا يمكن زيادة المصروف: رصيد الاستحقاق لوصل التوصيل لم يتبقَّ فيه سوى ${fmtUsd(remaining)} (يحتاج ${fmtUsd(inc)} إضافية).`
+            : `Cannot increase spent: the delivery receipt's due credit only has ${fmtUsd(remaining)} left (needs ${fmtUsd(inc)} more).`,
           'error'
         );
         return;
@@ -43981,7 +44010,7 @@ async function confirmStopAd(id, source = 'modal') {
   
   // Show notification
   if (isAr) {
-    const amountTxt = `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)}`;
+    const amountTxt = `${fmtUsd(Math.abs(isEditing ? remainingDifference : newRemainingUSD))}`;
     const verbAr = isEditing ? (remainingDifference > 0 ? 'أُرجع' : 'استُخدم') : 'أُرجع';
     const balanceTextAr = remainingDifference !== 0 || !isEditing
       ? `${verbAr} ${amountTxt} إلى ${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 'الوصولات' : 'الوصل'} ورصيد العميل`
@@ -43989,7 +44018,7 @@ async function confirmStopAd(id, source = 'modal') {
     showNotification(isEditing ? 'تم تحديث الإعلان' : 'تم إيقاف الإعلان', `${isEditing ? 'تم تحديث الإعلان بنجاح' : 'تم إيقاف الإعلان بنجاح'}. ${balanceTextAr}.`, 'success');
   } else {
     const actionText = isEditing ? 'updated' : 'stopped';
-    const balanceText = remainingDifference !== 0 || !isEditing ? `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
+    const balanceText = remainingDifference !== 0 || !isEditing ? `${fmtUsd(Math.abs(isEditing ? remainingDifference : newRemainingUSD))} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
     showNotification(`Ad ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`, `Ad ${actionText} successfully. ${balanceText}.`, 'success');
   }
   

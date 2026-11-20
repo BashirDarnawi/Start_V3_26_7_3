@@ -36,7 +36,8 @@ function studioLtr(text) {
 function studioPickText(labels, max = 300) {
   if (!labels || typeof labels !== 'object') return '';
   const pick = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max) : '';
-  const first = adsStudioIsAr() ? pick(labels.ar) : pick(labels.en);
+  // A sentence the server wrote names dollars as "$40.00": in Arabic each one becomes a piece that keeps "$" in front.
+  const first = adsStudioIsAr() ? pick(labels.ar).replace(/-?\$[0-9][0-9,]*(?:\.[0-9]+)?/g, amount => adsStudioPiece(amount)) : pick(labels.en);
   return first || pick(labels.en) || pick(labels.ar);
 }
 
@@ -543,13 +544,14 @@ function studioMinorText(minor) {
 function studioUsd(minor) {
   const text = studioMinorText(minor);
   if (!text) return '—';
-  return text.startsWith('-') ? `-$${text.slice(1)}` : `$${text}`;
+  return adsStudioPiece(text.startsWith('-') ? `-$${text.slice(1)}` : `$${text}`);
 }
 
 // Libyan dinars (plans): "1,234.56 LYD" / "1,234.56 د.ل" — never "$".
 function studioLyd(minor) {
   const text = studioMinorText(minor);
-  return text ? `${text} ${adsStudioText('LYD', 'د.ل')}` : '—';
+  if (!text) return '—';
+  return adsStudioIsAr() ? adsStudioPiece(`${text[0] === '-' ? adsStudioPiece(text) : text} د.ل`, true) : `${text} LYD`;
 }
 
 // ------------------------------------------------------------------ typed input

@@ -28,13 +28,13 @@ function shellInitial(name) {
 function shellLyd(amount) {
   const n = Number(amount) || 0;
   const rounded = Math.round(n * 100) / 100;
-  const text = Number.isInteger(rounded)
-    ? rounded.toLocaleString('en-US')
-    : rounded.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${text} ${shellText('LYD', 'د.ل')}`;
+  // Two decimals always, like every other amount (DESIGN.md 5.4): "10,150.00 LYD", never "10,150 LYD" beside "$2,375.00".
+  if (typeof fmtLyd === 'function') return fmtLyd(rounded);  // the app: one writer for every dinar amount
+  return `${rounded.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${shellText('LYD', 'د.ل')}`;
 }
 
 function shellUsd(amount) {
+  if (typeof fmtUsd === 'function') return fmtUsd(amount);
   return `$${(Number(amount) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
@@ -290,7 +290,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
           <span class="block mt-1 text-sm text-white/80">${canViewFinancials ? (isAr ? `المُحصَّل · ${shellEsc(monthName)}` : `Collected · ${shellEsc(monthName)}`) : (isAr ? `وصولات · ${shellEsc(monthName)}` : `Receipts · ${shellEsc(monthName)}`)}</span>
           <span class="shell-hero-value block mt-1 text-3xl font-black tracking-tight" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(collectedLyd)) : receiptsThisMonth}</span>
           ${canViewFinancials ? `<span class="mt-2 flex flex-wrap items-center gap-3 text-xs text-white/80">
-            ${pct === null ? `<span>${isAr ? 'أول شهر مُسجَّل' : 'First month on record'}</span>` : `<span class="inline-flex items-center gap-1"><i data-lucide="${pct >= 0 ? 'trending-up' : 'trending-down'}" class="w-3.5 h-3.5"></i>${pct >= 0 ? '+' : ''}${pct}% ${isAr ? 'مقابل الشهر الماضي' : 'vs last month'}</span>`}
+            ${pct === null ? `<span>${isAr ? 'أول شهر مُسجَّل' : 'First month on record'}</span>` : `<span class="inline-flex items-center gap-1"><i data-lucide="${pct >= 0 ? 'trending-up' : 'trending-down'}" class="w-3.5 h-3.5"></i><bdi dir="ltr">${pct >= 0 ? '+' : ''}${pct}%</bdi> ${isAr ? 'مقابل الشهر الماضي' : 'vs last month'}</span>`}
             <span dir="ltr">≈ ${shellEsc(shellUsd(collectedUsd))}</span>
           </span>` : ''}
         </span>
@@ -315,7 +315,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
           const number = shellReceiptNumber(r);
           return `<button type="button" onclick="openReceiptFromHome('${shellEsc(r.id)}')" class="shell-home-recent hub-card hub-row w-full flex items-center gap-3 p-3 text-start touch-target">
             <span class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(customerName))}</span>
-            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `#${shellEsc(number)} · ` : ''}${r.createdAt ? shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale())) : ''}</span></span>
+            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `<bdi>#${shellEsc(number)}</bdi> · ` : ''}${r.createdAt ? `<bdi>${shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale()))}</bdi>` : ''}</span></span>
             <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(shellReceiptLyd(r))) : ''}</span>${shellPill(meta.label, meta.tone)}</span>
           </button>`;
         }).join('')}</div>` : `<div class="hub-card p-5 text-center text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</div>`}
@@ -399,7 +399,7 @@ function renderCollectView() {
       ${rows.length ? `<div class="space-y-2">${rows.map(row => `
         <button type="button" onclick="openDebtorCollection('${shellEsc(row.customer.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
           <span class="w-11 h-11 rounded-full ${row.overdue ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'} flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(row.customer.name))}</span>
-          <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500">${row.number ? `#${shellEsc(row.number)} · ` : ''}<span class="${row.overdue ? 'text-rose-600 font-bold' : ''}">${shellEsc(shellAgeText(row.ageDays))}</span></span></span>
+          <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500">${row.number ? `<bdi>#${shellEsc(row.number)}</bdi> · ` : ''}<span class="${row.overdue ? 'text-rose-600 font-bold' : ''}">${shellEsc(shellAgeText(row.ageDays))}</span></span></span>
           <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(row.dueLyd))}</span><span class="block text-[10px] text-slate-400" dir="ltr">${shellEsc(shellUsd(row.dueUsd))}</span></span>
           <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
         </button>`).join('')}</div>`
@@ -765,7 +765,7 @@ function shellAdSummaryRow(ad, meta = {}) {
   const statusTones = { Pending: 'amber', Paused: 'slate', Completed: 'emerald', Canceled: 'rose', Lost: 'rose', Stopped: 'blue', Active: 'emerald' };
   const status = String(ad?.status || 'Active');
   const subParts = [];
-  if (meta.adDisplayNum) subParts.push(`#${meta.adDisplayNum}`);
+  if (meta.adDisplayNum) subParts.push(`<bdi>#${meta.adDisplayNum}</bdi>`);
   if (ad?.metaAdName && ad.metaAdName !== name) subParts.push(`<span class="shell-ad-campaign">${shellEsc(ad.metaAdName)}</span>`);
   const pageName = meta.adPage?.name || ad?.metaPageName;
   if (pageName && pageName !== name) subParts.push(`${isAr ? 'الصفحة' : 'Page'}: ${shellEsc(pageName)}`);
@@ -819,9 +819,9 @@ function shellReceiptRow(receipt, customer, card, meta = {}) {
     if (meta.canEditThisReceipt) actions += shellRecordAction('editReceipt', id, isAr ? 'تعديل' : 'Edit', 'pencil');
   }
   const subParts = [];
-  if (meta.receiptDisplayNum) subParts.push(`#${meta.receiptDisplayNum}`);
-  if (serial) subParts.push(`${isAr ? 'رقم' : 'No.'} ${shellEsc(serial)}${meta.displayTempNo && !meta.displayFinalNo ? (isAr ? ' (مؤقت)' : ' (temp)') : ''}`);
-  if (when) subParts.push(shellEsc(when));
+  if (meta.receiptDisplayNum) subParts.push(`<bdi>#${meta.receiptDisplayNum}</bdi>`);
+  if (serial) subParts.push(`${isAr ? 'رقم' : 'No.'} <bdi>${shellEsc(serial)}</bdi>${meta.displayTempNo && !meta.displayFinalNo ? (isAr ? ' (مؤقت)' : ' (temp)') : ''}`);
+  if (when) subParts.push(`<bdi>${shellEsc(when)}</bdi>`);
   if (receipt?.collected && !meta.destroyed) subParts.push(isAr ? 'مُحصَّل' : 'collected');
   const open = shellRowIsOpen('receipts', id, (meta.receiptRecordFilter && meta.receiptRecordFilter === id));
   return shellListRow({
@@ -865,7 +865,7 @@ function shellCustomerRow(customer, stats, card, meta = {}) {
     open: shellRowIsOpen('customers', id),
     avatar: shellAvatar(shellInitial(customer?.name), tone),
     title: shellEsc(customer?.name || ''),
-    sub: `${meta.displayNum ? `#${meta.displayNum} · ` : ''}${sub}`, trailing, facts, actions
+    sub: `${meta.displayNum ? `<bdi>#${meta.displayNum}</bdi> · ` : ''}${sub}`, trailing, facts, actions
   });
 }
 

@@ -1203,10 +1203,10 @@ check('customer card LYD debt is exact to the cent (no whole-number rounding)', 
   // Rounding to whole LYD hid real debt: receipts of 5019.10 + 1392.00
   // rendered as a 6411 balance while 6411.10 was actually owed.
   const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
-  assert(viewsSource.includes('stats.totalSpentLYD.toFixed(2)'), 'card Spent rounds LYD to whole numbers');
-  assert(viewsSource.includes('stats.totalPaidLYD.toFixed(2)'), 'card Paid rounds LYD to whole numbers');
-  assert(viewsSource.includes('stats.balanceLYD.toFixed(2)'), 'card Balance rounds LYD to whole numbers');
-  assert(viewsSource.includes('stats.receiptDebtLYD.toFixed(2)'), 'the unpaid receipt debt line rounds LYD');
+  assert(viewsSource.includes('fmt2(stats.totalSpentLYD)'), 'card Spent rounds LYD to whole numbers');
+  assert(viewsSource.includes('fmt2(stats.totalPaidLYD)'), 'card Paid rounds LYD to whole numbers');
+  assert(viewsSource.includes('fmt2(stats.balanceLYD)'), 'card Balance rounds LYD to whole numbers');
+  assert(viewsSource.includes('fmtLyd(stats.receiptDebtLYD)'), 'the unpaid receipt debt line rounds LYD');
 
   loginAs(employee({ customers: ['view', 'viewBalance'] }));
   S.language = 'en';
@@ -1217,8 +1217,8 @@ check('customer card LYD debt is exact to the cent (no whole-number rounding)', 
     { id: 'cent-debt-r2', recordType: 'receipt', customerId: 'cent-debt-customer', amountUSD: 150, amountLocal: 1392.00, exchangeRate: 9.28, status: 'Not Paid', isPaid: false, deliveryStatus: 'Needs Delivery', transfers: [] }
   ];
   const html = visible(sandbox.renderCustomersGrid(S.customers));
-  assert(html.includes('6411.10'), 'the 0.10 LYD of real debt is still hidden by rounding');
-  assert(html.includes('-6411.10'), 'the balance does not show the exact debt owed');
+  assert(html.includes('6,411.10'), 'the 0.10 LYD of real debt is still hidden by rounding');
+  assert(html.includes('-6,411.10'), 'the balance does not show the exact debt owed');
 });
 
 check('smart search never matches or displays contact data without viewContacts', () => {
@@ -1693,7 +1693,7 @@ check('Pages cards use canonical old-data spending and hide incomplete financial
     loginAs(employee({ pages: ['view'], ads: ['view'], analytics: ['viewFinancials', 'viewSensitive'] }));
     const authorized = visible(sandbox.renderPagesView());
     assert(authorized.includes('$125.00'), 'shared page canonical USD total is wrong');
-    assert(authorized.includes('1189.90 LYD'), 'shared page historical LYD total is wrong');
+    assert(authorized.includes('1,189.90 LYD'), 'shared page historical LYD total is wrong');
   } finally {
     seedBusinessData();
   }

@@ -106,8 +106,8 @@ function stopAd(id) {
           <div>
             <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">
               <strong>${isAr ? 'العميل' : 'Customer'}:</strong> ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}<br>
-              <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> $${adAmountUSD.toFixed(2)}<br>
-              <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> $${totalAllocated.toFixed(2)}
+              <strong>${isAr ? 'مبلغ الإعلان' : 'Ad Amount'}:</strong> ${fmtUsd(adAmountUSD)}<br>
+              <strong>${isAr ? 'المخصص حالياً' : 'Currently Allocated'}:</strong> ${fmtUsd(totalAllocated)}
               ${isAlreadyStopped && ad.stoppedAt ? `<br><strong>${isAr ? 'تاريخ الإيقاف' : 'Stopped On'}:</strong> ${new Date(ad.stoppedAt).toLocaleString(appDateLocale())}` : ''}
             </p>
           </div>
@@ -116,8 +116,8 @@ function stopAd(id) {
             <div class="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-xl p-3">
               <div class="text-xs font-medium text-orange-800 dark:text-orange-200 mb-2">${isAr ? 'الإدخال السابق:' : 'Previous Entry:'}</div>
               <div class="text-xs text-slate-600 dark:text-slate-400 space-y-1">
-                <div>${isAr ? 'المصروف' : 'Spent'}: <span class="font-bold text-orange-600">$${currentSpentUSD.toFixed(2)}</span></div>
-                <div>${isAr ? 'المتبقي المُرجَع' : 'Remaining Returned'}: <span class="font-bold text-emerald-600">$${previousRemaining.toFixed(2)}</span></div>
+                <div>${isAr ? 'المصروف' : 'Spent'}: <span class="font-bold text-orange-600">${fmtUsd(currentSpentUSD)}</span></div>
+                <div>${isAr ? 'المتبقي المُرجَع' : 'Remaining Returned'}: <span class="font-bold text-emerald-600">${fmtUsd(previousRemaining)}</span></div>
               </div>
             </div>
           ` : ''}
@@ -138,24 +138,24 @@ function stopAd(id) {
               placeholder="0.00"
             />
             <p id="stop-ad-spent-help" class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : (manualSpentOverride ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500')}">${manualSpentOverride
-              ? (isAr ? `هذا هو التصحيح النهائي المحفوظ: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (تعرض Meta الآن $${metaSpendUSD.toFixed(2)}).`}` : `This is the saved final correction: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (Meta currently reports $${metaSpendUSD.toFixed(2)}).`}`)
+              ? (isAr ? `هذا هو التصحيح النهائي المحفوظ: ${fmtUsd(currentSpentUSD)}${metaSpendUSD === null ? '.' : ` (تعرض Meta الآن ${fmtUsd(metaSpendUSD)}).`}` : `This is the saved final correction: ${fmtUsd(currentSpentUSD)}${metaSpendUSD === null ? '.' : ` (Meta currently reports ${fmtUsd(metaSpendUSD)}).`}`)
               : metaSpendAuto
-              ? (isAr ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه قبل الحفظ إذا كان المبلغ النهائي في Facebook مختلفاً.` : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if Facebook's final amount is different.`)
+              ? (isAr ? `معبأ من Meta: ${fmtUsd(metaSpendUSD)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه قبل الحفظ إذا كان المبلغ النهائي في Facebook مختلفاً.` : `Prefilled from Meta: ${fmtUsd(metaSpendUSD)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if Facebook's final amount is different.`)
               : (isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad'))}</p>
           </div>
           
           <div id="stop-ad-calculations" class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 space-y-2">
             <div class="flex justify-between text-sm">
               <span class="text-slate-600 dark:text-slate-400">${isAr ? 'مبلغ الإعلان:' : 'Ad Amount:'}</span>
-              <span class="font-bold">$${adAmountUSD.toFixed(2)}</span>
+              <span class="font-bold">${fmtUsd(adAmountUSD)}</span>
             </div>
             <div class="flex justify-between text-sm">
               <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ المصروف:' : 'Amount Spent:'}</span>
-              <span class="font-bold text-orange-600" id="stop-ad-spent-display">$${initialSpentUSD.toFixed(2)}</span>
+              <span class="font-bold text-orange-600" id="stop-ad-spent-display">${fmtUsd(initialSpentUSD)}</span>
             </div>
             <div class="border-t border-slate-200 dark:border-slate-700 pt-2 flex justify-between">
               <span class="text-sm font-medium text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'} ${isAlreadyStopped ? (isAr ? '(سيتم تحديثه)' : '(will be updated)') : (isAr ? '(سيتم إرجاعه)' : '(will be returned)')}:</span>
-              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">$${(adAmountUSD - initialSpentUSD).toFixed(2)}</span>
+              <span class="text-sm font-bold text-emerald-600" id="stop-ad-remaining">${fmtUsd((adAmountUSD - initialSpentUSD))}</span>
             </div>
           </div>
 
@@ -171,8 +171,8 @@ function stopAd(id) {
               <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
               <span id="stop-ad-customer-informed-help" class="block text-xs ${staleConfirmation ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${staleConfirmation
                 ? (isAr
-                    ? `تغيّر المبلغ المتبقي إلى $${(adAmountUSD - initialSpentUSD).toFixed(2)} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
-                    : `The remaining amount changed to $${(adAmountUSD - initialSpentUSD).toFixed(2)} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
+                    ? `تغيّر المبلغ المتبقي إلى ${fmtUsd((adAmountUSD - initialSpentUSD))} بعد تأكيدك السابق. أبلغ العميل بالمبلغ الجديد ثم حدّد هذا المربع.`
+                    : `The remaining amount changed to ${fmtUsd((adAmountUSD - initialSpentUSD))} since your earlier confirmation. Tell the customer the new amount, then check this box.`)
                 : (informedApplies && ad.remainingCustomerInformedAt
                     ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale())
                     : (isAr ? 'إذا تغيّر المصروف، أبلغ العميل بالمبلغ المتبقي الجديد ثم حدّد هذا المربع مرة أخرى.' : 'If the spend changes, tell the customer the new remaining amount and check this again.'))}</span>
@@ -227,8 +227,8 @@ function stopAd(id) {
         return;
       }
       const remaining = Math.max(adAmountUSD - spent, 0);
-      spentDisplay.textContent = '$' + spent.toFixed(2);
-      remainingDisplay.textContent = '$' + remaining.toFixed(2);
+      spentDisplay.textContent = fmtUsd(spent);
+      remainingDisplay.textContent = fmtUsd(remaining);
       if (metaSpendAuto && spentHelp) {
         const manuallyCorrected = Math.abs(spent - metaSpendUSD) > 0.005;
         spentHelp.className = `text-xs mt-1 font-bold ${manuallyCorrected
@@ -236,11 +236,11 @@ function stopAd(id) {
           : 'text-blue-700 dark:text-blue-300'}`;
         spentHelp.textContent = manuallyCorrected
           ? (isAr
-              ? `تصحيح يدوي: $${spent.toFixed(2)}. أبلغت Meta بمبلغ $${metaSpendUSD.toFixed(2)}، وسيستخدم النظام المبلغ الذي تحفظه للرصيد النهائي.`
-              : `Manual correction: $${spent.toFixed(2)}. Meta reported $${metaSpendUSD.toFixed(2)}; the amount you save will be used for the final balance.`)
+              ? `تصحيح يدوي: ${fmtUsd(spent)}. أبلغت Meta بمبلغ ${fmtUsd(metaSpendUSD)}، وسيستخدم النظام المبلغ الذي تحفظه للرصيد النهائي.`
+              : `Manual correction: ${fmtUsd(spent)}. Meta reported ${fmtUsd(metaSpendUSD)}; the amount you save will be used for the final balance.`)
           : (isAr
-              ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه إذا لزم الأمر.`
-              : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). You can correct it if needed.`);
+              ? `معبأ من Meta: ${fmtUsd(metaSpendUSD)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه إذا لزم الأمر.`
+              : `Prefilled from Meta: ${fmtUsd(metaSpendUSD)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). You can correct it if needed.`);
       }
       const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
       if (informedHelp) {
@@ -402,8 +402,8 @@ async function confirmStopAd(id, source = 'modal') {
     // Company money above the real spend goes back to company funds; never re-applied on its own.
     const companyOnAdUSD = getAdCompanyCoveredUSD(storedAd);
     if (spentUSD + 0.005 < companyOnAdUSD && !await appConfirm(isAr
-      ? `أموال الشركة المسجّلة على هذا الإعلان $${companyOnAdUSD.toFixed(2)}، والمصروف الذي أدخلته $${spentUSD.toFixed(2)}.\nسيرجع $${(companyOnAdUSD - spentUSD).toFixed(2)} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
-      : `Company funds recorded on this ad: $${companyOnAdUSD.toFixed(2)}. Spend you entered: $${spentUSD.toFixed(2)}.\n$${(companyOnAdUSD - spentUSD).toFixed(2)} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
+      ? `أموال الشركة المسجّلة على هذا الإعلان ${fmtUsd(companyOnAdUSD)}، والمصروف الذي أدخلته ${fmtUsd(spentUSD)}.\nسيرجع ${fmtUsd((companyOnAdUSD - spentUSD))} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
+      : `Company funds recorded on this ad: ${fmtUsd(companyOnAdUSD)}. Spend you entered: ${fmtUsd(spentUSD)}.\n${fmtUsd((companyOnAdUSD - spentUSD))} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
     let attempt;
     try {
       // The modal is never re-rendered: send the version it was built from (data-v).
@@ -567,8 +567,8 @@ async function confirmStopAd(id, source = 'modal') {
         showNotification(
           isAr ? 'تحقق' : 'Validation',
           isAr
-            ? `لا يمكن زيادة المصروف: الوصل ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
-            : `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+            ? `لا يمكن زيادة المصروف: الوصل ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} لم يتبقَّ فيه سوى ${fmtUsd(remaining)} (يحتاج ${fmtUsd(inc)} إضافية).`
+            : `Cannot increase spent: receipt ${receipt ? (receipt.serialNumber || receipt.finalReceiptNo || rid) : rid} only has ${fmtUsd(remaining)} left (needs ${fmtUsd(inc)} more).`,
           'error'
         );
         return;
@@ -589,8 +589,8 @@ async function confirmStopAd(id, source = 'modal') {
         showNotification(
           isAr ? 'تحقق' : 'Validation',
           isAr
-            ? `لا يمكن زيادة المصروف: رصيد الاستحقاق لوصل التوصيل لم يتبقَّ فيه سوى $${remaining.toFixed(2)} (يحتاج $${inc.toFixed(2)} إضافية).`
-            : `Cannot increase spent: the delivery receipt's due credit only has $${remaining.toFixed(2)} left (needs $${inc.toFixed(2)} more).`,
+            ? `لا يمكن زيادة المصروف: رصيد الاستحقاق لوصل التوصيل لم يتبقَّ فيه سوى ${fmtUsd(remaining)} (يحتاج ${fmtUsd(inc)} إضافية).`
+            : `Cannot increase spent: the delivery receipt's due credit only has ${fmtUsd(remaining)} left (needs ${fmtUsd(inc)} more).`,
           'error'
         );
         return;
@@ -704,7 +704,7 @@ async function confirmStopAd(id, source = 'modal') {
   
   // Show notification
   if (isAr) {
-    const amountTxt = `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)}`;
+    const amountTxt = `${fmtUsd(Math.abs(isEditing ? remainingDifference : newRemainingUSD))}`;
     const verbAr = isEditing ? (remainingDifference > 0 ? 'أُرجع' : 'استُخدم') : 'أُرجع';
     const balanceTextAr = remainingDifference !== 0 || !isEditing
       ? `${verbAr} ${amountTxt} إلى ${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 'الوصولات' : 'الوصل'} ورصيد العميل`
@@ -712,7 +712,7 @@ async function confirmStopAd(id, source = 'modal') {
     showNotification(isEditing ? 'تم تحديث الإعلان' : 'تم إيقاف الإعلان', `${isEditing ? 'تم تحديث الإعلان بنجاح' : 'تم إيقاف الإعلان بنجاح'}. ${balanceTextAr}.`, 'success');
   } else {
     const actionText = isEditing ? 'updated' : 'stopped';
-    const balanceText = remainingDifference !== 0 || !isEditing ? `$${Math.abs(isEditing ? remainingDifference : newRemainingUSD).toFixed(2)} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
+    const balanceText = remainingDifference !== 0 || !isEditing ? `${fmtUsd(Math.abs(isEditing ? remainingDifference : newRemainingUSD))} ${isEditing ? (remainingDifference > 0 ? 'returned' : 'used') : 'returned'} to receipt${ad.receiptAllocations && ad.receiptAllocations.length > 1 ? 's' : ''} and customer balance` : 'No balance changes';
     showNotification(`Ad ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`, `Ad ${actionText} successfully. ${balanceText}.`, 'success');
   }
   

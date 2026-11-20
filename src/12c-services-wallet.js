@@ -37,13 +37,18 @@ function hubPlanForService(serviceId) {
     || null;
 }
 
-// "25 LYD" (major units, no trailing zeros for whole numbers) — pills only.
+// A wallet amount as people read it (DESIGN.md 5.4): "$12.00", "75.00 LYD", in Arabic "75.00 د.ل".
+// walletFormatMinor() keeps writing "75.00 LYD" because its text is also stored in audit lines.
+function walletShow(minor, currency, sign = '') {
+  const code = walletNormalizeCurrency(currency);
+  const major = walletFromMinor(minor, code);
+  const value = Number.isFinite(major) ? major : 0;
+  return code === 'USD' ? fmtUsd(value, sign) : code === 'LYD' ? fmtLyd(value, sign) : moneyPiece(`${sign}${fmt2(value)} ${code}`);
+}
+
+// A price on a pill: never below zero.
 function hubMoney(minor, currency = 'LYD') {
-  const major = walletFromMinor(Math.max(0, Number(minor) || 0), currency);
-  const text = Number.isInteger(major)
-    ? major.toLocaleString('en-US')
-    : major.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${text} ${walletNormalizeCurrency(currency)}`;
+  return walletShow(Math.max(0, Number(minor) || 0), currency);
 }
 
 function hubPeriodLabel(durationDays) {
@@ -135,7 +140,7 @@ function hubWalletCard({ topUp = true, plansLink = false } = {}) {
         <span class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 flex items-center justify-center flex-shrink-0"><i data-lucide="wallet" class="w-5 h-5"></i></span>
         <span class="min-w-0">
           <span class="block text-[11px] text-slate-500 dark:text-slate-400">${hubText('Wallet balance', 'رصيد المحفظة')}</span>
-          <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, 'LYD'))}</span>
+          <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletShow(balanceMinor, 'LYD'))}</span>
         </span>
       </button>
       ${plansLink && !noBuy ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
@@ -512,7 +517,10 @@ function chargeWalletInstructions(created) {
   const entry = _walletPayMethodById(d.method);
   const isAr = state.language === 'ar';
   const template = entry && entry.instructions ? String(isAr ? entry.instructions.ar : entry.instructions.en) : '';
-  if (!template) {
+  const lyd = d.amountMinorLYD ? fmt2(d.amountMinorLYD / 100) : '';
+  const usd = String(d.currency || 'USD') === 'USD' ? fmt2(Number(d.amountMinor || 0) / 100) : '';
+  // A figure this request does not carry used to read "Pay — LYD": the plain sentence instead (the amount is on the card).
+  if (!template || (!lyd && template.includes('{amountLYD}')) || (!usd && template.includes('{amountUSD}'))) {
     return hubText(
       `Pay with reference ${d.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
       `ادفع بذكر الرمز ${d.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
@@ -520,8 +528,8 @@ function chargeWalletInstructions(created) {
   }
   return template
     .split('{reference}').join(String(d.reference || ''))
-    .split('{amountLYD}').join(d.amountMinorLYD ? (d.amountMinorLYD / 100).toFixed(2) : '—')
-    .split('{amountUSD}').join(String(d.currency || 'USD') === 'USD' ? (Number(d.amountMinor || 0) / 100).toFixed(2) : '—')
+    .split('{amountLYD}').join(lyd)
+    .split('{amountUSD}').join(usd)
     .split('{rate}').join(String(d.lydRate || ''));
 }
 
@@ -574,7 +582,7 @@ function renderChargeWalletView() {
 
   const created = _chargeWallet.created;
   if (created) {
-    const amountLabel = walletFormatMinor(Number(created.amountMinor || 0), created.currency || 'USD');
+    const amountLabel = walletShow(Number(created.amountMinor || 0), created.currency || 'USD');
     const methodEntry = _walletPayMethodById(created.method);
     const methodName = methodEntry ? String((isRTL ? methodEntry.name?.ar : methodEntry.name?.en) || created.method) : String(created.method || '');
     return `
@@ -587,7 +595,7 @@ function renderChargeWalletView() {
           <div class="mt-5 rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 text-sm text-start">
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('Reference', 'الرمز المرجعي')}</span><span class="font-mono font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(created.reference || '')}</span></div>
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${t('amount')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(amountLabel)}</span></div>
-            ${created.amountMinorLYD && String(created.currency || 'USD') !== 'LYD' ? `<div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('In LYD', 'بالدينار')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(Number(created.amountMinorLYD || 0), 'LYD'))}</span></div>` : ''}
+            ${created.amountMinorLYD && String(created.currency || 'USD') !== 'LYD' ? `<div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('In LYD', 'بالدينار')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletShow(Number(created.amountMinorLYD || 0), 'LYD'))}</span></div>` : ''}
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('Method', 'طريقة الدفع')}</span><span class="font-bold text-slate-900 dark:text-white">${hubEsc(methodName)}</span></div>
           </div>
           <p class="mt-4 text-sm text-slate-600 dark:text-slate-300 text-start leading-6">${hubEsc(chargeWalletInstructions(created))}</p>
@@ -614,7 +622,7 @@ function renderChargeWalletView() {
         <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400 mb-2">${t('amount')}</div>
         <div class="flex items-end justify-center gap-2" dir="ltr">
           <span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${hubEsc(_chargeWallet.amountText || '0')}</span>
-          <span class="mb-2 text-lg font-semibold text-slate-500">${currency}</span>
+          <span class="mb-2 text-lg font-semibold text-slate-500">${currency === 'LYD' ? hubText('LYD', 'د.ل') : currency}</span>
         </div>
         <label class="sr-only" for="charge-wallet-amount">${t('amount')}</label>
         <input id="charge-wallet-amount" type="text" inputmode="decimal" value="${hubEsc(_chargeWallet.amountText)}" oninput="chargeWalletAmountInput(this)" class="mt-3 mx-auto block w-40 glass-input rounded-xl px-4 py-2.5 text-center text-lg font-bold" placeholder="0" dir="ltr" />
@@ -735,8 +743,8 @@ function renderWalletView() {
     }
   }
   const balancesHtml = balances.length
-    ? balances.map(({ c, m }) => `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(m, c)}</div>`).join('')
-    : `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(0, WALLET.currency)}</div>`;
+    ? balances.map(({ c, m }) => `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletShow(m, c)}</div>`).join('')
+    : `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletShow(0, WALLET.currency)}</div>`;
   const currencyOptions = WALLET_SUPPORTED_CURRENCIES
     .map(c => `<option value="${c}" ${c === WALLET.currency ? 'selected' : ''}>${c}</option>`)
     .join('');
@@ -762,9 +770,11 @@ function renderWalletView() {
     const isIn = tx.toUserId === uid;
     // The admin sees everyone's rows: a row between two others has no sign.
     const mine = isIn || tx.fromUserId === uid;
-    const other = mine ? who(isIn ? tx.fromUserId : tx.toUserId) : `${who(tx.fromUserId)} ${isRTL ? '←' : '→'} ${who(tx.toUserId)}`;
+    // Each name and the date stay one piece (<bdi>): a Latin name next to a date used to pull the day number into the name.
+    const person = id => `<bdi>${Security.escapeHtml(who(id))}</bdi>`;
+    const other = mine ? person(isIn ? tx.fromUserId : tx.toUserId) : `${person(tx.fromUserId)} ${isRTL ? '←' : '→'} ${person(tx.toUserId)}`;
 
-    const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
+    const amountStr = walletShow(walletTxAmountMinor(tx), walletTxCurrency(tx), mine ? (isIn ? '+' : '-') : '');
     const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
@@ -772,11 +782,11 @@ function renderWalletView() {
       <div class="workspace-wallet-row py-3 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
           <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(walletTxLabel(tx.type, isRTL) || 'tx')}</div>
-          <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
+          <div class="text-xs text-slate-500 dark:text-slate-400">${other} ${when ? `• <bdi>${Security.escapeHtml(when)}</bdi>` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
         <div class="workspace-wallet-amount font-black ${!mine ? 'text-slate-600 dark:text-slate-300' : isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
-          ${mine ? (isIn ? '+' : '-') : ''}${Security.escapeHtml(amountStr)}
+          ${Security.escapeHtml(amountStr)}
         </div>
       </div>
     `;

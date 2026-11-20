@@ -271,7 +271,7 @@ function studioDataMoneyIn(minor, currency) {
   if (code === 'USD') return studioUsd(minor);
   if (code === 'LYD') return studioLyd(minor);
   const text = studioMinorText(minor);
-  return text && /^[A-Z]{3}$/.test(code) ? `${text} ${code}` : '—';
+  return text && /^[A-Z]{3}$/.test(code) ? adsStudioPiece(`${text} ${code}`) : '—';
 }
 
 function studioDataName(request) {

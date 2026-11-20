@@ -8,6 +8,7 @@ const {
   expectNoPageOverflow,
   openAdminApi,
   projectToken,
+  seen,
   setLanguage,
   signInStudio
 } = require('./helpers/studio-v2');
@@ -394,7 +395,7 @@ test.describe('Albayan Studio extras: TikTok service, inbox badge, results card,
     expect(card).toContain('<dd>800</dd>');
     expect(card).toMatch(/data-testid="studio-results-checked">checked (just now|\d+ min ago)</);
     await setLanguage(page, 'ar');
-    const cardAr = await page.evaluate(id => renderStudioResultsCard(id), seeded.requestId);
+    const cardAr = seen(await page.evaluate(id => renderStudioResultsCard(id), seeded.requestId));  // without the direction marks
     expect(cardAr).toContain('استخدمت ميتا $3.40 من $25.00');
     expect(cardAr).toContain('نتائج ميتا');
     expect(errors).toEqual([]);

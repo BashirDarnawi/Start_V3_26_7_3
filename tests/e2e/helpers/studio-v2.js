@@ -222,6 +222,16 @@ const PLATFORM_NOISE = [
 
 // Page errors and console errors of one page, minus PLATFORM_NOISE. A failed studio request, a
 // server error or any error the app logs itself still counts.
+// In Arabic every amount is one piece with its own direction (moneyPiece in src/07-i18n-render-core.js): it carries
+// invisible marks, U+2066 to U+2069. A person sees the text without them, so these read it the same way.
+const MARKS = '[\\u2066-\\u2069]*';
+const seen = text => String(text ?? '').replace(/[\u2066-\u2069]/g, '');
+const escapeForPattern = text => Array.from(String(text)).map(ch => (/\s/.test(ch) ? '\\s+' : ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))).join(MARKS);
+// For toHaveText(): exactly this text, wherever the marks sit.
+const shown = text => new RegExp(`^\\s*${MARKS}${escapeForPattern(text)}${MARKS}\\s*$`);
+// For toContainText(): this text somewhere, wherever the marks sit.
+const shownPart = text => new RegExp(escapeForPattern(text));
+
 function collectPageErrors(page) {
   const errors = [];
   page.on('pageerror', error => errors.push(`pageerror: ${error.message}`));
@@ -251,7 +261,10 @@ module.exports = {
   openAdminApi,
   openUserApi,
   projectToken,
+  seen,
   setLanguage,
+  shown,
+  shownPart,
   signInStudio,
   studioMe,
   tabParam

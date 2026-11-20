@@ -12,6 +12,8 @@ const {
   openUserApi,
   projectToken,
   setLanguage,
+  shown,
+  shownPart,
   signInStudio,
   tabParam
 } = require('./helpers/studio-v2');
@@ -132,7 +134,7 @@ async function expectStripEqualsServer(page, expected, label) {
   for (const [key, field] of MONEY_CELLS) {
     const cell = page.getByTestId(`studio-money-${key}`);
     await expect(cell, `${label}: the ${key} cell`).toHaveAttribute('data-minor', String(summary.usd[field]));
-    await expect(cell.locator('.studio-home-money-value')).toHaveText(usd(summary.usd[field]));
+    await expect(cell.locator('.studio-home-money-value')).toHaveText(shown(usd(summary.usd[field])));
   }
   expect(summary.usd.beingReturnedMinor, `${label}: nothing on its way back`).toBe(0);
   await expect(page.getByTestId('studio-money-returning')).toHaveCount(0);
@@ -329,7 +331,7 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
         await expect(page.getByTestId('studio-ad-track')).toHaveAttribute('data-step', 'sent');
         await expect(page.getByTestId('studio-ad-reserved')).toContainText(words.reservedRow);
         await expect(page.getByTestId('studio-ad-reserved')).toContainText(usd(TOTAL_MINOR));
-        await expect(page.getByTestId('studio-ad-money'), 'daily x days is spelled out').toContainText(`${usd(DAILY_MINOR)} × ${DAYS}`);
+        await expect(page.getByTestId('studio-ad-money'), 'daily x days is spelled out').toContainText(shownPart(`${usd(DAILY_MINOR)} × ${DAYS}`));
         await expect(page.getByTestId('studio-ad-chain'), 'nothing paid before an approval').toHaveCount(0);
         await expect.poll(() => actionIds(page)).toEqual(['withdraw', 'ask']);
         await expectNoPageOverflow(page, `request detail (${language})`);
@@ -368,8 +370,8 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
         await taps.tap(page.getByTestId('studio-home-wallet-link'), 'the wallet');
         await expectCustomerTab(page, 'wallet');
         await expect(page.getByTestId('studio-wallet-numbers')).toBeVisible();
-        await expect(page.getByTestId('studio-wallet-available-amount')).toHaveText(usd(TOP_UP_MINOR));
-        await expect(page.getByTestId('studio-wallet-reserved-amount')).toHaveText(usd(0));
+        await expect(page.getByTestId('studio-wallet-available-amount')).toHaveText(shown(usd(TOP_UP_MINOR)));
+        await expect(page.getByTestId('studio-wallet-reserved-amount')).toHaveText(shown(usd(0)));
         await expectDirection(page, language, 'Wallet');
         if (language === 'ar') for (const text of await page.getByTestId('studio-screen-wallet').allInnerTexts()) expect(text).toMatch(ARABIC);
         expect(nativeDialogs, 'no native confirm/prompt/alert').toBe(0);
@@ -412,7 +414,7 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
       await reopenHome(page, 'en');
       await expect(page.getByTestId('studio-money-in-ads')).toHaveAttribute('data-minor', String(TOTAL_MINOR), { timeout: BOOT_TIMEOUT });
       await expect(page.getByTestId('studio-money-in-ads').locator('dt')).toHaveText(words.inAds);
-      await expect(page.getByTestId('studio-money-in-ads').locator('.studio-home-money-value')).toHaveText(usd(TOTAL_MINOR));
+      await expect(page.getByTestId('studio-money-in-ads').locator('.studio-home-money-value')).toHaveText(shown(usd(TOTAL_MINOR)));
       await expectStripEqualsServer(page, [TOP_UP_MINOR - TOTAL_MINOR, 0, TOTAL_MINOR, 0], 'Home after the approval');
       await expect(page.getByTestId('studio-money-meta-used'), 'no "Meta used" line before a Meta link').toHaveCount(0);
       taps.home();
@@ -535,7 +537,7 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
       await page.getByTestId('studio-nav-home').click();
       await expectCustomerTab(page, 'home');
       await expectStripEqualsServer(page, [TOP_UP_MINOR, 0, 0, 0], 'Home after the customer stop');
-      await expect(page.getByTestId('studio-money-in-ads').locator('.studio-home-money-value')).toHaveText(usd(0));
+      await expect(page.getByTestId('studio-money-in-ads').locator('.studio-home-money-value')).toHaveText(shown(usd(0)));
       await expect(page.getByTestId(`studio-tracker-${id}`)).toHaveCount(0);
       expect(nativeDialogs, 'no native confirm/prompt/alert').toBe(0);
       expect(errors).toEqual([]);

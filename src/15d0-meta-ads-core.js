@@ -29,12 +29,14 @@ function metaAdsFindLocalAd(adId) {
 function metaAdsFormatMoney(minor, currency) {
   const amount = Math.max(0, Number(minor) || 0) / 100;
   const code = String(currency || 'USD').toUpperCase().slice(0, 12);
+  // In Arabic the amount is one left-to-right piece, so "$" stays in front of its number (moneyPiece, 07).
+  const piece = text => (typeof moneyPiece === 'function' ? moneyPiece(text) : text);
   try {
-    return new Intl.NumberFormat('en-US', {  // en-US in Arabic too: ar-LY prints 1.250,00
+    return piece(new Intl.NumberFormat('en-US', {  // en-US in Arabic too: ar-LY prints 1.250,00
       style: 'currency', currency: code, minimumFractionDigits: 2, maximumFractionDigits: 2
-    }).format(amount);
+    }).format(amount));
   } catch (_) {
-    return `${amount.toFixed(2)} ${code}`;
+    return piece(`${amount.toFixed(2)} ${code}`);
   }
 }
 

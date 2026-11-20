@@ -264,7 +264,7 @@ check('ads table flags a page mismatch and the coverage panel is bilingual',
   metaAds.includes("isAr ? 'صفحة غير مطابقة' : 'Page mismatch'") &&
   views.includes("isArV ? 'تغطية الدين من أموال الشركة' : 'Company funds debt coverage'") &&
   views.includes("isArV ? 'تغطية من أموال الشركة' : 'Cover with company funds'") &&
-  views.includes('<span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>'));
+  views.includes('<span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">${fmtUsd(companyCoverableOutstandingUSD)}</span>'));
 // (5) Raw server refusals reach users under a bilingual title with a human
 // noun and translated rule text — never "Failed to save receipts: <English>".
 check('server refusal toasts are bilingual and never expose internal collection names',
@@ -467,7 +467,7 @@ check('Edit Ad receipt replacement is explicit, atomic-looking and phone accessi
   !forms.includes('allocation.amountUSD = Math.min') &&
   forms.includes('const replacingSavedReceipt = !!state.modalData?.id') &&
   forms.includes('dueInput.value = originalDueAmount.toFixed(2)') &&
-  forms.includes("? `${isArL ? 'عجز' : 'Short'} $${Math.abs(balance).toFixed(2)}`") &&
+  forms.includes("? `${isArL ? 'عجز' : 'Short'} ${fmtUsd(Math.abs(balance))}`") &&
   forms.includes('grid grid-cols-1 sm:grid-cols-2') &&
   forms.includes('id="ad-funding-receipt-${idx}"') &&
   forms.includes('id="ad-funding-amount-${idx}"') &&
@@ -1290,7 +1290,7 @@ check('hub screens keep every old action, bilingual labels, LTR money and phone 
   servicesWallet.includes('function cancelSubscriptionFromUi(') &&
   servicesWallet.includes('walletTopUpFromUi()') && servicesWallet.includes('walletTransferFromUi()') &&
   servicesWallet.includes("hubText('Coming soon', 'قريباً')") &&
-  servicesWallet.includes('dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, \'LYD\'))}') &&
+  servicesWallet.includes('dir="ltr">${hubEsc(walletShow(balanceMinor, \'LYD\'))}') &&
   (servicesWallet.match(/touch-target/g) || []).length >= 25 &&
   css.includes('.hub-card {') && css.includes('.dark .hub-card {') && css.includes('.hub-tile-watermark {'));
 
@@ -1992,7 +1992,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   } catch (error) { typedProblem = String(error && error.message || error); }
   check("'1,500' typed key by key -> 150000 minor (budget and charge boxes, Arabic comma too)", !loadError && !typedProblem
     && typed[0] === 150000 && typed[1] === '1500' && typed[2] === 150000 && typed[3] === '1500' && typed[4] === 150000
-    && typed[5] === '1500' && String(typed[6]).includes('7500.00 LYD') && JSON.stringify(charges) === '[150000,150000]'
+    && typed[5] === '1500' && String(typed[6]).includes('7,500.00 LYD') && JSON.stringify(charges) === '[150000,150000]'
     && !typed[7].includes('sanitizeMoneyInput') && !typed[8].includes('sanitizeMoneyInput')
     && typed[9].includes('sanitizeMoneyInput(this)') && typed[10].includes('sanitizeMoneyInput(this)'),
   loadError || typedProblem || JSON.stringify({ typed, charges }));
@@ -2014,8 +2014,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     problem({}) === '',
     problem({ budgetType: 'lifetime', budgetMinorUSD: 400 }).startsWith('The total budget must be at least $5.00'),
     problem({ budgetType: 'lifetime', budgetMinorUSD: 400 }, 'ar').startsWith('يجب ألا يقل إجمالي الميزانية عن $5.00'),
-    problem({ budgetMinorUSD: 30000 }).startsWith('The total budget must be at most $2000.00'),  // $300 x 7 = $2,100
-    problem({ budgetMinorUSD: 30000 }, 'ar').startsWith('يجب ألا يزيد إجمالي الميزانية عن $2000.00'),
+    problem({ budgetMinorUSD: 30000 }).startsWith('The total budget must be at most $2,000.00'),  // $300 x 7 = $2,100
+    problem({ budgetMinorUSD: 30000 }, 'ar').startsWith('يجب ألا يزيد إجمالي الميزانية عن $2,000.00'),
     problem({ budgetMinorUSD: 50, durationDays: 20 }).startsWith('Budget per day is below the minimum'),  // $0.50 a day
     problem({ budgetMinorUSD: 50, durationDays: 20 }, 'ar').startsWith('الميزانية اليومية أقل من الحد الأدنى'),
     problem({ budgetType: 'lifetime', budgetMinorUSD: 900, durationDays: 10 }).startsWith('Budget per day is below the minimum'),

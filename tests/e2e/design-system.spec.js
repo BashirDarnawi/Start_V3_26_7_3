@@ -232,7 +232,7 @@ test(`Ads retain the classic table and phone rows while other operations keep ca
         const linkBounds = await receiptShortcut.boundingBox();
         expect(linkBounds.x).toBeGreaterThanOrEqual(cellBounds.x - 1);
         expect(linkBounds.x + linkBounds.width).toBeLessThanOrEqual(cellBounds.x + cellBounds.width + 1);
-        await expect(detail.locator('td[data-payment-state="paid"] > span').first()).toHaveText('$12,345.67');
+        await expect(detail.locator('td[data-payment-state="paid"] > span').first()).toHaveText(/^\u2066?\$12,345\.67\u2069?$/);  // in Arabic the amount is one left-to-right piece (invisible marks)
         // The menu closes on a press outside it, and the receipt link stays one press away.
         await page.locator('#ads-count').click();
         await expect(detail.locator('details.row-menu[open]')).toHaveCount(0);
@@ -247,7 +247,7 @@ test(`Ads retain the classic table and phone rows while other operations keep ca
         await expect(spend).toBeEditable();
         // Preview only: changing a field must not send a financial mutation.
         await spend.fill('5000.25');
-        await expect(page.locator(`#reconciliation-remaining-${ids.ad}`)).toHaveText('$7,345.42');
+        await expect(page.locator(`#reconciliation-remaining-${ids.ad}`)).toHaveText(/^\u2066?\$7,345\.42\u2069?$/);
         // The result is said first, as a sentence, and the button repeats the amount (redesign round 3).
         await expect(page.locator(`#reconciliation-result-${ids.ad}`)).toContainText('$7,345.42');
         await expect(page.locator(`#reconciliation-submit-label-${ids.ad}`)).toContainText('$7,345.42');

@@ -1899,23 +1899,23 @@ function renderAnalyticsView() {
           <div class="flex items-start justify-between relative">
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'إيراد الإعلانات (مدفوع)' : 'Ad Revenue (Paid)'}</p>
-              <p class="text-2xl font-bold text-slate-800 dark:text-white">$${paidAdRevenue.toFixed(2)}</p>
-              <p class="text-xs text-slate-500 mt-1">${isAr ? 'قيد الانتظار' : 'Pending'}: $${unpaidAdRevenue.toFixed(2)}</p>
+              <p class="text-2xl font-bold text-slate-800 dark:text-white">${fmtUsd(paidAdRevenue)}</p>
+              <p class="text-xs text-slate-500 mt-1">${isAr ? 'قيد الانتظار' : 'Pending'}: ${fmtUsd(unpaidAdRevenue)}</p>
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg">
               <i data-lucide="dollar-sign" class="w-6 h-6 text-white"></i>
             </div>
           </div>
         </button>
-        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('receipts-volume')")}
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', fmtUsd(totalReceiptsUSD), 'file-text', 'from-indigo-500 to-purple-600', "if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('receipts-volume')")}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
               <p class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">${isAr ? 'الرصيد المتاح' : 'Available Balance'}</p>
-              <p class="text-2xl font-bold text-slate-800 dark:text-white">$${availableReceiptBalance.toFixed(2)}</p>
-              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: $${totalUsedFromReceipts.toFixed(2)} / ${isAr ? 'مدفوع' : 'Paid'}: $${paidUSD.toFixed(2)}</p>` : ''}
+              <p class="text-2xl font-bold text-slate-800 dark:text-white">${fmtUsd(availableReceiptBalance)}</p>
+              ${canViewSensitive ? `<p class="text-xs text-slate-500 mt-1">${isAr ? 'مستخدم' : 'Used'}: ${fmtUsd(totalUsedFromReceipts)} / ${isAr ? 'مدفوع' : 'Paid'}: ${fmtUsd(paidUSD)}</p>` : ''}
             </div>
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg">
               <i data-lucide="piggy-bank" class="w-6 h-6 text-white"></i>
@@ -1935,8 +1935,8 @@ function renderAnalyticsView() {
               </div>
               ${canViewSensitive ? `
               <div class="flex items-center space-x-3 mt-2 text-xs">
-                <span class="text-emerald-600 font-medium">✓ $${collectedUSD.toFixed(0)}</span>
-                <span class="text-amber-600 font-medium">○ $${notCollectedUSD.toFixed(0)}</span>
+                <span class="text-emerald-600 font-medium">✓ ${fmtUsd(collectedUSD)}</span>
+                <span class="text-amber-600 font-medium">○ ${fmtUsd(notCollectedUSD)}</span>
               </div>
               ` : ''}
             </div>
@@ -2000,25 +2000,25 @@ function renderAnalyticsView() {
         <div class="grid grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'نقد جديد مُحصَّل' : 'New money collected'}</p>
-            <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">$${liquidity.collectedUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">${fmtUsd(liquidity.collectedUSD)}</p>
           </div>
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'صُرف على إعلانات جديدة' : 'Spent on new ads'}</p>
-            <p class="text-xl font-bold text-rose-600 dark:text-rose-400">$${liquidity.adSpendUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold text-rose-600 dark:text-rose-400">${fmtUsd(liquidity.adSpendUSD)}</p>
           </div>
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'صافي النقد الجديد' : 'Net new cash'}</p>
-            <p class="text-xl font-bold ${liquidity.netUSD >= 0 ? 'text-slate-800 dark:text-white' : 'text-rose-600 dark:text-rose-400'}">$${liquidity.netUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold ${liquidity.netUSD >= 0 ? 'text-slate-800 dark:text-white' : 'text-rose-600 dark:text-rose-400'}">${fmtUsd(liquidity.netUSD)}</p>
           </div>
           <div class="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <p class="text-slate-500 text-xs">${isAr ? 'المستحق لكل العملاء' : 'Owed to all customers'}</p>
-            <p class="text-xl font-bold text-indigo-600 dark:text-indigo-400">$${liquidity.liabilityUSD.toFixed(2)}</p>
+            <p class="text-xl font-bold text-indigo-600 dark:text-indigo-400">${fmtUsd(liquidity.liabilityUSD)}</p>
           </div>
         </div>
         <div>
           <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
             <span>${isAr ? 'نسبة التغطية' : 'Coverage'}: ${liquidity.coveragePercent.toFixed(1)}%</span>
-            ${liquidity.shortfallUSD > 0.005 ? `<span class="font-semibold text-rose-600">${isAr ? 'العجز المتبقي' : 'Still uncovered'}: $${liquidity.shortfallUSD.toFixed(2)}</span>` : `<span class="font-semibold text-emerald-600">${isAr ? 'مُغطّى بالكامل' : 'Fully covered'}</span>`}
+            ${liquidity.shortfallUSD > 0.005 ? `<span class="font-semibold text-rose-600">${isAr ? 'العجز المتبقي' : 'Still uncovered'}: ${fmtUsd(liquidity.shortfallUSD)}</span>` : `<span class="font-semibold text-emerald-600">${isAr ? 'مُغطّى بالكامل' : 'Fully covered'}</span>`}
           </div>
           <div class="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
             <div class="h-full rounded-full transition-all duration-500 ${covered ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : (halfway ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'bg-gradient-to-r from-rose-500 to-red-600')}" style="width: ${Math.min(liquidity.coveragePercent, 100)}%"></div>
@@ -2106,7 +2106,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(c.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">${c.spend.toFixed(2)} USD</p>
+                    <p class="text-[11px] text-slate-500">${fmtUsd(c.spend)}</p>
                   </div>
                   <span class="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40">${isAr ? 'الأعلى' : 'Top'}</span>
                 </div>
@@ -2147,7 +2147,7 @@ function renderAnalyticsView() {
                 <div class="flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50">
                   <div>
                     <p class="font-medium">${Security.escapeHtml(item.type || '')}: ${Security.escapeHtml(item.name || '')}</p>
-                    <p class="text-[11px] text-slate-500">${canViewFinancials ? `$${(Number(item.value) || 0).toFixed(2)} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
+                    <p class="text-[11px] text-slate-500">${canViewFinancials ? `${fmtUsd((Number(item.value) || 0))} • ` : ''}${Security.escapeHtml(trStatus(item.status || ''))}</p>
                   </div>
                   <span class="text-[10px] text-slate-400">${item.at ? new Date(item.at).toLocaleDateString(appDateLocale()) : ''}</span>
                 </div>
@@ -2184,7 +2184,7 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
 
 function renderProgress(label, value, max, colorClass) {
   const percentage = max > 0 ? Math.min((value / max) * 100, 100) : 0;
-  const displayValue = typeof value === 'number' ? (value >= 1000 ? '$' + value.toFixed(0) : '$' + value.toFixed(2)) : value;
+  const displayValue = typeof value === 'number' ? fmtUsd(value) : value;  // two decimals always (before: "$2375" beside "$937.50")
   return `
     <div class="mt-3">
       <div class="flex justify-between text-xs mb-1">
@@ -2330,7 +2330,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
               <div class="flex justify-between items-start mb-4">
                 <div class="flex-1">
                   <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 text-xs font-bold">#${displayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 text-xs font-bold" dir="ltr">#${displayNum}</span>
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</h3>
                   </div>
                   <div class="flex min-w-0 flex-wrap items-center gap-2 mt-1">
@@ -2391,15 +2391,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                            6411 balance while 6411.10 was actually owed. -->
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${fmt2(stats.totalSpentLYD)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="customer-money-cell font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">${fmt2(stats.totalPaidLYD)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="customer-money-cell font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${moneyPiece((stats.balanceLYD >= 0 ? '+' : '') + fmt2(stats.balanceLYD))}</div>
                       </div>
                     </div>
                   </div>
@@ -2409,15 +2409,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${fmtUsd(stats.totalSpentUSD)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="customer-money-cell font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">${fmtUsd(stats.totalPaidUSD)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceUSD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="customer-money-cell font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${fmtUsd(stats.balanceUSD, '+')}</div>
                       </div>
                     </div>
                   </div>
@@ -2425,14 +2425,14 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <!-- Uncommitted Not Paid receipt debt (already inside Balance; Spent stays ads-only) -->
                   <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">
                     <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
-                    <span dir="ltr">${stats.receiptDebtLYD.toFixed(2)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
+                    <span dir="ltr">${fmtLyd(stats.receiptDebtLYD)} · ${fmtUsd(stats.receiptDebtUSD)}</span>
                   </div>
                   ` : ''}
                   ${(stats.companyFundedUSD > 0.005) ? `
                   <!-- Debt already absorbed by company funds (credited inside Balance; not customer money, not revenue) -->
                   <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-violet-700 dark:text-violet-300">
                     <span class="inline-flex items-center gap-1"><i data-lucide="landmark" class="w-3 h-3"></i>${isAr ? 'غطته الشركة' : 'Company covered'}</span>
-                    <span dir="ltr">$${stats.companyFundedUSD.toFixed(2)}</span>
+                    <span dir="ltr">${fmtUsd(stats.companyFundedUSD)}</span>
                   </div>
                   ` : ''}
                   ${(coverableDebtReceipts.length || coverableAdDebtUSD > 0.005) ? `
@@ -2444,7 +2444,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     class="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2">
                     <i data-lucide="landmark" class="w-4 h-4"></i>
                     <span>${isAr ? 'سداد الدين من أموال الشركة' : 'Pay debt from company funds'}</span>
-                    <span dir="ltr">($${coverableDebtUSD.toFixed(2)})</span>
+                    <span dir="ltr">(${fmtUsd(coverableDebtUSD)})</span>
                   </button>
                   ` : ''}
                 </div>
@@ -2561,8 +2561,8 @@ function renderCustomersView() {
       <div class="grid ${canSeeCustomerBalances ? 'grid-cols-2 sm:grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
-        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', Math.round(totalDebts).toLocaleString('en-US') + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
-        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', Math.round(totalRevenue).toLocaleString('en-US') + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
+        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', fmtLyd(totalDebts), 'alert-circle', 'from-rose-500 to-pink-600')}
+        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', fmtLyd(totalRevenue), 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
         ` : ''}
       </div>
 
@@ -2657,7 +2657,7 @@ function renderReceiptsView() {
     ? allReceipts.find(receipt => String(receipt?.id || '') === receiptRecordFilter)
     : null;
   const filteredReceiptNumber = String(filteredReceipt?.finalReceiptNo || filteredReceipt?.serialNumber || filteredReceipt?.tempReceiptNo || '').trim();
-  const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? `#${filteredReceiptNumber}` : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
+  const filteredReceiptLabel = Security.escapeHtml(filteredReceiptNumber ? codePiece(`#${filteredReceiptNumber}`) : (isArV ? 'الوصل المحدد' : 'Selected receipt'));
   // ONE ads pass for the whole card list, instead of a fresh scan per card.
   // Deliberately built from getVisibleRecords (soft-delete only, NOT
   // permission-scoped): receipt money must never change with who is looking.
@@ -3005,7 +3005,7 @@ function renderReceiptsView() {
               <div class="flex justify-between items-start">
                 <div>
                   <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-300 text-xs font-bold">#${receiptDisplayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-300 text-xs font-bold" dir="ltr">#${receiptDisplayNum}</span>
                     <h3 class="text-lg font-bold text-rose-700 dark:text-rose-300">${isArV ? 'وصل تالف' : 'Destroyed Receipt'}</h3>
                   </div>
                   ${displayFinalNo ? `<p class="text-sm font-mono font-bold text-slate-700 dark:text-slate-200 mt-1">${isArV ? 'الرقم المقفول' : 'Locked number'}: ${Security.escapeHtml(String(displayFinalNo))}</p>` : ''}
@@ -3026,7 +3026,7 @@ function renderReceiptsView() {
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold">#${receiptDisplayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-xs font-bold" dir="ltr">#${receiptDisplayNum}</span>
                   <h3 class="text-lg font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || receipt.customerName || (isArV ? 'غير معروف' : 'Unknown'))}</h3>
                   </div>
                   ${(displayTempNo || displayFinalNo) ? `
@@ -3042,7 +3042,7 @@ function renderReceiptsView() {
                     </span>
                     <span class="inline-flex items-center gap-1" title="${receiptUsageTitle}">
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
-                      <span>${receiptUsageLabel}: <span class="font-semibold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${displayedUsedUSD.toFixed(2)}</span> ${receiptUsedLabel} • <span class="font-semibold text-blue-600">$${displayedRemainingUSD.toFixed(2)}</span> ${receiptRemainingLabel} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
+                      <span>${receiptUsageLabel}: <span class="font-semibold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${fmtUsd(displayedUsedUSD)}</span> ${receiptUsedLabel} • <span class="font-semibold text-blue-600">${fmtUsd(displayedRemainingUSD)}</span> ${receiptRemainingLabel} <span class="text-slate-400">(${fmtLyd(remainingLYD)})</span></span>
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
@@ -3074,13 +3074,13 @@ function renderReceiptsView() {
                   ` : ''}
                 </div>
                 <div class="text-right" ${hasCustomerDebt ? 'data-receipt-linked-debt="true"' : ''}>
-                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${(hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)).toFixed(2)}</div>
-                  <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
+                  <div class="text-2xl font-bold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${fmtUsd((hasCustomerDebt ? collectionTarget.amountUSD : Number(receipt.amountUSD || 0)))}</div>
+                  <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${fmtLyd((hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)))}</div>
                   ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 dark:text-rose-400 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
                   ${receipt.paymentResult && (hasCustomerDebt || receipt.paymentResult !== 'UNDERPAID') ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600 dark:text-rose-400' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
-                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(2)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${_deliveryRemainingLocal(receipt, collectionTarget.amountLocal).toFixed(2)} LYD`}
+                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} ${fmtLyd(Number(receipt.overpaidAmount || 0), '+')}` : `${isArV ? 'المتبقي' : 'Remaining'} ${fmtLyd(_deliveryRemainingLocal(receipt, collectionTarget.amountLocal))}`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
@@ -3097,7 +3097,7 @@ function renderReceiptsView() {
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
                     return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
-                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(2)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${fmtLyd((Number(feeCollectedRaw) || 0))} <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
                     </div>`;
                   })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
@@ -3106,8 +3106,8 @@ function renderReceiptsView() {
 
               <div class="space-y-2 mb-4 text-sm border-t border-b border-slate-200 dark:border-slate-700 py-3">
                 <div class="flex justify-between"><span class="text-slate-500">${isArV ? 'سعر الصرف' : 'Exchange Rate'}:</span><span class="font-medium">${Number(receipt.exchangeRate || state.defaultExchangeRate || 0).toFixed(2)}</span></div>
-                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">+${receipt.officeFee?.toFixed(2)} LYD</span></div>` : ''}
-                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">-${receipt.discount?.toFixed(2)} LYD</span></div>` : ''}
+                ${receipt.officeFee ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'عمولة المكتب' : 'Office Fee'}:</span><span class="font-medium text-amber-600">${fmtLyd(receipt.officeFee, '+')}</span></div>` : ''}
+                ${receipt.discount ? `<div class="flex justify-between"><span class="text-slate-500">${isArV ? 'الخصم' : 'Discount'}:</span><span class="font-medium text-emerald-600">${fmtLyd(receipt.discount, '-')}</span></div>` : ''}
               </div>
 
               ${hasMultiplePayments ? `
@@ -3128,14 +3128,14 @@ function renderReceiptsView() {
                           ${payment.deliveryPersonId ? `<div class="no-print text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
                         </div>
                         <div class="text-right">
-                          <div class="font-bold text-indigo-600">${r1.toFixed(2)} LYD</div>
+                          <div class="font-bold text-indigo-600">${fmtLyd(r1)}</div>
                           ${payment.rate ? `<div class="text-xs text-slate-500">@ ${payment.rate}</div>` : ''}
                         </div>
                       </div>
                     `}).join('')}
                   </div>
                   <div class="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700 flex justify-between font-bold text-emerald-600">
-                    <span>${isArV ? 'إجمالي المدفوع' : 'Total Paid'}:</span><span>${totalPaid.toFixed(2)} LYD</span>
+                    <span>${isArV ? 'إجمالي المدفوع' : 'Total Paid'}:</span><span>${fmtLyd(totalPaid)}</span>
                   </div>
                 </div>
               ` : `
@@ -3166,7 +3166,7 @@ function renderReceiptsView() {
                     <div class="col-span-2 flex items-center justify-between p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40">
                       <div class="text-xs text-slate-600 dark:text-slate-300 flex items-center space-x-2">
                         <i data-lucide="swap" class="w-3 h-3"></i>
-                        <span>${isArV ? 'المُحوَّل' : 'Transferred'}: $${usage.transferredUSD.toFixed(2)}</span>
+                        <span>${isArV ? 'المُحوَّل' : 'Transferred'}: ${fmtUsd(usage.transferredUSD)}</span>
                         ${hasTransfers && lastTransferName ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-100">${isArV ? 'الأخير' : 'Last'}: ${lastTransferName}</span>` : ''}
                       </div>
                       <div class="flex items-center space-x-3">
@@ -3213,12 +3213,12 @@ function renderReceiptsView() {
                 </div>
                 ${receipt.collected ? `
                   <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 text-xs">
-                    <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${collectedLYD.toFixed(2)} LYD</span></span>
-                    ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${leftLYD.toFixed(2)} LYD</span></span>` : ''}
+                    <span class="text-slate-600 dark:text-slate-300">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-emerald-600">${fmtLyd(collectedLYD)}</span></span>
+                    ${leftLYD > 0.01 ? `<span class="text-slate-600 dark:text-slate-300">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}: <span class="font-bold text-orange-600">${fmtLyd(leftLYD)}</span></span>` : ''}
                   </div>
                   ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
                     <div class="flex flex-wrap gap-1 mt-1">
-                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${(Number(p.amount) || 0).toFixed(2)} LYD</span>`).join('')}
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${fmtLyd((Number(p.amount) || 0))}</span>`).join('')}
                     </div>
                   ` : ''}
                 ` : ''}
@@ -3235,8 +3235,8 @@ function renderReceiptsView() {
                       </div>
                       <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">
                         ${isArV ? 'دين العميل المتبقي:' : 'Customer debt remaining:'}
-                        <span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
-                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>${isArV ? 'غطته الشركة:' : 'Company covered:'} <span dir="ltr" class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
+                        <span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">${fmtUsd(companyCoverableOutstandingUSD)}</span>
+                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>${isArV ? 'غطته الشركة:' : 'Company covered:'} <span dir="ltr" class="font-bold text-violet-700 dark:text-violet-300">${fmtUsd(companyCoveredUSD)}</span>` : ''}
                       </div>
                       <p class="mt-1 text-[11px] leading-4 text-violet-700 dark:text-violet-300">
                         ${isArV ? 'مصروف تجاري فقط — ليس دفعة من العميل وليس إيراداً.' : 'Business expense only &mdash; not a customer payment and not revenue.'}
@@ -3447,7 +3447,7 @@ function renderPagesView() {
               <div class="flex justify-between items-start mb-4">
                 <div class="flex-1">
                   <div class="flex items-center gap-2 mb-1">
-                    <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold">#${pageDisplayNum}</span>
+                    <span class="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400 text-xs font-bold" dir="ltr">#${pageDisplayNum}</span>
                     ${isMetaImportedPage ? `<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>` : ''}
                     ${needsPageOwner ? `<span class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold">${isAr ? 'يحتاج مالك' : 'Needs owner'}</span>` : ''}
                     ${duplicatePageIds.has(String(p.id)) ? `<button type="button" data-action="view-page-duplicates" data-page-id="${Security.escapeHtml(String(p.id))}" onclick="showPageDuplicates(this.dataset.pageId, this)" class="px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 text-[10px] font-bold inline-flex items-center gap-1 hover:bg-amber-200 dark:hover:bg-amber-900/60" aria-haspopup="dialog" title="${isAr ? 'توجد صفحة أخرى بنفس الاسم' : 'Another page has the same name'}"><i data-lucide="copy" class="w-3 h-3"></i>${isAr ? 'مكرر' : 'Duplicate'}</button>` : ''}
@@ -3519,8 +3519,8 @@ function renderPagesView() {
                       <div>
                         <div class="text-slate-500 mb-1">${isAr ? 'إجمالي الإنفاق' : 'Total Spend'}</div>
                         ${canSeePageFinancials ? `
-                          <div class="font-bold text-emerald-600 dark:text-emerald-400">$${(pageStats?.totalSpendUSD || 0).toFixed(2)}</div>
-                          <div class="text-[10px] text-emerald-600 dark:text-emerald-400">${(pageStats?.totalSpendLYD || 0).toFixed(2)} LYD</div>
+                          <div class="font-bold text-emerald-600 dark:text-emerald-400">${fmtUsd((pageStats?.totalSpendUSD || 0))}</div>
+                          <div class="text-[10px] text-emerald-600 dark:text-emerald-400">${fmtLyd((pageStats?.totalSpendLYD || 0))}</div>
                         ` : `<div class="text-slate-400 flex items-center gap-1"><i data-lucide="lock" class="w-3 h-3"></i>${isAr ? 'محجوب' : 'Hidden'}</div>`}
                       </div>
                     </div>
@@ -3687,7 +3687,7 @@ function renderAdsView() {
           </details>
         </div>
         ${adReceiptFilter ? `<div id="ad-receipt-link-filter" role="status" class="mt-3 flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-200 sm:flex-row sm:items-center sm:justify-between">
-          <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong>#${activeReceiptLabel}</strong></span>
+          <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong dir="ltr">#${activeReceiptLabel}</strong></span>
           <button type="button" onclick="clearAdReceiptFilter()" class="min-h-11 inline-flex items-center justify-center gap-1 rounded-lg px-3 font-bold text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:text-indigo-200 dark:hover:bg-indigo-900/50" aria-label="${isAr ? 'إزالة فلتر الوصل' : 'Remove receipt filter'}"><i data-lucide="x" class="h-4 w-4"></i>${isAr ? 'عرض كل الإعلانات' : 'Show all ads'}</button>
         </div>` : ''}
         <div id="ads-advanced-filters" class="workspace-advanced-panel ${adAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${adAdvancedFiltersOpen ? 'false' : 'true'}">
@@ -3823,7 +3823,7 @@ function renderAdsView() {
                         ${adPageAvatarTile}
                         ${adPrimaryTile}
                         <div class="min-w-0 flex-1">
-                          <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
+                          <div class="break-words font-medium"><bdi>#${adDisplayNum}</bdi> - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
                           ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${phoneLtrHtml(ad.phoneNumber)}</div>` : ''}
                         </div>
@@ -3882,8 +3882,8 @@ function renderAdsView() {
                       ${needsSetup ? `<div class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">${isAr ? 'يحتاج إكمال' : 'Needs setup'}</div>` : (isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : '')}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
-                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${(Number(ad.spentUSD) || 0).toFixed(2)}</div>
-                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - (Number(ad.spentUSD) || 0)).toFixed(2)}</div>
+                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: ${fmtUsd((Number(ad.spentUSD) || 0))}</div>
+                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: ${fmtUsd(((ad.amountUSD || 0) - (Number(ad.spentUSD) || 0)))}</div>
                         </div>
                       ` : ''}
                       ${renderMetaAdStatusSummary(ad, isAr)}
@@ -3926,7 +3926,7 @@ function renderAdsView() {
                     </td>
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions">
-                      ${visibleLinkedReceiptIds.length ? `<div class="ads-linked-receipts">${visibleLinkedReceiptIds.map(id => `<button type="button" data-action="view-ad-receipt" data-receipt-id="${Security.escapeHtml(String(id))}" onclick="openReceiptRecord(this.dataset.receiptId)"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${isAr ? 'وصل' : 'Receipt'} #${Security.escapeHtml(_rcptNo(receiptsById.get(String(id))) || String(id))}</span></button>`).join('')}</div>` : ''}
+                      ${visibleLinkedReceiptIds.length ? `<div class="ads-linked-receipts">${visibleLinkedReceiptIds.map(id => `<button type="button" data-action="view-ad-receipt" data-receipt-id="${Security.escapeHtml(String(id))}" onclick="openReceiptRecord(this.dataset.receiptId)"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${isAr ? 'وصل' : 'Receipt'} <bdi>#${Security.escapeHtml(_rcptNo(receiptsById.get(String(id))) || String(id))}</bdi></span></button>`).join('')}</div>` : ''}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="ads-row-step" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         <button type="button" id="${adMoreId}" class="ads-row-details" aria-expanded="${adOpen}" onclick="shellToggleRow('ads', '${adId}'); document.getElementById('${adMoreId}')?.focus()">${isAr ? 'التفاصيل' : 'Details'}</button>
                         <details class="${adsAsCards ? 'row-actions' : 'frame-menu row-menu'}"${adsAsCards ? ' open' : ''}>
@@ -4249,7 +4249,7 @@ function renderDeliveriesView(logOnly) {
           <h2><i data-lucide="coins" class="w-4 h-4"></i>${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</h2>
           <div><span>${isAr ? 'المُحصَّل' : 'Collected'}</span><bdi>${fmtLyd(stats.feesCollectedLYD)}</bdi></div>
           <div class="${stats.feesShopPaidLYD > 0 ? 'ops-text-danger' : ''}"><span>${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'}</span><bdi>${fmtLyd(stats.feesShopPaidLYD)}</bdi></div>
-          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${fmtLyd(Math.abs(stats.feeVarianceLYD))}</bdi></div>
+          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${fmtLyd(Math.abs(stats.feeVarianceLYD), stats.feeVarianceLYD >= 0 ? '+' : '-')}</bdi></div>
         </section>
       `}
       <div class="ops-board ${canViewDeliveryStats ? 'has-driver-panel' : ''}">
@@ -4417,7 +4417,7 @@ async function checkStuckDeliveries() {
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(_deliveryDisplayAmounts(d).local || 0).toLocaleString('en-US')} LYD</span>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${fmtLyd(_deliveryDisplayAmounts(d).local)}</span>
             <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
@@ -4744,13 +4744,13 @@ function showDeliveryDetails(itemId) {
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
             <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (USD)' : 'To collect (USD)') : (isAr ? 'المبلغ (USD)' : 'Amount (USD)')}</div>
-            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(detailAmountUSD || 0).toFixed(2)}</div>
+            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">${fmtUsd((detailAmountUSD || 0))}</div>
           </div>
         </div>
         ${detailCoveredUSD > 0.005 ? `
         <div class="px-4 py-2 rounded-xl bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-xs font-bold text-violet-700 dark:text-violet-300 flex items-center gap-2">
           <i data-lucide="landmark" class="w-4 h-4"></i>
-          <span>${isAr ? `غطّت الشركة $${detailCoveredUSD.toFixed(2)} من هذا الدين` : `Company covered $${detailCoveredUSD.toFixed(2)} of this debt`}</span>
+          <span>${isAr ? `غطّت الشركة ${fmtUsd(detailCoveredUSD)} من هذا الدين` : `Company covered ${fmtUsd(detailCoveredUSD)} of this debt`}</span>
         </div>` : ''}
         
         <!-- Status & Driver -->
@@ -5633,8 +5633,8 @@ function renderUsersView() {
                     <div class="flex justify-between text-xs"><span>${isAr ? 'إجمالي المُعيَّن:' : 'Total Assigned:'}</span><span class="font-bold">${deliveryStats.totalAssigned}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المقبول:' : 'Accepted:'}</span><span class="font-bold text-blue-600">${deliveryStats.accepted}</span></div>
                     <div class="flex justify-between text-xs"><span>${isAr ? 'المُحصَّل:' : 'Collected:'}</span><span class="font-bold text-emerald-600">${deliveryStats.collected}</span></div>
-                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600 dark:text-purple-300">${deliveryFeesLYD.toFixed(0)} LYD</span></div>
-                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600 dark:text-rose-400">${deliveryFeesShopLYD.toFixed(0)} LYD</span></div>` : ''}
+                    <div class="flex justify-between text-xs"><span>${isAr ? 'الرسوم المكتسبة:' : 'Fees Earned:'}</span><span class="font-bold text-purple-600 dark:text-purple-300">${fmtLyd(deliveryFeesLYD)}</span></div>
+                    ${deliveryFeesShopLYD > 0 ? `<div class="flex justify-between text-xs"><span>${isAr ? 'رسوم يتحملها المحل (خسارة):' : 'Shop-paid Fees (Loss):'}</span><span class="font-bold text-rose-600 dark:text-rose-400">${fmtLyd(deliveryFeesShopLYD)}</span></div>` : ''}
                   </div>
                 ` : ''}
 

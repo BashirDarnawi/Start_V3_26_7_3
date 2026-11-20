@@ -214,12 +214,12 @@ function clothesIsAr() {
 
 function clothesFmtUSD(n) {
   const v = Math.round((Number(n) || 0) * 100) / 100;
-  return `$${v.toFixed(2)}`;
+  return fmtUsd(v);
 }
 
 function clothesFmtLYD(n) {
   const v = Math.round((Number(n) || 0) * 100) / 100;
-  return `${v.toFixed(2)} LYD`;
+  return fmtLyd(v);
 }
 
 function clothesParseMoney(raw) {
@@ -2525,7 +2525,7 @@ async function setClothesOrderPayment(orderId, newPaymentStatus, typed) {
     updates.paidAt = null;
   } else if (newPaymentStatus === 'Partially Paid') {
     // The amount is asked once in the app's own box; the typed answer is then checked against the order as it is at that moment.
-    if (typed === undefined) return setClothesOrderPayment(orderId, newPaymentStatus, await appPrompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${totals.totalLYD.toFixed(2)} د.ل)` : `Amount paid so far (total ${totals.totalLYD.toFixed(2)} LYD)`, String(Number(order.amountPaidLYD || 0).toFixed(2))));
+    if (typed === undefined) return setClothesOrderPayment(orderId, newPaymentStatus, await appPrompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${fmtLyd(totals.totalLYD)})` : `Amount paid so far (total ${fmtLyd(totals.totalLYD)})`, String(Number(order.amountPaidLYD || 0).toFixed(2))));
     const answer = typed;
     if (answer === null || !String(answer).trim()) { updateClothesOrdersFiltered(); return; }  // the select must not show a status that was not saved
     const partial = clothesParsePromptMoney(answer);  // NaN (refused) for text that is not a plain amount
@@ -2811,7 +2811,7 @@ function renderClothesOrderCard(o) {
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <h4 class="font-bold text-slate-800 dark:text-white truncate">
-            ${o.orderNo ? `<span class="text-rose-500">#${String(Math.floor(Number(o.orderNo))).padStart(4, '0')}</span> ` : ''}${Security.escapeHtml(o.customerName || '')}
+            ${o.orderNo ? `<span class="text-rose-500" dir="ltr">#${String(Math.floor(Number(o.orderNo))).padStart(4, '0')}</span> ` : ''}${Security.escapeHtml(o.customerName || '')}
           </h4>
           ${o.customerPhone ? `<p class="text-sm text-slate-500 dark:text-slate-400 truncate" dir="ltr">${Security.escapeHtml(o.customerPhone)}</p>` : ''}
         </div>
@@ -2974,7 +2974,7 @@ function renderClothesOrderModal() {
         </div>
         <div>
           <label class="block text-sm font-medium mb-2">${isAr ? 'الإجمالي' : 'Total'}</label>
-          <div id="clothes-order-modal-total" class="w-full px-4 py-2 rounded-xl bg-rose-50 dark:bg-rose-900/20 font-bold text-rose-600 dark:text-rose-400">0.00 LYD</div>
+          <div id="clothes-order-modal-total" class="w-full px-4 py-2 rounded-xl bg-rose-50 dark:bg-rose-900/20 font-bold text-rose-600 dark:text-rose-400">${clothesFmtLYD(0)}</div>
         </div>
       </div>
 
@@ -3166,7 +3166,7 @@ function printClothesOrderSlip(orderId) {
   slip.innerHTML = `
     <div style="padding:18px;font-family:inherit;font-size:13px;">
       <div style="display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #0f172a;padding-bottom:8px;margin-bottom:10px;">
-        <div style="font-size:20px;font-weight:bold;">${isAr ? 'إيصال طلب' : 'Order Slip'} ${orderNoLabel}</div>
+        <div style="font-size:20px;font-weight:bold;">${isAr ? 'إيصال طلب' : 'Order Slip'} <bdi>${orderNoLabel}</bdi></div>
         ${!clothesOrderIsActiveStatus(order.status) ? `<div style="font-size:16px;font-weight:bold;color:#b91c1c;border:2px solid #b91c1c;display:inline-block;padding:2px 10px;margin-top:4px;">${order.status === 'Returned' ? (isAr ? 'مرتجع' : 'RETURNED') : (isAr ? 'ملغى' : 'CANCELED')}</div>` : ''}
         <div>${Security.escapeHtml(dateLabel)}</div>
       </div>
@@ -3364,7 +3364,7 @@ async function saveClothesOrderFromModal(sure) {
   if (paymentStatus === 'Paid') amountPaidLYD = editTarget ? Math.max(total, alreadyCollected) : total;  // recorded money stays
   if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
   if (amountPaidLYD > total + 0.005 && amountPaidLYD > alreadyCollected + 0.005) {
-    showNotification(isAr ? 'المبلغ المدفوع أكبر من الإجمالي' : 'Paid amount exceeds the total', isAr ? `الإجمالي ${total.toFixed(2)} د.ل. أدخل مبلغاً مساوياً أو أقل.` : `The order total is ${total.toFixed(2)} LYD. Enter that amount or less.`, 'error');
+    showNotification(isAr ? 'المبلغ المدفوع أكبر من الإجمالي' : 'Paid amount exceeds the total', isAr ? `الإجمالي ${fmtLyd(total)}. أدخل مبلغاً مساوياً أو أقل.` : `The order total is ${fmtLyd(total)}. Enter that amount or less.`, 'error');
     return false;
   }
 

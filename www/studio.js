@@ -385,9 +385,19 @@ function adsStudioObjectiveLabel(objective) {
   return item ? adsStudioText(item.label, item.labelAr) : String(objective || '—');
 }
 
-function adsStudioMoney(minor) {
+// Amounts are written one way (DESIGN.md 5.4): a thousands separator and two decimals. The digits are
+// the ones toFixed(2) gives. Kept in this file so the Studio's money never waits on another bundle.
+function adsStudioAmount(major) {
+  return major.toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ',');
+}
+// In Arabic an amount is one piece with its own direction (moneyPiece, 07): "$" stays in front of its number and
+// د.ل is drawn after it. The Studio's own tests load these files alone, where the text stays plain.
+function adsStudioPiece(text, rtl) {
+  return typeof moneyPiece === 'function' ? moneyPiece(text, rtl) : text;
+}
+function adsStudioMoney(minor, sign = '') {
   const value = Math.max(0, Math.trunc(Number(minor) || 0));
-  return `$${(value / 100).toFixed(2)}`;
+  return adsStudioPiece(`${sign}$${adsStudioAmount(value / 100)}`);
 }
 
 // An amount in its own currency (P1-08a): LYD money (subscription plans) never wears "$".
@@ -395,7 +405,7 @@ function adsStudioMoney(minor) {
 function adsStudioMoneyIn(minor, currency) {
   if (String(currency || 'USD').trim().toUpperCase() !== 'LYD') return adsStudioMoney(minor);
   const value = Math.max(0, Math.trunc(Number(minor) || 0));
-  return `${(value / 100).toFixed(2)} ${adsStudioText('LYD', 'د.ل')}`;
+  return adsStudioPiece(`${adsStudioAmount(value / 100)} ${adsStudioText('LYD', 'د.ل')}`, true);
 }
 
 // A typed money amount in minor units, or NaN when it is not a number (P1-08b). Arabic-Indic
@@ -419,8 +429,8 @@ function adsStudioMoneyWithLyd(minor) {
   if (!(rate > 1)) return usd;
   // Same arithmetic as the server's payment instruction (ceil of minor × rate),
   // so the estimate never disagrees with the LYD figure the customer is asked to pay.
-  const lyd = (Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * Math.round(rate * 10000) / 10000) / 100).toFixed(2);
-  return `${usd} (≈ ${lyd} ${adsStudioText('LYD', 'د.ل')})`;
+  const lyd = adsStudioAmount(Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * Math.round(rate * 10000) / 10000) / 100);
+  return `${usd} (≈ ${adsStudioPiece(`${lyd} ${adsStudioText('LYD', 'د.ل')}`, true)})`;
 }
 
 function adsStudioFormatDate(value) {
@@ -723,7 +733,7 @@ function renderAdsStudioCampaignCard(campaign) {
           <div class="sc-meta">
             <span><i data-lucide="target"></i>${Security.escapeHtml(adsStudioObjectiveLabel(campaign.objective))}</span>
             <span><i data-lucide="wallet-cards"></i>${Security.escapeHtml(adsStudioBudgetLine(campaign))}</span>
-            <span><i data-lucide="calendar-days"></i>${adsStudioFormatDate(campaign.startDate)} → ${adsStudioFormatDate(campaign.endDate)}</span>
+            <span><i data-lucide="calendar-days"></i>${adsStudioFormatDate(campaign.startDate)} ${adsStudioIsAr() ? '←' : '→'} ${adsStudioFormatDate(campaign.endDate)}</span>
             ${adsStudioCanReview() ? `<span><i data-lucide="user"></i>${Security.escapeHtml(adsStudioCreatorName(campaign))}</span>` : ''}
           </div>
           ${money ? `<p class="sc-money">${money}</p>` : ''}
@@ -3305,7 +3315,7 @@ function renderAdsStudioReviewStep() {
     [isAr ? 'الوجهة' : 'Destination', d.destination || '—', boost ? 1 : 2],
     [isAr ? 'الجمهور' : 'Audience', `${(d.locations || []).join(', ') || '—'} · ${d.ageMin || 18}–${d.ageMax || 65}`, boost ? 0 : 3],
     [isAr ? 'الميزانية' : 'Budget', adsStudioBudgetReviewText(d), boost ? 2 : 4],
-    [isAr ? 'المدة' : 'Schedule', `${adsStudioFormatDate(d.startDate)} → ${adsStudioFormatDate(d.endDate)}`, boost ? 2 : 4],
+    [isAr ? 'المدة' : 'Schedule', `${adsStudioFormatDate(d.startDate)} ${adsStudioIsAr() ? '←' : '→'} ${adsStudioFormatDate(d.endDate)}`, boost ? 2 : 4],
     [isAr ? 'الفئة الخاصة' : 'Special category', special, boost ? 0 : 3]
   ];
   const last = adsStudioWizardSteps().length;
@@ -3911,7 +3921,7 @@ function adsStudioLydPreviewText(amount, currency) {
   const usd = adsStudioParseMoneyMinor(amount || '') / 100;  // '٥٠' is 50
   const rate = _adsStudioUsdToLydRate();
   return (currency !== 'LYD' && Number.isFinite(usd) && usd > 0 && rate > 0)
-    ? `≈ ${(Math.ceil(Math.round(usd * 100) * Math.round(rate * 10000) / 10000) / 100).toFixed(2)} LYD @ ${rate}`
+    ? `≈ ${adsStudioPiece(`${adsStudioAmount(Math.ceil(Math.round(usd * 100) * Math.round(rate * 10000) / 10000) / 100)} ${adsStudioText('LYD', 'د.ل')}`, true)} @ ${rate}`
     : '';
 }
 
@@ -4002,12 +4012,14 @@ async function adsStudioCreateWalletCharge() {
     const d = created?.data || {};
     const entry = _adsStudioPayMethod(d.method);
     const template = entry && entry.instructions ? String(adsStudioIsAr() ? entry.instructions.ar : entry.instructions.en) : '';
+    const lyd = d.amountMinorLYD ? adsStudioAmount(d.amountMinorLYD / 100) : '';
     let message;
-    if (template) {
+    // A dinar figure this request does not carry used to read "Pay — LYD": the plain sentence instead.
+    if (template && (lyd || !template.includes('{amountLYD}'))) {
       message = template
         .split('{reference}').join(String(d.reference || ''))
-        .split('{amountLYD}').join(d.amountMinorLYD ? (d.amountMinorLYD / 100).toFixed(2) : '—')
-        .split('{amountUSD}').join(`${(Number(d.amountMinor || 0) / 100).toFixed(2)}${String(d.currency || 'USD').toUpperCase() === 'LYD' ? ' LYD' : ''}`)
+        .split('{amountLYD}').join(lyd)
+        .split('{amountUSD}').join(`${adsStudioAmount(Number(d.amountMinor || 0) / 100)}${String(d.currency || 'USD').toUpperCase() === 'LYD' ? ` ${adsStudioText('LYD', 'د.ل')}` : ''}`)
         .split('{rate}').join(String(d.lydRate || ''));
     } else {
       message = adsStudioText(
@@ -4140,7 +4152,7 @@ function _adsStudioWalletRequestRow(entity, adminView) {
   const hasPhoto = Number(d._photoCount || 0) > 0 || !!d.receiptPhotoAt;
   // An LYD request (plan money) IS the cash: shown in LYD, never "$", and with no "≈" line (P1-08a).
   const currency = String(d.currency || 'USD').trim().toUpperCase() === 'LYD' ? 'LYD' : 'USD';
-  const lyd = currency === 'USD' && d.amountMinorLYD ? ` • ≈ ${(d.amountMinorLYD / 100).toFixed(2)} LYD` : '';
+  const lyd = currency === 'USD' && d.amountMinorLYD ? ` • ≈ ${adsStudioPiece(`${adsStudioAmount(d.amountMinorLYD / 100)} ${adsStudioText('LYD', 'د.ل')}`, true)}` : '';
   const quiet = isPending && !adminView && adsStudioBuyingHidden();  // the iPhone app: their waiting request shows no way to pay it
   return `
     <div class="studio-wallet-request flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
@@ -4259,7 +4271,7 @@ function renderAdsStudioWallet() {
           const memo = request ? '' : String(tx.memo || '');
           return `<div class="workspace-wallet-row text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
             <div class="min-w-0"><span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(walletTxLabel(tx.type, adsStudioIsAr()))}${request ? ` · <bdi>${Security.escapeHtml(request)}</bdi>` : ''}</span>${memo ? `<div class="text-[11px] text-slate-400 break-words"><bdi dir="ltr">${Security.escapeHtml(memo)}</bdi></div>` : ''}</div>
-            <span class="workspace-wallet-amount font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
+            <span class="workspace-wallet-amount font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0), incoming ? '+' : '−')}</span>
           </div>`;
         }).join('')}</div>`
           : `<p class="text-sm text-slate-500">${adsStudioText('No wallet activity yet.', 'لا توجد حركات بعد.')}</p>`}
@@ -5587,7 +5599,8 @@ function studioLtr(text) {
 function studioPickText(labels, max = 300) {
   if (!labels || typeof labels !== 'object') return '';
   const pick = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max) : '';
-  const first = adsStudioIsAr() ? pick(labels.ar) : pick(labels.en);
+  // A sentence the server wrote names dollars as "$40.00": in Arabic each one becomes a piece that keeps "$" in front.
+  const first = adsStudioIsAr() ? pick(labels.ar).replace(/-?\$[0-9][0-9,]*(?:\.[0-9]+)?/g, amount => adsStudioPiece(amount)) : pick(labels.en);
   return first || pick(labels.en) || pick(labels.ar);
 }
 
@@ -6094,13 +6107,14 @@ function studioMinorText(minor) {
 function studioUsd(minor) {
   const text = studioMinorText(minor);
   if (!text) return '—';
-  return text.startsWith('-') ? `-$${text.slice(1)}` : `$${text}`;
+  return adsStudioPiece(text.startsWith('-') ? `-$${text.slice(1)}` : `$${text}`);
 }
 
 // Libyan dinars (plans): "1,234.56 LYD" / "1,234.56 د.ل" — never "$".
 function studioLyd(minor) {
   const text = studioMinorText(minor);
-  return text ? `${text} ${adsStudioText('LYD', 'د.ل')}` : '—';
+  if (!text) return '—';
+  return adsStudioIsAr() ? adsStudioPiece(`${text[0] === '-' ? adsStudioPiece(text) : text} د.ل`, true) : `${text} LYD`;
 }
 
 // ------------------------------------------------------------------ typed input
@@ -7398,7 +7412,7 @@ function studioDataMoneyIn(minor, currency) {
   if (code === 'USD') return studioUsd(minor);
   if (code === 'LYD') return studioLyd(minor);
   const text = studioMinorText(minor);
-  return text && /^[A-Z]{3}$/.test(code) ? `${text} ${code}` : '—';
+  return text && /^[A-Z]{3}$/.test(code) ? adsStudioPiece(`${text} ${code}`) : '—';
 }
 
 function studioDataName(request) {
@@ -8116,7 +8130,7 @@ function renderStudioAdsBrief(request) {
     [adsStudioText('Budget', 'الميزانية'), studioAdsBudgetText(request)],
     [adsStudioText('Page', 'الصفحة'), String(request.pageName || '')],
     [adsStudioText('Where', 'المنصات'), platforms],
-    [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} → ${adsStudioFormatDate(request.endDate)}` : (days ? adsStudioDaysText(days) : '')],
+    [adsStudioText('Dates', 'التواريخ'), request.startDate ? `${adsStudioFormatDate(request.startDate)} ${adsStudioIsAr() ? '←' : '→'} ${adsStudioFormatDate(request.endDate)}` : (days ? adsStudioDaysText(days) : '')],
     [adsStudioText('Ad text', 'نص الإعلان'), String(request.primaryText || '')]
   ].filter(([, value]) => value);
   if (!rows.length) return '';

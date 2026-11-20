@@ -10,6 +10,7 @@ const {
   openAdminApi,
   projectToken,
   setLanguage,
+  shown,
   signInStudio,
   tabParam
 } = require('./helpers/studio-v2');
@@ -133,7 +134,7 @@ async function expectStripEqualsServer(page) {
   for (const [key, field] of MONEY_CELLS) {
     const cell = page.getByTestId(`studio-money-${key}`);
     await expect(cell).toHaveAttribute('data-minor', String(summary.usd[field]));
-    await expect(cell.locator('.studio-home-money-value')).toHaveText(usd(summary.usd[field]));
+    await expect(cell.locator('.studio-home-money-value')).toHaveText(shown(usd(summary.usd[field])));
   }
   if (summary.usd.beingReturnedMinor) await expect(page.getByTestId('studio-money-returning')).toHaveAttribute('data-minor', String(summary.usd.beingReturnedMinor));
   else await expect(page.getByTestId('studio-money-returning')).toHaveCount(0);

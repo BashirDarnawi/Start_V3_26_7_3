@@ -1358,18 +1358,18 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
             <div class="text-xs font-semibold text-slate-500">${isAr ? 'إجمالي الإنفاق' : 'Total spend'}</div>
-            <div class="text-lg font-bold text-slate-800 dark:text-white mt-1">$${summary.totalSpendUSD.toFixed(2)}</div>
-            <div class="text-xs text-slate-500">${summary.totalSpendLYD.toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-slate-800 dark:text-white mt-1">${fmtUsd(summary.totalSpendUSD)}</div>
+            <div class="text-xs text-slate-500">${fmtLyd(summary.totalSpendLYD)}</div>
           </div>
           <div class="rounded-xl border border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20 p-3">
             <div class="text-xs font-semibold text-emerald-600">${isAr ? 'إنفاق مدفوع' : 'Paid spend'}</div>
-            <div class="text-lg font-bold text-emerald-700 dark:text-emerald-300 mt-1">$${summary.paidSpendUSD.toFixed(2)}</div>
-            <div class="text-xs text-emerald-600">${summary.paidSpendLYD.toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-emerald-700 dark:text-emerald-300 mt-1">${fmtUsd(summary.paidSpendUSD)}</div>
+            <div class="text-xs text-emerald-600">${fmtLyd(summary.paidSpendLYD)}</div>
           </div>
           <div class="rounded-xl border border-rose-200 bg-rose-50 dark:bg-rose-900/20 p-3">
             <div class="text-xs font-semibold text-rose-600">${isAr ? 'إنفاق الإعلانات غير المدفوعة' : 'Spend on unpaid ads'}</div>
-            <div class="text-lg font-bold text-rose-700 dark:text-rose-300 mt-1">$${summary.unpaidSpendUSD.toFixed(2)}</div>
-            <div class="text-xs text-rose-600">${summary.unpaidSpendLYD.toFixed(2)} LYD</div>
+            <div class="text-lg font-bold text-rose-700 dark:text-rose-300 mt-1">${fmtUsd(summary.unpaidSpendUSD)}</div>
+            <div class="text-xs text-rose-600">${fmtLyd(summary.unpaidSpendLYD)}</div>
           </div>
         </div>
       `}
@@ -1600,8 +1600,8 @@ function showPageAdsDialog(pageId, triggerButton) {
           const amount = Number(ad.amountUSD || 0);
           return `<div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="font-semibold text-slate-800 dark:text-white break-words">#${Security.escapeHtml(String(ad.displayNumber || ad.id || ''))} — ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</span>
-              <span class="text-sm font-bold ${pending ? 'text-amber-600' : 'text-emerald-600'}">${pending ? (isAr ? 'يحتاج إكمال' : 'Needs setup') : `$${amount.toFixed(2)}`}</span>
+              <span class="font-semibold text-slate-800 dark:text-white break-words"><bdi>#${Security.escapeHtml(String(ad.displayNumber || ad.id || ''))}</bdi> — ${Security.escapeHtml(customer?.name || ad.customerName || (isAr ? 'غير معروف' : 'Unknown'))}</span>
+              <span class="text-sm font-bold ${pending ? 'text-amber-600' : 'text-emerald-600'}">${pending ? (isAr ? 'يحتاج إكمال' : 'Needs setup') : `${fmtUsd(amount)}`}</span>
             </div>
             <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
               <span>${trStatus(ad.status || '')}</span>
@@ -2751,7 +2751,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
   const debtUSD = collectionTarget.amountUSD;
   const debtLocal = collectionTarget.amountLocal;
   const deliveryFee = Number(receipt.quotedDeliveryFee || 0) || 0;
-  const money = `${debtLocal.toFixed(2)} LYD${debtUSD > 0 ? ` ($${debtUSD.toFixed(2)})` : ''}`;
+  const money = `${fmtLyd(debtLocal)}${debtUSD > 0 ? ` (${fmtUsd(debtUSD)})` : ''}`;
 
   const lines = isAr ? [
     '🚚 توصيل جديد - البيان',
@@ -2761,7 +2761,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `مكان التوصيل: ${place}`,
     `المندوب: ${driverName}`,
     `المبلغ المطلوب تحصيله: \u2068${money}\u2069`,  // isolated so the ')' stays put in RTL text
-    `رسوم التوصيل: ${deliveryFee.toFixed(2)} LYD`,
+    `رسوم التوصيل: ${fmtLyd(deliveryFee)}`,
     'الحالة: غير مدفوع',
     `ملاحظات: ${instructions}`,
     `أنشأه: ${creatorName}`
@@ -2773,7 +2773,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `Delivery place: ${place}`,
     `Assigned driver: ${driverName}`,
     `Amount to collect: ${money}`,
-    `Delivery fee: ${deliveryFee.toFixed(2)} LYD`,
+    `Delivery fee: ${fmtLyd(deliveryFee)}`,
     'Payment status: Not Paid',
     `Instructions: ${instructions}`,
     `Created by: ${creatorName}`
@@ -3591,7 +3591,7 @@ function updateReceiptDeliveryCompletionComputed() {
   const collected = collectedTotals.totalR1;   // LYD — compared against the debt
   const actualFee = _readDeliveryFeeLyd();     // LYD — compared against the quoted fee
   const totalEl = document.getElementById('delivery-collected-total');
-  if (totalEl) totalEl.textContent = `${collected.toFixed(2)} LYD` + (collectedTotals.totalR2 ? ` ($${collectedTotals.totalR2.toFixed(2)})` : '');
+  if (totalEl) totalEl.textContent = `${fmtLyd(collected)}` + (collectedTotals.totalR2 ? ` (${fmtUsd(collectedTotals.totalR2)})` : '');
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
 
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
@@ -3608,15 +3608,15 @@ function updateReceiptDeliveryCompletionComputed() {
     const feeBase = feeCmp.feeDifferenceStatus === 'SAME'
       ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
-        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(2)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(2)} LYD)`)
-        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(2)} LYD)` : `Fee: HIGHER (${diff.toFixed(2)} LYD)`));
+        ? (isArC ? `قيمة التوصيل: أقل (${fmtLyd(Math.abs(diff))})` : `Fee: LOWER (${fmtLyd(Math.abs(diff))})`)
+        : (isArC ? `قيمة التوصيل: أعلى (${fmtLyd(diff)})` : `Fee: HIGHER (${fmtLyd(diff)})`));
     const feePaidByShop = _readDeliveryFeePaidBy() === 'shop';
     feeEl.textContent = feeBase + (feePaidByShop ? (isArC ? ' • يتحملها المحل' : ' • paid by shop') : '');
   }
   if (debtEl) {
     if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = isArC ? 'الدفع: مطابق تماماً' : 'Payment: PAID EXACT';
-    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (+${debtCmp.overpaidAmount.toFixed(2)} LYD)` : `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(2)} LYD)`;
-    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(2)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(2)} LYD remaining)`;
+    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (${fmtLyd(debtCmp.overpaidAmount, '+')})` : `Payment: OVERPAID (${fmtLyd(debtCmp.overpaidAmount, '+')})`;
+    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${fmtLyd(debtCmp.remainingDue)})` : `Payment: UNDERPAID (${fmtLyd(debtCmp.remainingDue)} remaining)`;
   }
 
   // Validate (allow app-generated auto-serials: S/B/O/E + digits)
@@ -3912,7 +3912,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(2)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${fmtLyd(debt)}</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${fmtLyd(quoted)}</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${phoneLtrHtml(phone)}</span></div>` : ''}
         </div>
 
@@ -3928,7 +3928,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
             <button type="button" onclick="addDeliveryCollectedRow()" class="text-[11px] font-bold text-indigo-600 hover:text-indigo-700">${isArD ? '+ طريقة أخرى' : '+ Add method'}</button>
           </div>
           <div id="delivery-collected-payments" class="space-y-2">${collectedRowsHtml}</div>
-          <div class="text-[11px] text-slate-500 mt-1">${isArD ? 'إجمالي المُحصَّل' : 'Total collected'}: <span id="delivery-collected-total" class="font-bold text-slate-700 dark:text-slate-200">0 LYD</span></div>
+          <div class="text-[11px] text-slate-500 mt-1">${isArD ? 'إجمالي المُحصَّل' : 'Total collected'}: <span id="delivery-collected-total" class="font-bold text-slate-700 dark:text-slate-200">${fmtLyd(0)}</span></div>
         </div>
 
         <div>
@@ -4338,8 +4338,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             try {
               const debtEl = document.getElementById('delivery-complete-debt');
               const quotedEl = document.getElementById('delivery-complete-quoted');
-              if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(2)} LYD`;
-              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(2)} LYD`;
+              if (debtEl) debtEl.textContent = `${fmtLyd(getReceiptCollectionTarget(latestData).amountLocal)}`;
+              if (quotedEl) quotedEl.textContent = `${fmtLyd((Number(latestData.quotedDeliveryFee ?? 0) || 0))}`;
             } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
             showNotification(
@@ -4731,7 +4731,7 @@ function _isReceiptEligibleForCompanyCoverage(receipt, collectionTarget = null) 
 
 function _companyCoverageMoney(value) {
   const amount = Number(value);
-  return `$${(Number.isFinite(amount) ? Math.max(amount, 0) : 0).toFixed(2)}`;
+  return fmtUsd(Number.isFinite(amount) ? Math.max(amount, 0) : 0);
 }
 
 function _companyCoverageFocusable(modal) {
@@ -5508,9 +5508,9 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
         class="flex min-h-12 w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-violet-400 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-violet-500 dark:hover:bg-violet-950/30">
         <span class="min-w-0">
           <span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${isAr ? 'وصل' : 'Receipt'} ${serial}</span>
-          ${covered > 0.005 ? `<span class="block text-[11px] text-violet-700 dark:text-violet-300">${isAr ? 'غطت الشركة سابقاً' : 'Company covered before'}: $${covered.toFixed(2)}</span>` : ''}
+          ${covered > 0.005 ? `<span class="block text-[11px] text-violet-700 dark:text-violet-300">${isAr ? 'غطت الشركة سابقاً' : 'Company covered before'}: ${fmtUsd(covered)}</span>` : ''}
         </span>
-        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${outstanding.toFixed(2)}</span>
+        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">${fmtUsd(outstanding)}</span>
       </button>`;
   }).join('') + (hasAdDebt ? `
       <button type="button" data-customer-id="${Security.escapeHtml(String(customerId || ''))}"
@@ -5520,7 +5520,7 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
           <span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${isAr ? 'دين إعلانات (بدون وصل)' : 'Ad-spend debt (no receipt)'}</span>
           <span class="block text-[11px] text-slate-500 dark:text-slate-400">${isAr ? `${adDebt.ads.length} إعلان` : `${adDebt.ads.length} ad${adDebt.ads.length === 1 ? '' : 's'}`}</span>
         </span>
-        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${adDebt.totalUSD.toFixed(2)}</span>
+        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">${fmtUsd(adDebt.totalUSD)}</span>
       </button>` : '');
 
   const html = `
@@ -5675,10 +5675,10 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
   const breakdown = _receiptCollectionBreakdown(receipt);
   return `
     <div class="text-sm text-slate-600 dark:text-slate-400 mb-1">
-      ${isAr ? 'الوصل' : 'Receipt'} #${Security.escapeHtml(String(serialTxt))} — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${targetLYD.toFixed(2)} LYD</span>
+      ${isAr ? 'الوصل' : 'Receipt'} <bdi>#${Security.escapeHtml(String(serialTxt))}</bdi> — ${isAr ? 'الإجمالي' : 'Total'}: <span class="font-bold text-slate-800 dark:text-white">${fmtLyd(targetLYD)}</span>
     </div>
     <div class="text-xs text-slate-500 mb-4">
-      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${p.amount.toFixed(2)} LYD`).join(' • ')}
+      ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${fmtLyd(p.amount)}`).join(' • ')}
     </div>
     ${getReceiptPaymentState(receipt) === 'not_paid' ? `<p class="text-xs text-amber-700 mb-3">${isAr ? 'يسجّل التسليم فقط ولا يجعل الوصل مدفوعاً.' : 'This records the handover only; it does not mark the receipt Paid.'}</p>` : ''}
     <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
@@ -5737,15 +5737,15 @@ function _collectEditorView(receiptId, receipt) {
   const left = Math.max(target - total, 0);
   return `
     <div class="text-sm text-slate-600 dark:text-slate-400 mb-3">
-      ${isAr ? 'الإجمالي المطلوب' : 'Total due'}: <span class="font-bold text-slate-800 dark:text-white">${target.toFixed(2)} LYD</span>
+      ${isAr ? 'الإجمالي المطلوب' : 'Total due'}: <span class="font-bold text-slate-800 dark:text-white">${fmtLyd(target)}</span>
     </div>
     <div class="space-y-2" id="collect-rows">${rows}</div>
     <button type="button" onclick="addCollectPaymentRow()" class="mt-2 text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1">
       <i data-lucide="plus-circle" class="w-4 h-4"></i>${isAr ? 'إضافة طريقة' : 'Add method'}
     </button>
     <div class="mt-3 bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 space-y-1 text-sm">
-      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'إجمالي المُحصَّل' : 'Total collected'}:</span><span class="font-bold text-emerald-600" id="collect-total">${total.toFixed(2)} LYD</span></div>
-      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span><span class="font-bold text-orange-600" id="collect-left">${left.toFixed(2)} LYD</span></div>
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'إجمالي المُحصَّل' : 'Total collected'}:</span><span class="font-bold text-emerald-600" id="collect-total">${fmtLyd(total)}</span></div>
+      <div class="flex justify-between"><span class="text-slate-600 dark:text-slate-400">${isAr ? 'المتبقي للتحصيل' : 'Left to collect'}:</span><span class="font-bold text-orange-600" id="collect-left">${fmtLyd(left)}</span></div>
     </div>
     <div class="flex space-x-3 pt-4">
       <button onclick="collectReceiptCustomBack('${receiptId}')" class="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-bold">${isAr ? 'رجوع' : 'Back'}</button>
@@ -5763,8 +5763,8 @@ function _refreshCollectTotals() {
   const total = _tempCollectPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
   const totalEl = document.getElementById('collect-total');
   const leftEl = document.getElementById('collect-left');
-  if (totalEl) totalEl.textContent = total.toFixed(2) + ' LYD';
-  if (leftEl) leftEl.textContent = Math.max(_collectTargetLYD - total, 0).toFixed(2) + ' LYD';
+  if (totalEl) totalEl.textContent = fmtLyd(total);
+  if (leftEl) leftEl.textContent = fmtLyd(Math.max(_collectTargetLYD - total, 0));
 }
 
 // Row edits: amount just refreshes the totals (no re-render, keeps typing focus);
@@ -5821,7 +5821,7 @@ async function _saveReceiptCollection(receipt, payments, totalLYD, matchesReceip
   const isAr = state.language === 'ar';
   showNotification(
     isAr ? 'تم التحصيل' : 'Collected',
-    (isAr ? `تم تسجيل ${totalLYD.toFixed(2)} LYD` : `Recorded ${totalLYD.toFixed(2)} LYD`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${leftLYD.toFixed(2)} LYD` : ` — ${leftLYD.toFixed(2)} LYD left`) : ''),
+    (isAr ? `تم تسجيل ${fmtLyd(totalLYD)}` : `Recorded ${fmtLyd(totalLYD)}`) + (leftLYD > 0.01 ? (isAr ? ` — المتبقي ${fmtLyd(leftLYD)}` : ` — ${fmtLyd(leftLYD)} left`) : ''),
     'success'
   );
   render();
@@ -6162,8 +6162,8 @@ function showReceiptTransferHistory(receiptId) {
     const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
     const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
     return isArT
-      ? `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} إلى ${name}`
-      : `${new Date(t.date).toLocaleString(appDateLocale())}: $${(t.amountUSD || 0).toFixed(2)} to ${name}`;
+      ? `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} إلى ${name}`
+      : `${new Date(t.date).toLocaleString(appDateLocale())}: ${fmtUsd((t.amountUSD || 0))} to ${name}`;
   }).join('\n');
   showNotification(isArT ? 'سجل التحويلات' : 'Transfer history', lines, 'info');
 }
@@ -6211,7 +6211,7 @@ function showReceiptEditHistory(receiptId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex min-w-0 items-center gap-2">
-                  <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="shrink-0 text-xs font-bold text-white bg-amber-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} <bdi>#${editHistory.length - idx}</bdi></span>
                   <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy || (isArH ? 'غير معروف' : 'Unknown'))}</span>
                 </div>
                 <span class="text-xs text-slate-400">${new Date(edit.editedAt).toLocaleString(appDateLocale())}</span>
@@ -6451,7 +6451,7 @@ function showAdEditHistory(adId) {
             <div class="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
               <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
                 <div class="flex min-w-0 items-center gap-2">
-                  <span class="shrink-0 text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} #${editHistory.length - idx}</span>
+                  <span class="shrink-0 text-xs font-bold text-white bg-purple-500 px-2 py-1 rounded-full">${isArH ? 'تعديل' : 'Edit'} <bdi>#${editHistory.length - idx}</bdi></span>
                   <span class="truncate text-xs text-slate-500">${Security.escapeHtml(edit.editedBy)}</span>
                 </div>
                 <span class="text-xs text-slate-400">${Security.escapeHtml(_formatAdEditHistoryDate(edit.editedAt, isArH))}</span>
@@ -6541,7 +6541,7 @@ function showMetaAdHistory(adId) {
     const eventLabel = entry.eventType ? tr(entry.eventType).split('_').join(' ') : '';
     return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(tr(entry.editedBy))}</p></div>
+        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} <bdi>#${history.length - index}</bdi></span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(tr(entry.editedBy))}</p></div>
         <time class="text-xs text-slate-500">${Security.escapeHtml(_formatAdEditHistoryDate(entry.editedAt, isAr))}</time>
       </div>
       ${(eventLabel || entry.tool) ? `<div class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">${eventLabel ? `<span>${Security.escapeHtml(eventLabel)}</span>` : ''}${entry.tool ? `<span>• ${Security.escapeHtml(entry.tool)}</span>` : ''}</div>` : ''}
@@ -6736,8 +6736,8 @@ async function saveReceiptTransfer() {
         else showNotification(
           state.language === 'ar' ? 'تم التحويل' : 'Transferred',
           state.language === 'ar'
-            ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
-            : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+            ? `تم تحويل ${fmtUsd(amountUSD)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+            : `Transferred ${fmtUsd(amountUSD)} to ${targetName} — a transfer receipt was created and is ready to use.`,
           'success'
         );
         closeModal();
@@ -6779,8 +6779,8 @@ async function saveReceiptTransfer() {
   showNotification(
     state.language === 'ar' ? 'تم التحويل' : 'Transferred',
     state.language === 'ar'
-      ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
-      : `Transferred $${amountUSD.toFixed(2)} to ${targetName} — a transfer receipt was created and is ready to use.`,
+      ? `تم تحويل ${fmtUsd(amountUSD)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`
+      : `Transferred ${fmtUsd(amountUSD)} to ${targetName} — a transfer receipt was created and is ready to use.`,
     'success'
   );
   closeModal();
@@ -6930,8 +6930,8 @@ async function saveSplitPayments() {
     showNotification(
       state.language === 'ar' ? 'غير ممكن' : 'Not possible',
       state.language === 'ar'
-        ? `$${committedUSD.toFixed(2)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى $${totalR2.toFixed(2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
-        : `$${committedUSD.toFixed(2)} of this receipt is already used (ads + transfers) — the total cannot go down to $${totalR2.toFixed(2)}. Free the money first (edit/stop the ads or delete the transfer).`,
+        ? `${fmtUsd(committedUSD)} من هذا الوصل مستخدمة بالفعل (إعلانات وتحويلات) — لا يمكن خفض الإجمالي إلى ${fmtUsd(totalR2)}. حرِّر المبلغ أولاً (عدِّل/أوقف الإعلانات أو احذف التحويل).`
+        : `${fmtUsd(committedUSD)} of this receipt is already used (ads + transfers) — the total cannot go down to ${fmtUsd(totalR2)}. Free the money first (edit/stop the ads or delete the transfer).`,
       'error'
     );
     return;
@@ -7066,7 +7066,7 @@ function _refreshTopUpPreview() {
   const base = parseFloat(ad.initialAmountUSD || ad.amountUSD) || 0;
   const workingTotal = tempTopUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0) + typedAmount;
   const newEl = document.getElementById('topup-preview-new');
-  if (newEl) newEl.textContent = `$${(base + workingTotal).toFixed(2)}`;
+  if (newEl) newEl.textContent = `${fmtUsd((base + workingTotal))}`;
 
   const baseEnd = ad.initialEndDate || ad.endDate || '';
   const endEl = document.getElementById('topup-preview-end');
@@ -7086,7 +7086,7 @@ function _refreshTopUpPreview() {
     const avail = _topUpAvailableNow(tempTopUps);
     if (avail !== null) {
       const after = Math.round((avail - typedAmount) * 100) / 100;
-      availEl.textContent = `$${after.toFixed(2)}`;
+      availEl.textContent = `${fmtUsd(after)}`;
       availEl.className = after < -0.009 ? 'text-rose-600' : (after < 0.01 ? 'text-amber-600' : 'text-emerald-600');
     }
   }
@@ -7114,8 +7114,8 @@ function addNewTopUp() {
       showNotification(
         state.language === 'ar' ? 'رصيد غير كافٍ' : 'Not enough balance',
         state.language === 'ar'
-          ? `المتبقي في وصولات التمويل $${available.toFixed(2)} فقط — لا يمكن إضافة $${entry.amount.toFixed(2)}`
-          : `The funding receipt(s) only have $${available.toFixed(2)} left — cannot add $${entry.amount.toFixed(2)}`,
+          ? `المتبقي في وصولات التمويل ${fmtUsd(available)} فقط — لا يمكن إضافة ${fmtUsd(entry.amount)}`
+          : `The funding receipt(s) only have ${fmtUsd(available)} left — cannot add ${fmtUsd(entry.amount)}`,
         'error'
       );
       return;
@@ -7246,8 +7246,8 @@ async function saveTopUps() {
     showNotification(
       isArTU ? 'رصيد غير كافٍ' : 'Not enough balance',
       isArTU
-        ? `التعبئة تحتاج $${delta.toFixed(2)} والمتبقي في وصولات التمويل $${funding.totalRemaining.toFixed(2)} فقط`
-        : `These top-ups need $${delta.toFixed(2)} but the funding receipt(s) only have $${funding.totalRemaining.toFixed(2)} left`,
+        ? `التعبئة تحتاج ${fmtUsd(delta)} والمتبقي في وصولات التمويل ${fmtUsd(funding.totalRemaining)} فقط`
+        : `These top-ups need ${fmtUsd(delta)} but the funding receipt(s) only have ${fmtUsd(funding.totalRemaining)} left`,
       'error'
     );
     return;
@@ -7346,7 +7346,7 @@ async function saveTopUps() {
   tempTopUps = [];
   showNotification(
     isArTU ? 'تم الحفظ' : 'Saved',
-    (isArTU ? `تم حفظ التعبئة. المبلغ الجديد: $${newAmountUSD.toFixed(2)}` : `Top-ups saved. New amount: $${newAmountUSD.toFixed(2)}`)
+    (isArTU ? `تم حفظ التعبئة. المبلغ الجديد: ${fmtUsd(newAmountUSD)}` : `Top-ups saved. New amount: ${fmtUsd(newAmountUSD)}`)
       + (newEndDisplay ? (isArTU ? ` — ينتهي: ${newEndDisplay}` : ` — ends: ${newEndDisplay}`) : ''),
     'success'
   );

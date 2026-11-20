@@ -297,7 +297,7 @@ test('R5 performance-phone-1: Home finds customers and pages through one lookup 
   assert.deepEqual(lists.customers, ['Customer 10', 'Customer 20', 'Unknown', 'Customer 30', 'Customer 40']);
   assert.deepEqual(lists.pages, ['Gone Page (deleted)', 'Unknown', 'Page 3', 'Page 4', 'Page 5']);
   assert.deepEqual(lists.recent, ['Ad: Unknown', 'Receipt: Customer 1', 'Ad: Customer 2', 'Receipt: Customer 3', 'Ad: Customer 4', 'Receipt: Customer 5']);
-  assert.ok(html.includes('502.00 USD') && html.includes('300.00 USD'), 'the spend figures');
+  assert.ok(html.includes('$502.00') && html.includes('$300.00'), 'the spend figures');
 });
 
 // The same three lists computed the old way (a full scan per record), for the equivalence check below.
