@@ -567,7 +567,7 @@ function renderStudioHomeTrackers(requests) {
     .filter(item => STUDIO_HOME_ACTIVE_STAGES.includes(item.stage.stage));
   if (!active.length) return '';
   const rows = active.slice(0, STUDIO_HOME_MAX_TRACKERS).map(({ request, stage }) => {
-    const next = stage.nextActor ? adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`) : '';
+    const next = studioStageNext(stage);
     const flags = stage.flags.map(flag => `<span class="studio-flag">${studioEsc(flag.text)}</span>`).join('');
     return `
               <li>

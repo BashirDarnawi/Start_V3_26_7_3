@@ -100,7 +100,7 @@ function studioAdsBudgetText(request) {
 }
 
 function renderStudioAdsCard(request, stage) {
-  const next = stage.nextActor ? adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`) : '';
+  const next = studioStageNext(stage);
   const budget = studioAdsBudgetText(request);
   const flags = stage.flags.map(flag => `<span class="studio-flag">${studioEsc(flag.text)}</span>`).join('');
   return `
@@ -356,7 +356,7 @@ function renderStudioAdsDetail(route) {
         </div>`;
   }
   const stage = studioDataStage(request);
-  const next = stage.nextActor ? adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`) : '';
+  const next = studioStageNext(stage);
   const flags = stage.flags.map(flag => `<span class="studio-flag">${studioEsc(flag.text)}</span>`).join('');
   return `
         <article class="studio-ads-detail" data-testid="studio-ad-detail" data-stage="${stage.stage}" aria-labelledby="studio-ad-name">

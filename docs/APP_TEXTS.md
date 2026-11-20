@@ -10,9 +10,9 @@ This file and `app-texts.csv` are written by `scripts/list-texts.js` from the so
 | | |
 |---|---|
 | Source files read | 49 |
-| Places where a text with an Arabic side is written | 8110 |
-| …of which have their English beside them | 7950 |
-| Different English/Arabic pairs | 6039 |
+| Places where a text with an Arabic side is written | 8109 |
+| …of which have their English beside them | 7949 |
+| Different English/Arabic pairs | 6040 |
 | Arabic texts with no English beside them in the code | 119 (in 160 places) |
 | English texts written with more than one Arabic | 243 |
 

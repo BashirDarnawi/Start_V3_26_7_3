@@ -6105,6 +6105,8 @@ function studioStageView(raw) {
     linked,
     checking: raw.checking === true,
     checkedAgo: studioPickText(raw.checkedAgo, 80),
+    // When the team reviews a waiting request by, if the server says (round 4); never for another stage.
+    dueAt: key === 'waiting_review' && typeof raw.dueAt === 'string' && raw.dueAt.length <= 40 && Number.isFinite(Date.parse(raw.dueAt)) ? raw.dueAt : '',
     stale: raw.stale === true,
     metaUsedMinor: linked && stage >= 4 && stage <= 10 && Number.isSafeInteger(used) && used >= 0 ? used : null,
     flags,
@@ -6112,6 +6114,15 @@ function studioStageView(raw) {
     actions: Array.isArray(raw.actions) ? raw.actions.filter(action => STUDIO_STAGE_ACTIONS.includes(action)) : [],
     reasons: Array.isArray(raw.reasons) ? raw.reasons.map(String).filter(reason => /^[a-z_]{1,40}$/.test(reason)).slice(0, 10) : []
   };
+}
+
+// "Next: Albayan team", and for a request waiting for review the time the team reviews it by: only while that
+// time is still ahead (a promise already missed is not repeated). Plain text: escape it when drawing.
+function studioStageNext(stage) {
+  if (!stage.nextActor) return '';
+  const by = stage.dueAt && Date.parse(stage.dueAt) > Date.now() && typeof studioHelpWhen === 'function' ? studioHelpWhen(stage.dueAt) : '';
+  return adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`)
+    + (by ? adsStudioText(`. We review it by ${by} (Tripoli time).`, `. نراجعه قبل ${by} (بتوقيت طرابلس).`) : '');
 }
 
 // ------------------------------------------------------------------ money
@@ -7734,7 +7745,7 @@ function renderStudioHomeTrackers(requests) {
     .filter(item => STUDIO_HOME_ACTIVE_STAGES.includes(item.stage.stage));
   if (!active.length) return '';
   const rows = active.slice(0, STUDIO_HOME_MAX_TRACKERS).map(({ request, stage }) => {
-    const next = stage.nextActor ? adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`) : '';
+    const next = studioStageNext(stage);
     const flags = stage.flags.map(flag => `<span class="studio-flag">${studioEsc(flag.text)}</span>`).join('');
     return `
               <li>
@@ -7925,7 +7936,7 @@ function studioAdsBudgetText(request) {
 }
 
 function renderStudioAdsCard(request, stage) {
-  const next = stage.nextActor ? adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`) : '';
+  const next = studioStageNext(stage);
   const budget = studioAdsBudgetText(request);
   const flags = stage.flags.map(flag => `<span class="studio-flag">${studioEsc(flag.text)}</span>`).join('');
   return `
@@ -8181,7 +8192,7 @@ function renderStudioAdsDetail(route) {
         </div>`;
   }
   const stage = studioDataStage(request);
-  const next = stage.nextActor ? adsStudioText(`Next: ${stage.nextActor}`, `التالي: ${stage.nextActor}`) : '';
+  const next = studioStageNext(stage);
   const flags = stage.flags.map(flag => `<span class="studio-flag">${studioEsc(flag.text)}</span>`).join('');
   return `
         <article class="studio-ads-detail" data-testid="studio-ad-detail" data-stage="${stage.stage}" aria-labelledby="studio-ad-name">

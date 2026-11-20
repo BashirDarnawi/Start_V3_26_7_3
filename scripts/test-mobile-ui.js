@@ -6172,6 +6172,37 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio ticket tabs (round 4): each tab shows its count when the answer carries one, keeps it while another tab loads, shows none for an answer without counts or after a status changed here, and takes whole numbers only',
     !loadError && countCases.every(Boolean), loadError || `cases ${failed(countCases)}`);
 
+  // Redesign round 4 (ROUND3.md section 4, item 12): a request waiting for review says when the team reviews it
+  // by, when the server's summary carries that time (the same target the overdue-review alert uses). Without it,
+  // for another stage, or once the time has passed, the line is what it was: "Next: Albayan team".
+  const waitRow = (extra = {}) => ({ stage: 2, stageKey: 'waiting_review', labels: { en: 'Waiting for Albayan review', ar: 'بانتظار مراجعة البيان' }, nextActorLabels: { en: 'Albayan team', ar: 'فريق البيان' },
+    tracker: { step: 'sent', side: false }, actions: [], linked: false, metaUsedMinor: null, ...extra });
+  const reviewBy = '2099-03-05T15:00:00.000Z';  // Thursday 5 March 2099, 17:00 in Tripoli
+  const dueKept = extra => json(`studioStageView(${JSON.stringify(waitRow(extra))}).dueAt`);
+  const nextLine = (extra, language = 'en') => String(inLanguage(language, `studioStageNext(studioStageView(${JSON.stringify(waitRow(extra))}))`));
+  const waitingCard = String(run(`renderStudioAdsCard({ id: 'r_wait', name: 'Waiting ad', status: 'Submitted' }, studioStageView(${JSON.stringify(waitRow({ dueAt: reviewBy, nextActorLabels: { en: 'Albayan <team>', ar: 'فريق البيان' } }))}))`));
+  const reviewCases = [
+    dueKept({ dueAt: reviewBy }) === reviewBy && dueKept({}) === '' && dueKept({ dueAt: null }) === '' && dueKept({ dueAt: 'tomorrow' }) === '' && dueKept({ dueAt: 4070000000000 }) === ''
+      && dueKept({ dueAt: `${reviewBy} ${'and more words'.repeat(3)}` }) === ''
+      // (a browser reads this as a date and skips the words in brackets: the length is checked too)
+      && dueKept({ dueAt: `Thu, 05 Mar 2099 15:00:00 GMT (${'x'.repeat(40)})` }) === '' && dueKept({ dueAt: 'Thu, 05 Mar 2099 15:00:00 GMT' }) === 'Thu, 05 Mar 2099 15:00:00 GMT',
+    // only a request waiting for review has one: the same time on another stage is dropped
+    [1, 3, 4, 8].every(n => json(`studioStageView(${JSON.stringify({ ...waitRow({ dueAt: reviewBy }), stage: n, stageKey: undefined })}).dueAt`) === ''),
+    nextLine({ dueAt: reviewBy }) === 'Next: Albayan team. We review it by Thu 5 Mar, 17:00 (Tripoli time).',
+    nextLine({ dueAt: reviewBy }, 'ar') === 'التالي: فريق البيان. نراجعه قبل الخميس 5 مارس، 17:00 (بتوقيت طرابلس).',
+    nextLine({}) === 'Next: Albayan team' && nextLine({}, 'ar') === 'التالي: فريق البيان',
+    // a time already behind us is a promise missed: it is not repeated
+    nextLine({ dueAt: ago(5) }) === 'Next: Albayan team' && nextLine({ dueAt: soon(5) }).startsWith('Next: Albayan team. We review it by '),
+    run("studioStageNext({ nextActor: '', dueAt: '2099-03-05T15:00:00.000Z' })") === '',
+    waitingCard.includes('<span>Next: Albayan &lt;team&gt;. We review it by Thu 5 Mar, 17:00 (Tripoli time).</span>') && !waitingCard.includes('<team>'),
+    // the three places that say who is next all use the one sentence: Home's tracker, the card in My ads, the request's own screen
+    homeSrc.split('const next = studioStageNext(stage);').length === 2 && adsSrc.split('const next = studioStageNext(stage);').length === 3
+      && !/Next: \$\{stage\.nextActor\}/.test(homeSrc + adsSrc) && coreSrc.split('Next: ${stage.nextActor}').length === 2,
+    coreSrc.includes("dueAt: key === 'waiting_review' && typeof raw.dueAt === 'string' && raw.dueAt.length <= 40 && Number.isFinite(Date.parse(raw.dueAt)) ? raw.dueAt : '',")
+  ];
+  check('Studio expected review time (round 4): a request waiting for review shows "We review it by … (Tripoli time)" when the summary carries the time, in English and Arabic; nothing for another stage, a missing or unreadable time, or a time already passed',
+    !loadError && reviewCases.every(Boolean), loadError || `cases ${failed(reviewCases)}`);
+
   // Texts, handlers and styles.
   const textPairs = [...helpSrc.matchAll(/adsStudioText\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
   const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];

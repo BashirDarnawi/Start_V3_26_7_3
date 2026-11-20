@@ -244,7 +244,40 @@ test.describe('Albayan Studio v2 Home and My ads (pilot)', () => {
     expect(payAr).not.toContain('$');
     expect(await page.getByTestId('studio-home-needs').innerText()).toMatch(ARABIC);
     await expectFits(page, 'Home (AR)');
+
+    // Redesign round 4: a request waiting for review says when the team reviews it by, when the summary carries
+    // that time. Here the answer is given one (Thursday 5 March 2099, 17:00 in Tripoli) for the waiting request only.
+    await page.route('**/api/studio/campaigns/summary', async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      for (const id of Object.keys(body)) body[id] = { ...body[id], dueAt: '2099-03-05T15:00:00.000Z' };  // every request gets one: only the waiting one may show it
+      await route.fulfill({ response, json: body });
+    });
+    const wordsAr = 'التالي: فريق البيان. نراجعه قبل الخميس 5 مارس، 17:00 (بتوقيت طرابلس).';
+    const wordsEn = 'Next: Albayan team. We review it by Thu 5 Mar, 17:00 (Tripoli time).';
+    await page.evaluate(() => studioDataWant('campaigns', true));
+    await expect(waiting).toContainText(wordsAr);
+    await expect(page.getByTestId('studio-home-trackers').getByText('نراجعه قبل')).toHaveCount(1);
+    await expectFits(page, 'Home with the review time (AR)');
     await setLanguage(page, 'en');
+    await expect(waiting).toContainText(wordsEn);
+    await expect(page.getByTestId('studio-home-trackers').getByText('We review it by')).toHaveCount(1);
+    await expectFits(page, 'Home with the review time (EN)');
+    // The same sentence on the request's card in My ads and on its own screen.
+    await page.getByTestId('studio-nav-campaigns').click();
+    await expectCustomerTab(page, 'campaigns');
+    await expect(page.getByTestId(`studio-ad-${seed.ids.wait}`)).toContainText(wordsEn);
+    await expect(page.getByTestId('studio-ads-list').getByText('We review it by')).toHaveCount(1);
+    await expectFits(page, 'My ads with the review time (EN)');
+    await page.getByTestId(`studio-ad-${seed.ids.wait}`).click();
+    await expect(page.getByTestId('studio-ad-detail')).toBeVisible();
+    await expect(page.getByTestId('studio-ad-next')).toHaveText(wordsEn);
+    await expectFits(page, 'A waiting request with the review time (EN)');
+    await setLanguage(page, 'ar');
+    await expect(page.getByTestId('studio-ad-next')).toHaveText(wordsAr);
+    await expectFits(page, 'A waiting request with the review time (AR)');
+    await setLanguage(page, 'en');
+    await page.unroute('**/api/studio/campaigns/summary');
     expect(errors).toEqual([]);
   });
 
