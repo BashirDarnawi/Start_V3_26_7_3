@@ -740,3 +740,29 @@ html.dark .ui-workspace .delivery-canceled { background: #4a2434; color: #ffa3b6
    team's contact when one is set), the general "Contact an administrator" note under the form is
    not shown a second time. It keeps its place so the language link stays at the end of the row. */
 body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hidden; }
+
+/* ---- Clothes System (DESIGN.md T12, wireframe 13): the stage, the next step as a button, "More" for the rest. ---- */
+/* One colour for the main button, the same blue as everywhere else; the pink stays on the area's icons. */
+.clothes-primary { border: 1px solid var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); cursor: pointer; }
+.clothes-primary:hover:not(:disabled) { filter: brightness(.95); }
+.clothes-primary:focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 2px; }
+.clothes-primary:disabled { opacity: .6; cursor: default; }
+.clothes-tabs { margin: -8px 0 18px; }
+.clothes-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.clothes-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--ui-line); }
+.clothes-actions > .management-button { font-size: 13.5px; font-weight: 700; cursor: pointer; }
+.clothes-actions > .management-button:focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 2px; }
+.clothes-actions > .row-menu { margin-inline-start: auto; }
+.clothes-actions > .row-menu > summary { min-height: 44px; padding: 10px 14px; border-radius: 12px; font-size: 13.5px; }
+.clothes-lock { display: flex; align-items: flex-start; gap: 10px; margin: 4px 0 0; padding: 10px; border-top: 1px solid var(--ui-line); font-size: 12.5px; line-height: 1.45; color: var(--ui-muted); }
+.clothes-lock > :is(i, svg) { flex: none; width: 16px; height: 16px; margin-top: 1px; }
+/* The four stages of a shipment: done, where it stands now, still to come. */
+.clothes-stages { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 14px 0 4px; padding: 0; list-style: none; }
+.clothes-stages > li { position: relative; display: grid; justify-items: center; gap: 5px; font-size: 12px; font-weight: 600; line-height: 1.3; text-align: center; color: var(--ui-muted); overflow-wrap: anywhere; }
+.clothes-stages > li > span { position: relative; z-index: 1; display: grid; place-items: center; width: 26px; height: 26px; border: 2px solid var(--ui-line); border-radius: 999px; background: var(--ui-surface); font-size: 12px; font-weight: 800; color: var(--ui-muted); }
+.clothes-stages > li > span > :is(i, svg) { width: 14px; height: 14px; }
+.clothes-stages > li + li::before { content: ''; position: absolute; top: 12px; inset-inline-end: 50%; width: 100%; height: 2px; background: var(--ui-line); }
+.clothes-stages > li:is(.is-done, .is-now)::before { background: var(--ui-ink); }
+.clothes-stages > li.is-done > span { border-color: var(--ui-ink); background: var(--ui-ink); color: var(--ui-surface); }
+.clothes-stages > li.is-now { font-weight: 800; color: var(--ui-ink); }
+.clothes-stages > li.is-now > span { border-color: var(--ui-accent); background: var(--ui-accent); color: var(--ui-surface); }

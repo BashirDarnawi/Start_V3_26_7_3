@@ -2189,6 +2189,184 @@ async function main() {
     state.language = 'en';
     assert.deepEqual([sandbox.getAdReceiptDisplayLabel('r1'), sandbox.codePiece('#471396')], ['#D3', '#471396'], 'English text carries no marks');
   });
+  await test('round 3 Clothes shipments: a card shows its stage and one button for the next step, "More" keeps every other status with Edit and Delete, the status filter is tabs with counts, and receiving asks with the numbers before and after', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    run('Security').escapeHtml = value => String(value ?? '');
+    sandbox.updateClothesShipmentsFiltered = () => {};
+    state.language = 'en';
+    state.clothesProducts = [{ id: 'p1', name: 'Kids Hoodie', variants: [{ color: 'Grey', size: '8Y', qty: 5 }], createdBy: 'admin' }];
+    const line = (qty, color = 'Grey', size = '8Y', productId = 'p1') => ({ productId, color, size, qty, unitCostUSD: 5 });
+    const shipment = (id, status, more = {}) => ({ id, ref: `SHP-${id}`, supplier: 'Supplier', status, orderedAt: '2026-11-19', lines: [line(20)], shippingCostUSD: 0, createdBy: 'admin', _lastModified: 3, ...more });
+    state.clothesShipments = [shipment('s1', 'Ordered'), shipment('s2', 'Shipped'), shipment('s3', 'Arrived', { lines: [line(12), line(8, 'grey ', '8y'), line(4, 'Blue', 'M'), line(3, 'Red', 'M', 'gone')] }),
+      shipment('s4', 'Received', { stockApplied: true, receivedAt: '2026-11-19T10:00:00Z' }), shipment('s5', 'ordered')];
+    let html = String(sandbox.renderClothesShipmentsTab());
+    const card = id => (html.split(`data-clothes-shipment="${id}"`)[1] || '').split('data-clothes-shipment="')[0];
+    const main = id => Array.from(card(id).matchAll(/<button type="button" onclick="([^"]+)" class="management-button is-primary" data-clothes-next="[A-Za-z]+">([^<]+)<\/button>/g), m => `${m[2]} = ${m[1]}`);
+    const menu = id => Array.from((card(id).split('class="frame-menu-list">')[1] || '').matchAll(/<button type="button" onclick="([^"]+)"( class="frame-danger")?><i data-lucide="[a-z0-9-]+"><\/i><span>([^<]+)<\/span>/g), m => `${m[3]}${m[2] ? '!' : ''} = ${m[1]}`);
+    assert.deepEqual(main('s1'), ["Mark shipped = setClothesShipmentStatus('s1', 'Shipped')"]);
+    assert.deepEqual(main('s2'), ["Mark arrived = setClothesShipmentStatus('s2', 'Arrived')"]);
+    assert.deepEqual(main('s3'), ["Receive into stock = setClothesShipmentStatus('s3', 'Received')"]);
+    assert.deepEqual(main('s4'), [], 'a received shipment has no next step');
+    assert.deepEqual(menu('s1'), ["Set status: Arrived = setClothesShipmentStatus('s1', 'Arrived')", "Set status: Received = setClothesShipmentStatus('s1', 'Received')", "Edit = editClothesShipment('s1')", "Delete! = deleteClothesShipment('s1')"]);
+    assert.deepEqual(menu('s3'), ["Set status: Ordered = setClothesShipmentStatus('s3', 'Ordered')", "Set status: Shipped = setClothesShipmentStatus('s3', 'Shipped')", "Edit = editClothesShipment('s3')", "Delete! = deleteClothesShipment('s3')"]);
+    assert.deepEqual(menu('s4'), ["Set status: Ordered = setClothesShipmentStatus('s4', 'Ordered')", "Set status: Shipped = setClothesShipmentStatus('s4', 'Shipped')", "Set status: Arrived = setClothesShipmentStatus('s4', 'Arrived')"],
+      'a received shipment is moved back first: no Edit, no Delete (as before)');
+    assert.ok(card('s4').includes('<p class="clothes-lock">') && card('s4').includes('Move the status back to edit or delete.'));
+    // Whatever its status, every other status is one press away (main button or menu), as the dropdown offered.
+    for (const [id, now] of [['s1', 'Ordered'], ['s2', 'Shipped'], ['s3', 'Arrived'], ['s4', 'Received']]) {
+      const reach = new Set(Array.from(card(id).matchAll(/setClothesShipmentStatus\('[a-z0-9]+', '([A-Za-z]+)'\)/g), m => m[1]));
+      assert.deepEqual([...reach].sort(), ['Ordered', 'Shipped', 'Arrived', 'Received'].filter(status => status !== now).sort(), id);
+    }
+    assert.ok(!html.includes('<select onchange="setClothesShipmentStatus'), 'the status dropdown is gone from the card');
+    // The stage: done, now, to come.
+    const stage = id => [/<ol class="clothes-stages" aria-label="([^"]+)"/.exec(card(id))[1], ...Array.from(card(id).matchAll(/<li class="([a-z -]*)"( aria-current="step")?><span>(<i data-lucide="check"><\/i>|\d)<\/span>([^<]+)<\/li>/g), m => `${m[4]}:${m[1].trim() || 'later'}${m[2] ? '*' : ''}`)];
+    assert.deepEqual(stage('s3'), ['Stage 3 of 4: Arrived', 'Ordered:is-done', 'Shipped:is-done', 'Arrived:is-now*', 'Received:later']);
+    assert.deepEqual(stage('s4'), ['Stage 4 of 4: Received', 'Ordered:is-done', 'Shipped:is-done', 'Arrived:is-done', 'Received:is-done is-now*']);
+    assert.deepEqual(stage('s5').slice(0, 2), ['Stage 1 of 4: Ordered', 'Ordered:is-now*'], 'a status the list does not know is drawn as the first stage, as before');
+    // The filter: tabs with counts that follow the search.
+    const tabs = () => Array.from((html.split('id="clothes-shipment-tabs"')[1] || '').split('</div>')[0].matchAll(/onclick="([^"]+)" aria-pressed="(true|false)"[^>]*>([^<]+)<b>(\d+)<\/b>/g), m => `${m[3]} ${m[4]}${m[2] === 'true' ? '*' : ''} = ${m[1]}`);
+    assert.deepEqual(tabs(), ["All 5* = setClothesShipmentStatusFilter('all')", "Ordered 1 = setClothesShipmentStatusFilter('Ordered')", "Shipped 1 = setClothesShipmentStatusFilter('Shipped')",
+      "Arrived 1 = setClothesShipmentStatusFilter('Arrived')", "Received 1 = setClothesShipmentStatusFilter('Received')"]);
+    run("_clothesShipmentStatusFilter = 'Arrived'; _clothesShipmentSearch = 'shp-s3';");
+    html = String(sandbox.renderClothesShipmentsTab());
+    assert.deepEqual(tabs().map(tab => tab.split(' = ')[0]), ['All 1', 'Ordered 0', 'Shipped 0', 'Arrived 1*', 'Received 0']);
+    assert.ok(html.includes('data-clothes-shipment="s3"') && !html.includes('data-clothes-shipment="s1"'));
+    assert.ok(!/<select[^>]*setClothesShipmentStatusFilter/.test(html), 'the status dropdown above the list is gone');
+    run("_clothesShipmentStatusFilter = 'all'; _clothesShipmentSearch = '';");
+
+    // Receiving adds stock: the question shows the numbers, before and after, for each colour and size.
+    const asked = [];
+    let answer = false, sent = [];
+    sandbox.appConfirm = async (message, kind) => { asked.push([String(message).split('\n'), kind]); return answer; };
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiMutateClothesShipment = async request => { sent.push(request); return {}; };
+    sandbox.applyClothesShipmentMutationResponse = () => {};
+    await sandbox.setClothesShipmentStatus('s3', 'Received');
+    assert.deepEqual(asked.pop(), [['Receive SHP-s3 into stock?', '24 pieces will be added to stock.', 'Kids Hoodie · Grey · 8Y: 5 → 25 pieces', 'Kids Hoodie · Blue · M: 0 → 4 pieces', '(deleted product) · Red · M ×3'], 'Receive 24 pieces']);
+    assert.deepEqual(sent, [], 'No sends nothing');
+    answer = true;
+    await sandbox.setClothesShipmentStatus('s3', 'Received');
+    assert.deepEqual(sent.map(request => [request.action, request.shipmentId, request.status]), [['status', 's3', 'Received']], 'Yes sends the one request');
+    // Moving a received shipment back takes its pieces out again: asked the same way.
+    state.clothesProducts[0].variants[0].qty = 25;
+    answer = false; sent = [];
+    await sandbox.setClothesShipmentStatus('s4', 'Arrived');
+    assert.deepEqual(asked.pop(), [['Move SHP-s4 back to Arrived?', '20 pieces will be taken out of stock again.', 'Kids Hoodie · Grey · 8Y: 25 → 5 pieces'], 'Take out 20 pieces']);
+    assert.deepEqual(sent, []);
+    // A step that moves no stock is not asked about.
+    asked.length = 0;
+    await sandbox.setClothesShipmentStatus('s1', 'Shipped');
+    assert.deepEqual([asked.length, sent.map(request => request.status)], [0, ['Shipped']]);
+    // Arabic: the same, and a name keeps its own direction inside the line.
+    state.language = 'ar';
+    html = String(sandbox.renderClothesShipmentsTab());
+    assert.deepEqual([main('s1'), main('s2')], [["تم الشحن = setClothesShipmentStatus('s1', 'Shipped')"], ["وصلت الشحنة = setClothesShipmentStatus('s2', 'Arrived')"]]);
+    state.clothesShipments[2].status = 'Arrived';
+    await sandbox.setClothesShipmentStatus('s3', 'Received');
+    assert.deepEqual(asked.pop(), [['استلام ⁨SHP-s3⁩ في المخزون؟', 'ستُضاف 24 قطعة إلى المخزون.', '⁨Kids Hoodie · Grey · 8Y⁩: 25 ← 45 قطعة', '⁨Kids Hoodie · Blue · M⁩: 0 ← 4 قطعة', '⁨(منتج محذوف) · Red · M⁩ ×3'], 'استلام 24 قطعة']);
+  });
+
+  await test('round 3 Clothes orders: one button for the next step, "Record payment" while money is owed, "More" for every other status, both ends of the payment, the slip, Edit and Delete; the status filter is tabs with counts', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    run('Security').escapeHtml = value => String(value ?? '');
+    state.language = 'en';
+    state.clothesProducts = [{ id: 'p1', name: 'Shirt', variants: [{ color: 'White', size: 'M', qty: 9 }], createdBy: 'admin' }];
+    const order = (id, status, paymentStatus, paid, more = {}) => ({ id, orderNo: Number(id.slice(1)), customerName: `Buyer ${id}`, customerPhone: '0910000000', status, paymentStatus, amountPaidLYD: paid,
+      deliveryFeeLYD: 0, lines: [{ productId: 'p1', color: 'White', size: 'M', qty: 2, priceLYD: 75 }], stockDeducted: true, createdBy: 'admin', createdAt: '2026-11-19T10:00:00Z', _lastModified: 2, ...more });
+    state.clothesOrders = [order('o1', 'New', 'Not Paid', 0), order('o2', 'On the way', 'Partially Paid', 50), order('o3', 'Delivered', 'Not Paid', 0), order('o4', 'Delivered', 'Paid', 150),
+      order('o5', 'Canceled', 'Partially Paid', 50, { stockDeducted: false }), order('o6', 'Returned', 'Paid', 150, { stockDeducted: false })];
+    let html = String(sandbox.renderClothesOrdersTab());
+    const card = id => (html.split(`data-clothes-order="${id}"`)[1] || '').split('data-clothes-order="')[0];
+    const buttons = id => Array.from((card(id).split('class="clothes-actions">')[1] || '').split('<details')[0].matchAll(/<button type="button" onclick="([^"]+)" class="management-button( is-primary)?"[^>]*>([^<]+)<\/button>/g), m => `${m[3]}${m[2] ? '!' : ''} = ${m[1]}`);
+    const menu = id => Array.from((card(id).split('class="frame-menu-list">')[1] || '').matchAll(/<button type="button" onclick="([^"]+)"( class="frame-danger")?><i data-lucide="[a-z0-9-]+"><\/i><span>([^<]+)<\/span>/g), m => `${m[3]}${m[2] ? '!' : ''}`);
+    assert.deepEqual(buttons('o1'), ["Mark on the way! = setClothesOrderStatus('o1', 'On the way')", "Record payment = recordClothesOrderPayment('o1')"]);
+    assert.deepEqual(buttons('o2'), ["Mark delivered! = setClothesOrderStatus('o2', 'Delivered')", "Record payment = recordClothesOrderPayment('o2')"]);
+    assert.deepEqual(buttons('o3'), ["Record payment! = recordClothesOrderPayment('o3')"], 'delivered and not paid: the payment is the next step');
+    assert.deepEqual(buttons('o4'), [], 'delivered and paid: nothing is left to do');
+    assert.deepEqual(buttons('o5'), [], 'a canceled order has no next step');
+    assert.deepEqual(menu('o1'), ['Set status: Delivered', 'Set status: Returned', 'Set status: Canceled', 'Paid in full', 'Print slip', 'Edit', 'Delete!']);
+    assert.deepEqual(menu('o2'), ['Set status: New', 'Set status: Returned', 'Set status: Canceled', 'Paid in full', 'Not paid', 'Print slip', 'Edit', 'Delete!']);
+    assert.deepEqual(menu('o4'), ['Set status: New', 'Set status: On the way', 'Set status: Returned', 'Set status: Canceled', 'Record payment', 'Not paid', 'Print slip', 'Edit', 'Delete!']);
+    assert.deepEqual(menu('o5'), ['Set status: New', 'Set status: On the way', 'Set status: Delivered', 'Set status: Returned', 'Record payment', 'Paid in full', 'Not paid', 'Print slip', 'Delete!'],
+      'a canceled order cannot be edited (as before) and keeps its payment lines');
+    // Every status and every payment state stays one or two presses away, as the two dropdowns offered.
+    for (const o of state.clothesOrders) {
+      const reach = new Set(Array.from(card(o.id).matchAll(/setClothesOrderStatus\('o\d', '([A-Za-z ]+)'\)/g), m => m[1]));
+      assert.deepEqual([...reach].sort(), ['New', 'On the way', 'Delivered', 'Returned', 'Canceled'].filter(status => status !== o.status).sort(), `${o.id} statuses`);
+      assert.ok(card(o.id).includes(`recordClothesOrderPayment('${o.id}')`), `${o.id}: the amount can be typed`);
+      assert.equal(card(o.id).includes(`setClothesOrderPayment('${o.id}', 'Paid')`), o.paymentStatus !== 'Paid', `${o.id}: Paid in full`);
+      assert.equal(card(o.id).includes(`setClothesOrderPayment('${o.id}', 'Not Paid')`), o.paymentStatus !== 'Not Paid', `${o.id}: Not paid`);
+      assert.ok(card(o.id).includes(`deleteClothesOrder('${o.id}')`) && card(o.id).includes(`printClothesOrderSlip('${o.id}')`));
+    }
+    assert.ok(!html.includes('<select onchange="setClothesOrderStatus') && !html.includes('<select onchange="setClothesOrderPayment'), 'the two dropdowns are gone from the card');
+    // The filter: status tabs with counts; they follow the search and the payment filter, which stays a dropdown.
+    const tabs = () => Array.from((html.split('id="clothes-order-tabs"')[1] || '').split('</div>')[0].matchAll(/aria-pressed="(true|false)"[^>]*>([^<]+)<b>(\d+)<\/b>/g), m => `${m[2]} ${m[3]}${m[1] === 'true' ? '*' : ''}`);
+    assert.deepEqual(tabs(), ['All 6*', 'New 1', 'On the way 1', 'Delivered 2', 'Returned 1', 'Canceled 1']);
+    assert.ok(/<select aria-label="Payment" onchange="setClothesOrderPaymentFilter\(this\.value\)"/.test(html) && !/<select[^>]*setClothesOrderStatusFilter/.test(html));
+    run("_clothesOrderPaymentFilter = 'Paid'; _clothesOrderStatusFilter = 'Delivered';");
+    html = String(sandbox.renderClothesOrdersTab());
+    assert.deepEqual(tabs(), ['All 2', 'New 0', 'On the way 0', 'Delivered 1*', 'Returned 1', 'Canceled 0']);
+    assert.ok(html.includes('data-clothes-order="o4"') && !html.includes('data-clothes-order="o6"') && !html.includes('data-clothes-order="o3"'));
+    run("_clothesOrderPaymentFilter = 'all'; _clothesOrderStatusFilter = 'all';");
+    // Arabic.
+    state.language = 'ar';
+    html = String(sandbox.renderClothesOrdersTab());
+    assert.deepEqual([buttons('o1'), buttons('o3')], [["خرج للتوصيل! = setClothesOrderStatus('o1', 'On the way')", "تسجيل دفعة = recordClothesOrderPayment('o1')"], ["تسجيل دفعة! = recordClothesOrderPayment('o3')"]]);
+    assert.deepEqual(menu('o2'), ['الحالة: جديد', 'الحالة: مرتجع', 'الحالة: ملغى', 'مدفوع بالكامل', 'غير مدفوع', 'طباعة إيصال', 'تعديل', 'حذف!']);
+  });
+
+  await test('round 3 Clothes payment: "Record payment" asks for the amount paid so far in a labelled box and the state follows it; an order already partly paid takes a new amount in one request (before: only through Not Paid, which wrote zero in between)', async () => {
+    const run = async (start, typed, serverMode = true) => {
+      const { sandbox, state, notes } = clothesFixture();
+      state.language = 'en';
+      state.clothesOrders = [{ id: 'o1', orderNo: 7, customerName: 'Sara', status: 'New', paymentStatus: start[0], amountPaidLYD: start[1], deliveryFeeLYD: 0,
+        lines: [{ productId: 'p1', qty: 2, priceLYD: 75 }], _lastModified: 4, createdBy: 'admin' }];
+      const sent = [], patched = [], asked = [];
+      sandbox.appPrompt = async (message, value, kind) => { asked.push({ lines: String(message).split('\n'), value, kind }); return typed; };
+      sandbox.isServerModeEnabled = () => serverMode;
+      sandbox.apiMutateClothesOrder = async request => { sent.push([request.action, request.paymentStatus, JSON.parse(JSON.stringify(request.data))]); return {}; };  // plain copies: the sandbox has its own Object
+      sandbox.applyClothesOrderMutationResponse = () => {};
+      sandbox.updateRecord = async (array, id, updates) => { patched.push(JSON.parse(JSON.stringify(updates))); return true; };
+      await sandbox.recordClothesOrderPayment('o1');
+      return { sent, patched, asked, notes, sandbox };
+    };
+    const partly = ['Partially Paid', 50];
+    let r = await run(partly, '80');
+    assert.deepEqual(r.asked, [{ lines: ['Record payment #0007', 'Total 150.00 LYD · Paid so far 50.00 LYD',
+      'Type the amount paid so far. The whole total makes the order Paid, zero makes it Not Paid, anything between makes it Partially Paid.'], value: '50.00', kind: 'Save payment' }]);
+    assert.deepEqual(r.sent, [['payment', 'Partially Paid', { amountPaidLYD: 80 }]], 'one request with the new amount');
+    assert.deepEqual((await run(partly, '150')).sent, [['payment', 'Paid', {}]], 'the whole total is Paid');
+    assert.deepEqual((await run(partly, '0')).sent, [['payment', 'Not Paid', {}]], 'zero is Not Paid');
+    assert.deepEqual((await run(partly, '50')).sent, [], 'the same amount: nothing to save');
+    assert.deepEqual((await run(partly, null)).sent, [], 'Cancel sends nothing');
+    assert.deepEqual((await run(partly, '  ')).sent, [], 'an empty box sends nothing');
+    r = await run(partly, '200');
+    assert.deepEqual([r.sent, r.notes.map(note => note.title)], [[], ['Invalid amount']], 'more than the total is refused');
+    r = await run(partly, 'abc');
+    assert.deepEqual([r.sent, r.notes.map(note => note.title)], [[], ['Invalid amount']]);
+    assert.deepEqual((await run(['Not Paid', 0], '٨٠')).sent, [['payment', 'Partially Paid', { amountPaidLYD: 80 }]], 'Arabic digits are read');
+    assert.deepEqual((await run(['Not Paid', 0], '0')).sent, [], 'already Not Paid');
+    assert.deepEqual((await run(['Paid', 150], '150')).sent, [], 'already Paid');
+    assert.deepEqual((await run(['Paid', 150], '100')).sent, [['payment', 'Partially Paid', { amountPaidLYD: 100 }]]);
+    // Without a server the same record is written once.
+    r = await run(partly, '80', false);
+    assert.deepEqual([r.sent, r.patched], [[], [{ paymentStatus: 'Partially Paid', amountPaidLYD: 80 }]]);
+    // The older way in is unchanged: pressing the state an order already has does nothing, and asks nothing.
+    r = await run(partly, '80');
+    r.asked.length = 0; r.sent.length = 0;
+    await r.sandbox.setClothesOrderPayment('o1', 'Partially Paid');
+    assert.deepEqual([r.asked.length, r.sent], [0, []]);
+    // Arabic: the same box.
+    const ar = clothesFixture();
+    ar.state.language = 'ar';
+    ar.state.clothesOrders = [{ id: 'o1', orderNo: 7, customerName: 'Sara', status: 'New', paymentStatus: 'Not Paid', amountPaidLYD: 0, deliveryFeeLYD: 0, lines: [{ productId: 'p1', qty: 2, priceLYD: 75 }], _lastModified: 4, createdBy: 'admin' }];
+    let box = null;
+    ar.sandbox.appPrompt = async (message, value, kind) => { box = [plain(message).split('\n'), value, kind]; return null; };
+    await ar.sandbox.recordClothesOrderPayment('o1');
+    assert.deepEqual(box, [['تسجيل دفعة #0007', 'الإجمالي 150.00 د.ل · المدفوع حتى الآن 0.00 د.ل',
+      'اكتب المبلغ المدفوع حتى الآن. الإجمالي كاملاً يجعل الطلب «مدفوع»، وصفر يجعله «غير مدفوع»، وما بينهما «مدفوع جزئياً».'], '0.00', 'حفظ الدفعة']);
+  });
+
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {

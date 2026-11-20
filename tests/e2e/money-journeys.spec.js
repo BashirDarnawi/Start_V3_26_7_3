@@ -745,14 +745,20 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
     const shipmentId = JSON.parse(shipmentBody).id;
     await expect(modal).toBeHidden();
 
-    const shipmentStatus = page.locator(`select[onchange="setClothesShipmentStatus('${shipmentId}', this.value)"]`);
-    await expect(shipmentStatus).toBeVisible();
+    // Redesign round 3: the card shows the stage, one button for the next step, and "More" for any other status.
+    const shipmentCard = page.locator(`[data-clothes-shipment="${shipmentId}"]`);
+    await expect(shipmentCard).toBeVisible();
+    await expect(shipmentCard.locator('.clothes-stages [aria-current="step"]')).toContainText('Ordered');
+    await expect(shipmentCard.getByRole('button', { name: 'Mark shipped' })).toBeVisible();
     const [receiveResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/clothes/shipments/mutate')),
       (async () => {
-        await shipmentStatus.selectOption('Received');
-        // Receiving adds stock: the app asks first, in its own box.
-        await answerYes(page, /Quantities will be ADDED to stock/);
+        await shipmentCard.locator('details.row-menu > summary').click();
+        await shipmentCard.getByRole('button', { name: 'Set status: Received' }).click();
+        // Receiving adds stock: the app asks first, in its own box, with the numbers before and after.
+        await expect(page.locator('#app-ask')).toContainText('Black · M: 0 → 10 pieces');
+        await expect(page.locator('#app-ask .management-button-row button').last()).toHaveText('Receive 10 pieces');
+        await answerYes(page, /10 pieces will be added to stock/);
       })()
     ]);
     expect(receiveResponse.status(), await receiveResponse.text()).toBe(200);
@@ -817,12 +823,30 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
     // --- Cancel the order: the 2 pieces return to stock. ---
     await openClothesTab(page, 'orders');
     await waitForClothesProduct(page, productId);
-    const orderStatus = page.locator(`select[onchange="setClothesOrderStatus('${orderId}', this.value)"]`);
-    await expect(orderStatus).toBeVisible();
+    const orderCard = page.locator(`[data-clothes-order="${orderId}"]`);
+    await expect(orderCard).toBeVisible();
+    await expect(orderCard.getByRole('button', { name: 'Mark on the way' })).toBeVisible();
+    // "Record payment": the order is partly paid (50 of 120); a new amount is typed once and saved in one request.
+    const [payResponse] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/clothes/orders/mutate')),
+      (async () => {
+        await orderCard.getByRole('button', { name: 'Record payment' }).click();
+        const box = page.locator('#app-ask');
+        await expect(box).toContainText('Total 120.00 LYD · Paid so far 50.00 LYD');
+        await expect(box.locator('input')).toHaveValue('50.00');
+        await box.locator('input').fill('80');
+        await box.locator('.management-button-row button').last().click();
+        await expect(box).toHaveCount(0);
+      })()
+    ]);
+    expect(payResponse.status(), await payResponse.text()).toBe(200);
+    const partlyPaid = await pollEntity(page, 'clothesOrders', orderId, row => Number(row.amountPaidLYD), 80);
+    expect(partlyPaid.paymentStatus).toBe('Partially Paid');
     const [cancelResponse] = await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/clothes/orders/mutate')),
       (async () => {
-        await orderStatus.selectOption('Canceled');
+        await orderCard.locator('details.row-menu > summary').click();
+        await orderCard.getByRole('button', { name: 'Set status: Canceled' }).click();
         await answerYes(page, /pieces will be RETURNED to stock/);
       })()
     ]);

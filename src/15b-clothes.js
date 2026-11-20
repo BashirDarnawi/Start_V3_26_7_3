@@ -478,7 +478,7 @@ function renderClothesDashboardTab() {
           ${variant ? `<span class="text-slate-400 dark:text-slate-500 text-sm"> — ${Security.escapeHtml(variant)}</span>` : ''}
         </div>
         <span class="px-2.5 py-0.5 rounded-full text-xs font-bold whitespace-nowrap ${chip}">
-          ${item.qty === 0 ? (isAr ? 'نفد' : 'Out') : item.qty}
+          ${item.qty === 0 ? (isAr ? 'نفد' : 'Out') : (isAr ? `${item.qty} متبقي` : `${item.qty} left`)}
         </span>
       </div>
     `;
@@ -696,7 +696,7 @@ function renderClothesSystemView() {
           </div>
           <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${isAr ? 'الاشتراك مطلوب' : 'Subscription required'}</h3>
           <p class="text-slate-500 dark:text-slate-400 mb-6">${isAr ? 'نظام الملابس خدمة باشتراك. اشترك لتبدأ إدارة مخزونك وطلباتك.' : 'The Clothes System is a subscription service. Subscribe to start managing your stock and orders.'}</p>
-          <button onclick="showSubscriptionModal('clothes_system', 'clothes_system')" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg">
+          <button onclick="showSubscriptionModal('clothes_system', 'clothes_system')" class="clothes-primary px-8 py-3 rounded-xl font-bold shadow-lg">
             ${isAr ? 'اشترك الآن' : 'Subscribe now'}
           </button>
         </div>
@@ -880,10 +880,10 @@ function renderClothesProductsTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
-        ${isPackagedMobileApp() ? '' : `<button onclick="exportClothesProductsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
-          <i data-lucide="download" class="w-4 h-4"></i>
+        ${isPackagedMobileApp() ? '' : `<button type="button" onclick="exportClothesProductsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-sm font-bold text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center gap-2" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+          <i data-lucide="download" class="w-4 h-4"></i><span>${isAr ? 'تصدير CSV' : 'Export CSV'}</span>
         </button>`}
-        <button onclick="showClothesProductModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+        <button onclick="showClothesProductModal()" class="clothes-primary px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'إضافة منتج' : 'Add Product'}
         </button>
@@ -1244,7 +1244,7 @@ function renderClothesProductModal() {
       </div>
 
       <div class="flex gap-3 pt-2">
-        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+        <button type="submit" class="flex-1 clothes-primary px-6 py-3 rounded-xl font-bold shadow-lg">
           ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إضافة المنتج' : 'Add Product')}
         </button>
         <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
@@ -1598,9 +1598,11 @@ async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
   if (receiving) {
     // Asked once; after a yes every check above runs again on the shipment as it is then.
     if (!sure) {
-      if (await appConfirm(isAr
-        ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
-        : 'Confirm receiving this shipment? Quantities will be ADDED to stock.')) return setClothesShipmentStatus(shipmentId, newStatus, true);
+      // The question shows the numbers, before and after, for each colour and size (DESIGN.md T12).
+      const change = clothesShipmentStockChange(shipment, 1), name = shipment.ref ? (isAr ? `\u2068${shipment.ref}\u2069` : shipment.ref) : (isAr ? 'هذه الشحنة' : 'this shipment');
+      if (await appConfirm([isAr ? `استلام ${name} في المخزون؟` : `Receive ${name} into stock?`,
+        isAr ? `ستُضاف ${change.pieces} قطعة إلى المخزون.` : `${change.pieces} pieces will be added to stock.`, ...change.lines].join('\n'),
+      isAr ? `استلام ${change.pieces} قطعة` : `Receive ${change.pieces} pieces`)) return setClothesShipmentStatus(shipmentId, newStatus, true);
       updateClothesShipmentsFiltered(); return;
     }
   } else if (unreceiving) {
@@ -1622,9 +1624,11 @@ async function setClothesShipmentStatus(shipmentId, newStatus, sure) {
       return;
     }
     if (!sure) {
-      if (await appConfirm(isAr
-        ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
-        : 'Move this shipment back? Its quantities will be REMOVED from stock again.')) return setClothesShipmentStatus(shipmentId, newStatus, true);
+      const change = clothesShipmentStockChange(shipment, -1), name = shipment.ref ? (isAr ? `\u2068${shipment.ref}\u2069` : shipment.ref) : (isAr ? 'هذه الشحنة' : 'this shipment');
+      const back = clothesShipmentStatusMeta(newStatus);
+      if (await appConfirm([isAr ? `إرجاع ${name} إلى «${back.labelAr}»؟` : `Move ${name} back to ${back.label}?`,
+        isAr ? `ستُخصم ${change.pieces} قطعة من المخزون مرة أخرى.` : `${change.pieces} pieces will be taken out of stock again.`, ...change.lines].join('\n'),
+      isAr ? `خصم ${change.pieces} قطعة` : `Take out ${change.pieces} pieces`)) return setClothesShipmentStatus(shipmentId, newStatus, true);
       updateClothesShipmentsFiltered(); return;
     }
   }
@@ -1722,13 +1726,11 @@ function setClothesShipmentStatusFilter(value) {
   updateClothesShipmentsFiltered();
 }
 
-function getFilteredClothesShipments() {
+// The shipments the search leaves, whatever their status: what the status tabs count.
+function getSearchedClothesShipments() {
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const q = foldSearchText(_clothesShipmentSearch.trim());
   let items = getVisibleClothesShipments();
-  if (_clothesShipmentStatusFilter !== 'all') {
-    items = items.filter(s => s.status === _clothesShipmentStatusFilter);
-  }
   if (q) {
     items = items.filter(s => {
       if (foldSearchText(s.ref).includes(q)) return true;
@@ -1738,6 +1740,20 @@ function getFilteredClothesShipments() {
     });
   }
   return items;
+}
+
+function getFilteredClothesShipments() {
+  const items = getSearchedClothesShipments();
+  return _clothesShipmentStatusFilter === 'all' ? items : items.filter(s => s.status === _clothesShipmentStatusFilter);
+}
+
+// The status filter as tabs with counts (DESIGN.md 7.5): each says how many shipments it would list.
+function renderClothesShipmentTabs() {
+  const isAr = clothesIsAr(), searched = getSearchedClothesShipments();
+  return renderQuickTabs('clothes-shipment-tabs', isAr ? 'حالة الشحنة' : 'Shipment status', _clothesShipmentStatusFilter, [
+    ['all', "setClothesShipmentStatusFilter('all')", isAr ? 'الكل' : 'All', searched.length],
+    ...CLOTHES_SHIPMENT_STATUSES.map(st => [st.id, `setClothesShipmentStatusFilter('${st.id}')`, isAr ? st.labelAr : st.label, searched.filter(s => s.status === st.id).length])
+  ]);
 }
 
 function updateClothesShipmentsFiltered() {
@@ -1750,9 +1766,12 @@ function updateClothesShipmentsFiltered() {
   template.innerHTML = renderClothesShipmentsTab();
   const newStats = template.content.querySelector('#clothes-shipments-stats');
   const newGrid = template.content.querySelector('#clothes-shipments-grid');
+  const newTabs = template.content.querySelector('#clothes-shipment-tabs');
   const curStats = document.getElementById('clothes-shipments-stats');
   const curGrid = document.getElementById('clothes-shipments-grid');
+  const curTabs = document.getElementById('clothes-shipment-tabs');
   if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
+  if (newTabs && curTabs) curTabs.innerHTML = newTabs.innerHTML;
   if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
   if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
   else lucide.createIcons();
@@ -1814,18 +1833,15 @@ function renderClothesShipmentsTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
-        <select aria-label="${t('status')}" onchange="setClothesShipmentStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
-          <option value="all" ${_clothesShipmentStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
-          ${CLOTHES_SHIPMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesShipmentStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
-        </select>
-        ${isPackagedMobileApp() ? '' : `<button onclick="exportClothesShipmentsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
-          <i data-lucide="download" class="w-4 h-4"></i>
+        ${isPackagedMobileApp() ? '' : `<button type="button" onclick="exportClothesShipmentsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-sm font-bold text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center gap-2" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+          <i data-lucide="download" class="w-4 h-4"></i><span>${isAr ? 'تصدير CSV' : 'Export CSV'}</span>
         </button>`}
-        <button onclick="showClothesShipmentModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+        <button type="button" onclick="showClothesShipmentModal()" class="clothes-primary px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'إضافة شحنة' : 'Add Shipment'}
         </button>
       </div>
+      <div class="clothes-tabs">${renderClothesShipmentTabs()}</div>
 
       <div id="clothes-shipments-grid">
         ${shown.length === 0 ? `
@@ -1862,12 +1878,67 @@ function renderClothesShipmentsTab() {
   `;
 }
 
+// The stage, the next step as a button, "More" for the rest (DESIGN.md T12). Before, each card had a dropdown
+// that set any status at once and two icons with no words.
+const CLOTHES_SHIPMENT_NEXT = { Ordered: ['Shipped', 'Mark shipped', 'تم الشحن'], Shipped: ['Arrived', 'Mark arrived', 'وصلت الشحنة'], Arrived: ['Received', 'Receive into stock', 'استلام في المخزون'] };
+const CLOTHES_ORDER_NEXT = { New: ['On the way', 'Mark on the way', 'خرج للتوصيل'], 'On the way': ['Delivered', 'Mark delivered', 'تم التسليم'] };
+
+function clothesMenuLine(call, icon, words, danger) {
+  return `<button type="button" onclick="${call}"${danger ? ' class="frame-danger"' : ''}><i data-lucide="${icon}"></i><span>${words}</span></button>`;
+}
+
+function clothesMoreMenu(lines) {
+  return `<details class="frame-menu row-menu"><summary>${clothesIsAr() ? 'المزيد' : 'More'}<i data-lucide="chevron-down"></i></summary><div class="frame-menu-list">${lines.join('')}</div></details>`;
+}
+
+// Where a shipment stands among its four stages.
+function renderClothesShipmentStages(statusId) {
+  const isAr = clothesIsAr();
+  const at = Math.max(0, CLOTHES_SHIPMENT_STATUSES.findIndex(st => st.id === statusId));
+  const last = CLOTHES_SHIPMENT_STATUSES.length - 1;
+  const now = CLOTHES_SHIPMENT_STATUSES[at];
+  return `<ol class="clothes-stages" aria-label="${isAr ? `المرحلة ${at + 1} من ${last + 1}: ${now.labelAr}` : `Stage ${at + 1} of ${last + 1}: ${now.label}`}">${CLOTHES_SHIPMENT_STATUSES.map((st, index) => {
+    const done = index < at || at === last;
+    return `<li class="${done ? 'is-done' : ''}${index === at ? ' is-now' : ''}"${index === at ? ' aria-current="step"' : ''}><span>${done ? '<i data-lucide="check"></i>' : index + 1}</span>${isAr ? st.labelAr : st.label}</li>`;
+  }).join('')}</ol>`;
+}
+
+// What receiving (sign 1) or un-receiving (sign -1) does to the stock, one line for each colour and size:
+// "Kids Hoodie · Grey · 8Y: 0 → 20 pieces". pieces counts only what moves (a deleted product has no stock).
+function clothesShipmentStockChange(shipment, sign) {
+  const isAr = clothesIsAr(), arrow = isAr ? '←' : '→';
+  const piece = text => (isAr ? `\u2068${text}\u2069` : text);  // a name keeps its own direction inside an Arabic line
+  const need = new Map();
+  (Array.isArray(shipment?.lines) ? shipment.lines : []).forEach(line => {
+    const qty = Math.max(0, Math.floor(Number(line?.qty) || 0));
+    if (!qty) return;
+    const color = String(line?.color || '').trim(), size = String(line?.size || '').trim();
+    const key = `${line?.productId || ''}||${color.toLowerCase()}||${size.toLowerCase()}`;
+    const prev = need.get(key) || { productId: line?.productId || '', color, size, qty: 0 };
+    prev.qty += qty;
+    need.set(key, prev);
+  });
+  const lines = [];
+  let pieces = 0;
+  for (const { productId, color, size, qty } of need.values()) {
+    const product = getVisibleClothesProducts().find(p => p && p.id === productId);
+    const name = piece([clothesProductNameById(productId), color, size].filter(Boolean).join(' · '));
+    if (!product) { lines.push(`${name} ×${qty}`); continue; }
+    const at = findClothesVariantIndex(product, color, size);
+    const before = at >= 0 ? Math.max(0, Math.floor(Number(product.variants[at].qty) || 0)) : 0;
+    pieces += qty;
+    lines.push(`${name}: ${before} ${arrow} ${Math.max(0, before + sign * qty)} ${isAr ? 'قطعة' : 'pieces'}`);
+  }
+  return { pieces, lines: lines.length > 8 ? [...lines.slice(0, 8), isAr ? `و${lines.length - 8} أخرى` : `and ${lines.length - 8} more`] : lines };
+}
+
 function renderClothesShipmentCard(s) {
   const isAr = clothesIsAr();
   const meta = clothesShipmentStatusMeta(s.status);
   const totals = getClothesShipmentTotals(s);
   const lines = Array.isArray(s.lines) ? s.lines : [];
   const isReceived = s.status === 'Received';
+  const id = Security.escapeHtml(String(s.id));
 
   const lineSummary = lines.slice(0, 3).map(line => {
     const bits = [clothesProductNameById(line.productId)];
@@ -1876,9 +1947,19 @@ function renderClothesShipmentCard(s) {
     return `${Security.escapeHtml(bits.join(' '))} ×${Math.max(0, Math.floor(Number(line.qty) || 0))}`;
   }).join(isAr ? '، ' : ', ') + (lines.length > 3 ? (isAr ? ` +${lines.length - 3} أخرى` : ` +${lines.length - 3} more`) : '');
 
+  const next = CLOTHES_SHIPMENT_NEXT[meta.id];
+  const more = CLOTHES_SHIPMENT_STATUSES.filter(st => st.id !== meta.id && !(next && st.id === next[0]))
+    .map(st => clothesMenuLine(`setClothesShipmentStatus('${id}', '${st.id}')`, st.id === 'Received' ? 'package-check' : 'corner-up-left', isAr ? `الحالة: ${st.labelAr}` : `Set status: ${st.label}`));
+  if (isReceived) {
+    more.push(`<p class="clothes-lock"><i data-lucide="lock"></i><span>${isAr ? 'أرجع الحالة أولاً للتعديل أو الحذف.' : 'Move the status back to edit or delete.'}</span></p>`);
+  } else {
+    more.push(clothesMenuLine(`editClothesShipment('${id}')`, 'pencil', isAr ? 'تعديل' : 'Edit'));
+    more.push(clothesMenuLine(`deleteClothesShipment('${id}')`, 'trash-2', isAr ? 'حذف' : 'Delete', true));
+  }
+
   return `
-    <div class="glass-panel rounded-2xl p-5">
-      <div class="flex items-start justify-between gap-3">
+    <div class="glass-panel rounded-2xl p-5" data-clothes-shipment="${id}">
+      <div class="clothes-card-top">
         <div class="min-w-0">
           <h4 class="font-bold text-slate-800 dark:text-white truncate">
             ${Security.escapeHtml(s.ref || (isAr ? 'شحنة' : 'Shipment'))}
@@ -1889,6 +1970,8 @@ function renderClothesShipmentCard(s) {
           ${isAr ? meta.labelAr : meta.label}
         </span>
       </div>
+
+      ${renderClothesShipmentStages(meta.id)}
 
       <div class="mt-3 space-y-1.5 text-sm">
         <div class="flex justify-between gap-2">
@@ -1917,22 +2000,9 @@ function renderClothesShipmentCard(s) {
       ${lines.length ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">${lineSummary}</p>` : ''}
       ${s.note ? `<p class="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2">${Security.escapeHtml(s.note)}</p>` : ''}
 
-      <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
-        <select onchange="setClothesShipmentStatus('${s.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'تغيير الحالة' : 'Change status'}">
-          ${CLOTHES_SHIPMENT_STATUSES.map(st => `<option value="${st.id}" ${s.status === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
-        </select>
-        ${isReceived ? `
-          <span class="text-xs text-slate-400 dark:text-slate-500 px-2" title="${isAr ? 'أرجع الحالة أولاً للتعديل أو الحذف' : 'Move status back to edit or delete'}">
-            <i data-lucide="lock" class="w-4 h-4"></i>
-          </span>
-        ` : `
-          <button onclick="editClothesShipment('${s.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
-            <i data-lucide="pencil" class="w-4 h-4"></i>
-          </button>
-          <button onclick="deleteClothesShipment('${s.id}')" class="p-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'حذف' : 'Delete'}">
-            <i data-lucide="trash-2" class="w-4 h-4"></i>
-          </button>
-        `}
+      <div class="clothes-actions">
+        ${next ? `<button type="button" onclick="setClothesShipmentStatus('${id}', '${next[0]}')" class="management-button is-primary" data-clothes-next="${next[0]}">${isAr ? next[2] : next[1]}</button>` : ''}
+        ${clothesMoreMenu(more)}
       </div>
     </div>
   `;
@@ -2078,7 +2148,7 @@ function renderClothesShipmentModal() {
       </div>
 
       <div class="flex gap-3 pt-2">
-        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+        <button type="submit" class="flex-1 clothes-primary px-6 py-3 rounded-xl font-bold shadow-lg">
           ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إضافة الشحنة' : 'Add Shipment')}
         </button>
         <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
@@ -2513,7 +2583,10 @@ async function setClothesOrderPayment(orderId, newPaymentStatus, typed) {
   const isAr = clothesIsAr();
   if (!CLOTHES_PAYMENT_STATUSES.some(s => s.id === newPaymentStatus)) return;
   const order = getVisibleClothesOrders().find(o => o.id === orderId);
-  if (!order || order.paymentStatus === newPaymentStatus) return;
+  // An order that is already partly paid can take a new amount (from "Record payment"): before, it had to be
+  // set to Not Paid first, which wrote zero in between. Any other press on the state it already has does nothing.
+  const sameState = !!order && order.paymentStatus === newPaymentStatus;
+  if (!order || (sameState && !(newPaymentStatus === 'Partially Paid' && typed !== undefined))) return;
 
   const totals = getClothesOrderTotals(order);
   const updates = { paymentStatus: newPaymentStatus };
@@ -2534,6 +2607,7 @@ async function setClothesOrderPayment(orderId, newPaymentStatus, typed) {
       updateClothesOrdersFiltered();
       return;
     }
+    if (sameState && Math.abs(partial - (Number(order.amountPaidLYD) || 0)) < 0.005) { updateClothesOrdersFiltered(); return; }  // the same amount: nothing to save
     updates.amountPaidLYD = partial;
     if (totals.totalLYD > 0 && partial >= totals.totalLYD - 0.005) {  // the whole total is not a partial payment (the server promotes it too)
       updates.paymentStatus = 'Paid';
@@ -2572,6 +2646,30 @@ async function setClothesOrderPayment(orderId, newPaymentStatus, typed) {
     'success'
   );
   updateClothesOrdersFiltered();
+}
+
+// "Record payment": the amount paid so far is typed once, into a labelled box that says what the amount will do,
+// and the payment state follows it (DESIGN.md T12). The three states stay; setClothesOrderPayment() still writes them.
+async function recordClothesOrderPayment(orderId) {
+  if (!clothesCanUse()) return;
+  const isAr = clothesIsAr();
+  const order = getVisibleClothesOrders().find(o => o.id === orderId);
+  if (!order) return;
+  const totals = getClothesOrderTotals(order);
+  const number = order.orderNo ? ` ${codePiece(`#${String(Math.floor(Number(order.orderNo))).padStart(4, '0')}`)}` : '';
+  const answer = await appPrompt(isAr
+    ? `تسجيل دفعة${number}\nالإجمالي ${fmtLyd(totals.totalLYD)} · المدفوع حتى الآن ${fmtLyd(totals.paidLYD)}\nاكتب المبلغ المدفوع حتى الآن. الإجمالي كاملاً يجعل الطلب «مدفوع»، وصفر يجعله «غير مدفوع»، وما بينهما «مدفوع جزئياً».`
+    : `Record payment${number}\nTotal ${fmtLyd(totals.totalLYD)} · Paid so far ${fmtLyd(totals.paidLYD)}\nType the amount paid so far. The whole total makes the order Paid, zero makes it Not Paid, anything between makes it Partially Paid.`,
+  String((Number(order.amountPaidLYD) || 0).toFixed(2)), isAr ? 'حفظ الدفعة' : 'Save payment');
+  if (answer === null || !String(answer).trim()) return;
+  const amount = clothesParsePromptMoney(answer);  // NaN (refused) for text that is not a plain amount
+  if (!(amount >= 0) || amount > totals.totalLYD + 0.005) {
+    showNotification(isAr ? 'مبلغ غير صالح' : 'Invalid amount', isAr ? 'أدخل مبلغاً بين صفر والإجمالي.' : 'Enter an amount between zero and the total.', 'error');
+    return;
+  }
+  if (amount < 0.005) return setClothesOrderPayment(orderId, 'Not Paid');
+  if (totals.totalLYD > 0 && amount >= totals.totalLYD - 0.005) return setClothesOrderPayment(orderId, 'Paid');
+  return setClothesOrderPayment(orderId, 'Partially Paid', String(answer));
 }
 
 async function deleteClothesOrder(id, seen) {
@@ -2635,13 +2733,11 @@ function setClothesOrderPaymentFilter(value) {
   updateClothesOrdersFiltered();
 }
 
-function getFilteredClothesOrders() {
+// The orders the search and the payment filter leave, whatever their status: what the status tabs count.
+function getSearchedClothesOrders() {
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const q = foldSearchText(_clothesOrderSearch.trim());
   let items = getVisibleClothesOrders();
-  if (_clothesOrderStatusFilter !== 'all') {
-    items = items.filter(o => o.status === _clothesOrderStatusFilter);
-  }
   if (_clothesOrderPaymentFilter !== 'all') {
     items = items.filter(o => o.paymentStatus === _clothesOrderPaymentFilter);
   }
@@ -2661,6 +2757,19 @@ function getFilteredClothesOrders() {
   return items;
 }
 
+function getFilteredClothesOrders() {
+  const items = getSearchedClothesOrders();
+  return _clothesOrderStatusFilter === 'all' ? items : items.filter(o => o.status === _clothesOrderStatusFilter);
+}
+
+function renderClothesOrderTabs() {
+  const isAr = clothesIsAr(), searched = getSearchedClothesOrders();
+  return renderQuickTabs('clothes-order-tabs', isAr ? 'حالة الطلب' : 'Order status', _clothesOrderStatusFilter, [
+    ['all', "setClothesOrderStatusFilter('all')", isAr ? 'الكل' : 'All', searched.length],
+    ...CLOTHES_ORDER_STATUSES.map(st => [st.id, `setClothesOrderStatusFilter('${st.id}')`, isAr ? st.labelAr : st.label, searched.filter(o => o.status === st.id).length])
+  ]);
+}
+
 function updateClothesOrdersFiltered() {
   const container = document.querySelector('main');
   if (!container || state.currentView !== 'clothes-system' || _clothesActiveTab !== 'orders') {
@@ -2671,9 +2780,12 @@ function updateClothesOrdersFiltered() {
   template.innerHTML = renderClothesOrdersTab();
   const newStats = template.content.querySelector('#clothes-orders-stats');
   const newGrid = template.content.querySelector('#clothes-orders-grid');
+  const newTabs = template.content.querySelector('#clothes-order-tabs');
   const curStats = document.getElementById('clothes-orders-stats');
   const curGrid = document.getElementById('clothes-orders-grid');
+  const curTabs = document.getElementById('clothes-order-tabs');
   if (newStats && curStats) curStats.innerHTML = newStats.innerHTML;
+  if (newTabs && curTabs) curTabs.innerHTML = newTabs.innerHTML;
   if (newGrid && curGrid) curGrid.innerHTML = newGrid.innerHTML;
   if (typeof IconQueue !== 'undefined') IconQueue.schedule(container);
   else lucide.createIcons();
@@ -2739,22 +2851,19 @@ function renderClothesOrdersTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
-        <select aria-label="${t('status')}" onchange="setClothesOrderStatusFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
-          <option value="all" ${_clothesOrderStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
-          ${CLOTHES_ORDER_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
-        </select>
         <select aria-label="${isAr ? 'الدفع' : 'Payment'}" onchange="setClothesOrderPaymentFilter(this.value)" class="glass-input px-4 py-2.5 rounded-xl">
           <option value="all" ${_clothesOrderPaymentFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل حالات الدفع' : 'All payments'}</option>
           ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderPaymentFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>
-        ${isPackagedMobileApp() ? '' : `<button onclick="exportClothesOrdersCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
-          <i data-lucide="download" class="w-4 h-4"></i>
+        ${isPackagedMobileApp() ? '' : `<button type="button" onclick="exportClothesOrdersCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-sm font-bold text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center gap-2" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+          <i data-lucide="download" class="w-4 h-4"></i><span>${isAr ? 'تصدير CSV' : 'Export CSV'}</span>
         </button>`}
-        <button onclick="showClothesOrderModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+        <button type="button" onclick="showClothesOrderModal()" class="clothes-primary px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'طلب جديد' : 'New Order'}
         </button>
       </div>
+      <div class="clothes-tabs">${renderClothesOrderTabs()}</div>
 
       <div id="clothes-orders-grid">
         ${shown.length === 0 ? `
@@ -2798,6 +2907,20 @@ function renderClothesOrderCard(o) {
   const totals = getClothesOrderTotals(o);
   const lines = Array.isArray(o.lines) ? o.lines : [];
   const editable = clothesOrderIsActiveStatus(o.status);
+  const id = Security.escapeHtml(String(o.id));
+  // One main button says the next step; "Record payment" while money is still owed; "More" keeps every other
+  // status, both ends of the payment, the slip, Edit and Delete.
+  const next = CLOTHES_ORDER_NEXT[meta.id];
+  const owes = o.paymentStatus !== 'Paid';
+  const payButton = owes && editable;
+  const more = CLOTHES_ORDER_STATUSES.filter(st => st.id !== meta.id && !(next && st.id === next[0]))
+    .map(st => clothesMenuLine(`setClothesOrderStatus('${id}', '${st.id}')`, st.active ? 'truck' : 'corner-up-left', isAr ? `الحالة: ${st.labelAr}` : `Set status: ${st.label}`));
+  if (!payButton) more.push(clothesMenuLine(`recordClothesOrderPayment('${id}')`, 'banknote', isAr ? 'تسجيل دفعة' : 'Record payment'));
+  if (owes) more.push(clothesMenuLine(`setClothesOrderPayment('${id}', 'Paid')`, 'circle-check', isAr ? 'مدفوع بالكامل' : 'Paid in full'));
+  if (o.paymentStatus !== 'Not Paid') more.push(clothesMenuLine(`setClothesOrderPayment('${id}', 'Not Paid')`, 'circle-x', isAr ? 'غير مدفوع' : 'Not paid'));
+  if (!isPackagedMobileApp()) more.push(clothesMenuLine(`printClothesOrderSlip('${id}')`, 'printer', isAr ? 'طباعة إيصال' : 'Print slip'));
+  if (editable) more.push(clothesMenuLine(`editClothesOrder('${id}')`, 'pencil', isAr ? 'تعديل' : 'Edit'));
+  more.push(clothesMenuLine(`deleteClothesOrder('${id}')`, 'trash-2', isAr ? 'حذف' : 'Delete', true));
 
   const lineSummary = lines.slice(0, 3).map(line => {
     const bits = [clothesProductNameById(line.productId)];
@@ -2807,7 +2930,7 @@ function renderClothesOrderCard(o) {
   }).join(isAr ? '، ' : ', ') + (lines.length > 3 ? (isAr ? ` +${lines.length - 3} أخرى` : ` +${lines.length - 3} more`) : '');
 
   return `
-    <div class="glass-panel rounded-2xl p-5">
+    <div class="glass-panel rounded-2xl p-5" data-clothes-order="${id}">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <h4 class="font-bold text-slate-800 dark:text-white truncate">
@@ -2861,24 +2984,10 @@ function renderClothesOrderCard(o) {
       ${lines.length ? `<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">${lineSummary}</p>` : ''}
       ${o.note ? `<p class="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2">${Security.escapeHtml(o.note)}</p>` : ''}
 
-      <div class="flex items-center gap-2 mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
-        <select onchange="setClothesOrderStatus('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة التوصيل' : 'Delivery status'}">
-          ${CLOTHES_ORDER_STATUSES.map(st => `<option value="${st.id}" ${o.status === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
-        </select>
-        <select onchange="setClothesOrderPayment('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة الدفع' : 'Payment status'}">
-          ${CLOTHES_PAYMENT_STATUSES.map(st => `<option value="${st.id}" ${o.paymentStatus === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
-        </select>
-        ${isPackagedMobileApp() ? '' : `<button onclick="printClothesOrderSlip('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'طباعة إيصال' : 'Print slip'}">
-          <i data-lucide="printer" class="w-4 h-4"></i>
-        </button>`}
-        ${editable ? `
-          <button onclick="editClothesOrder('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
-            <i data-lucide="pencil" class="w-4 h-4"></i>
-          </button>
-        ` : ''}
-        <button onclick="deleteClothesOrder('${o.id}')" class="p-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20" title="${isAr ? 'حذف' : 'Delete'}">
-          <i data-lucide="trash-2" class="w-4 h-4"></i>
-        </button>
+      <div class="clothes-actions">
+        ${next ? `<button type="button" onclick="setClothesOrderStatus('${id}', '${next[0]}')" class="management-button is-primary" data-clothes-next="${next[0]}">${isAr ? next[2] : next[1]}</button>` : ''}
+        ${payButton ? `<button type="button" onclick="recordClothesOrderPayment('${id}')" class="management-button${next ? '' : ' is-primary'}" data-clothes-pay>${isAr ? 'تسجيل دفعة' : 'Record payment'}</button>` : ''}
+        ${clothesMoreMenu(more)}
       </div>
     </div>
   `;
@@ -3008,7 +3117,7 @@ function renderClothesOrderModal() {
       </div>
 
       <div class="flex gap-3 pt-2">
-        <button type="submit" class="flex-1 btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg">
+        <button type="submit" class="flex-1 clothes-primary px-6 py-3 rounded-xl font-bold shadow-lg">
           ${isEdit ? (isAr ? 'حفظ التعديلات' : 'Save Changes') : (isAr ? 'إنشاء الطلب' : 'Create Order')}
         </button>
         <button type="button" onclick="closeModal()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300 dark:hover:bg-slate-600">
