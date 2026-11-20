@@ -787,3 +787,11 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
 .notification-action:hover { border-color: var(--ui-accent); background: var(--ui-accent-soft); }
 .notification-action:focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 2px; }
 
+/* Phones: a page header that carries the "paused" note stacks: the title and its count first, then the actions
+   at full width. Beside the title the note took the whole row, and the count under the title was squeezed to
+   one letter per line (a fault that came in with the note in Milestone 4; found by a scan in round 3). */
+@media (max-width: 900px) {
+  .ui-workspace .page-header.has-note { grid-template-columns: minmax(0, 1fr); }
+  .ui-workspace .page-header.has-note > div { justify-self: stretch; min-width: 0; }
+}
+

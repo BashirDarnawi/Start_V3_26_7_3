@@ -2504,6 +2504,53 @@ async function main() {
     assert.ok(/\.notification-action \{[^}]*min-height: 44px;/.test(css), 'the button is full height for a finger');
   });
 
+  await test('round 3 Pages on a phone: a header that carries the "paused" note stacks, so the title and its count keep their own row (before: the note took the row and "5 Facebook pages" was drawn one letter per line)', async () => {
+    const views = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+    assert.ok(views.includes('<div class="page-header${PAGE_MANUAL_CREATE_PAUSED ? \' has-note\' : \'\'} flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">'), 'the Pages header says when it carries the note');
+    assert.equal((views.match(/class="workspace-paused"/g) || []).length, 1, 'the note is in one header only; another header that gets one needs the same mark');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
+    const phone = css.slice(css.lastIndexOf('@media (max-width: 900px) {', css.indexOf('.page-header.has-note')));
+    assert.ok(css.indexOf('.page-header.has-note') > 0 && phone.startsWith('@media (max-width: 900px) {\n  .ui-workspace .page-header.has-note { grid-template-columns: minmax(0, 1fr); }'), 'on phone and tablet widths the header is one column');
+    // The same width as the rule it corrects (style.css puts the title and the actions side by side up to 900 px).
+    const style = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+    assert.ok(/@media \(max-width: 900px\) \{[^@]*\.ui-workspace \.page-header \{ display: grid; grid-template-columns: minmax\(0, 1fr\) auto;/.test(style));
+  });
+
+  await test('round 3 Escape: the key closes the details panel beside a list only when nothing lies over the page and the focus is not in a field; the command palette, a dialog and an open menu keep their turn before it', async () => {
+    // The app's key handlers are registered on the page as it loads: collect them from the real source.
+    const routing = fs.readFileSync(path.join(__dirname, '..', 'src', '11-routing-cloud.js'), 'utf8');
+    const start = routing.indexOf('// Keyboard shortcut handler\ndocument.addEventListener(\'keydown\', (e) => {');
+    assert.ok(start > 0, 'the keyboard handler is where this check expects it');
+    const code = routing.slice(start, routing.indexOf('});', start) + 3);
+    const press = ({ palette = false, modal = '', menu = false, panel = 'visible', focus = 'BUTTON', over = '' }) => {
+      const did = [];
+      const closeButton = { getClientRects: () => (panel === 'visible' ? [1] : []), click: () => did.push('panel closed') };
+      const menuNode = { open: true, firstElementChild: { focus: () => did.push('menu button focused') } };
+      const document = { activeElement: focus ? { tagName: focus } : null, handlers: [],
+        addEventListener(name, fn) { if (name === 'keydown') this.handlers.push(fn); },
+        querySelector(selector) {
+          if (selector === '.frame-menu[open]') return menu ? menuNode : null;
+          if (selector === '.shell-panel-close') return panel === 'none' ? null : closeButton;
+          if (selector === '.mobile-dialog-overlay, #app-ask, [role="dialog"]') return over ? {} : null;
+          throw new Error(`unexpected selector ${selector}`);
+        } };
+      const state = { commandPaletteOpen: palette, activeModal: modal };
+      vm.runInNewContext(code, { document, state, toggleCommandPalette: () => did.push('palette closed'), closeModal: () => did.push('dialog closed') });
+      document.handlers[0]({ key: 'Escape', preventDefault() {} });
+      if (menu && !menuNode.open) did.push('menu closed');
+      return did.join(', ');
+    };
+    assert.equal(press({}), 'panel closed');
+    assert.equal(press({ focus: '' }), 'panel closed', 'nothing has the focus');
+    assert.equal(press({ panel: 'hidden' }), '', 'under 1280 px the Close button is not drawn: the details stay');
+    assert.equal(press({ panel: 'none' }), '');
+    for (const tag of ['INPUT', 'TEXTAREA', 'SELECT']) assert.equal(press({ focus: tag }), '', `from a ${tag} the key belongs to the field`);
+    assert.equal(press({ over: 'a dialog over the page' }), '', 'never under a dialog that lies over the page');
+    assert.equal(press({ palette: true }), 'palette closed');
+    assert.equal(press({ modal: 'receipt' }), 'dialog closed');
+    assert.equal(press({ menu: true }), 'menu button focused, menu closed', 'an open menu first; the panel waits for the next press');
+  });
+
   await test('round 3 server faults: an unexpected failure on the server (HTTP 500) is said in ordinary words in the screen language, with the reference the server logged it under (before: "Internal error (err_...). Please contact support.", in English on an Arabic screen); every other answer of the server keeps its own words', async () => {
     const ask = async ({ status = 500, body, language = 'en', requestId = 'k3f9x2ab-1c', statusText = '' }) => {
       const { sandbox, state } = loadBrowserSource();

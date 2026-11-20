@@ -852,6 +852,13 @@ document.addEventListener('keydown', (e) => {
     } else if (menu) {
       menu.open = false;
       menu.firstElementChild.focus();
+    } else {
+      // Then the details panel beside a list (wide screens): its own Close button is pressed, which hands the
+      // focus back to the record's row. Not while a dialog is open over the page, and not from inside a
+      // field, where Escape belongs to the field.
+      const close = document.querySelector('.shell-panel-close');
+      const field = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
+      if (close && close.getClientRects().length && !field && !document.querySelector('.mobile-dialog-overlay, #app-ask, [role="dialog"]')) close.click();
     }
   }
 });

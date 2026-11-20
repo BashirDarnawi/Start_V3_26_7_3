@@ -3378,7 +3378,7 @@ function renderPagesView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="page-header${PAGE_MANUAL_CREATE_PAUSED ? ' has-note' : ''} flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
           <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${hasPageFilters ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${hasPageFilters ? ` of ${allPages.length}` : ''} Facebook pages`}</p>

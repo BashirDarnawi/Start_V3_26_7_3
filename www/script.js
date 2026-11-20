@@ -15169,6 +15169,13 @@ document.addEventListener('keydown', (e) => {
     } else if (menu) {
       menu.open = false;
       menu.firstElementChild.focus();
+    } else {
+      // Then the details panel beside a list (wide screens): its own Close button is pressed, which hands the
+      // focus back to the record's row. Not while a dialog is open over the page, and not from inside a
+      // field, where Escape belongs to the field.
+      const close = document.querySelector('.shell-panel-close');
+      const field = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
+      if (close && close.getClientRects().length && !field && !document.querySelector('.mobile-dialog-overlay, #app-ask, [role="dialog"]')) close.click();
     }
   }
 });
@@ -18779,7 +18786,7 @@ function renderPagesView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
-      <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="page-header${PAGE_MANUAL_CREATE_PAUSED ? ' has-note' : ''} flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
           <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${hasPageFilters ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${hasPageFilters ? ` of ${allPages.length}` : ''} Facebook pages`}</p>

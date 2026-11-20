@@ -335,6 +335,61 @@ test('from 1280 px a record opens its details in a panel beside the list, one at
   expect(errors).toEqual([]);
 });
 
+// Round 3: the Escape key closes the details panel, after anything that lies over the page has had its turn.
+test('Escape closes the details panel beside a list and hands the focus back to its row; a field, an open menu and a question take the key first', async ({ page, browserName }, testInfo) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  const [first] = await seedCustomers(page, `esc-${testInfo.project.name}-${Date.now()}`);
+  await page.evaluate(() => navigateTo('customers'));
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/customers');
+  const row = page.locator(`[data-shell-row="customers"][data-shell-row-id="${first}"]`);
+  const toggle = row.locator('> button');
+  const panel = row.locator('.shell-row-body > .glass-panel');
+  const openIt = async () => { await toggle.click(); await expect(panel).toBeVisible(); };
+
+  // The key alone: the panel closes and the focus is on the record's own button.
+  await openIt();
+  await page.keyboard.press('Escape');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(panel).toBeHidden();
+  await expect(toggle).toBeFocused();
+
+  // From inside a field the key belongs to the field: the panel stays.
+  await openIt();
+  await page.locator('.smart-search-field input').first().focus();
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeVisible();
+
+  // An open menu of the frame closes first; the next press closes the panel.
+  const account = page.locator('#app-sidebar .frame-menu').last();
+  await account.locator('> summary').click();
+  await expect(account).toHaveAttribute('open', '');
+  await page.keyboard.press('Escape');
+  await expect(account).not.toHaveAttribute('open', '');
+  await expect(panel).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeHidden();
+
+  // A question over the page takes the key (its answer is "no"); the panel under it stays.
+  await openIt();
+  await page.evaluate(() => { window.__escAnswer = 'pending'; appConfirm('Leave this open?\nA test question.', 'go').then(answer => { window.__escAnswer = answer; }); });
+  await expect(page.locator('#app-ask')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#app-ask')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__escAnswer)).toBe(false);
+  await expect(panel).toBeVisible();
+
+  // Under 1280 px the details open in place and have no Close button: the key leaves them alone.
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await toggle.focus();
+  await page.keyboard.press('Escape');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  expect(errors).toEqual([]);
+});
+
 test('Home starts once: no second page title, and the figures follow as a section', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);

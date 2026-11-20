@@ -88,3 +88,36 @@ test('on a phone the Filters button shares a row with the search and the first c
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
   expect(errors).toEqual([]);
 });
+
+// A fault that came in with the "paused" note in Milestone 4 and was found by a scan in round 3: on a phone
+// the note sat beside the title and took the whole row, so the count under the title ("5 Facebook pages")
+// was squeezed to one letter per line and the list started a screen lower.
+test('on a phone the Pages title and its count keep their own row above the actions, in English and Arabic', async ({ page, isMobile }) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  if (!isMobile) await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  await page.evaluate(() => navigateTo('pages'));
+  await expect.poll(() => page.evaluate(() => state.currentView)).toBe('pages');
+  for (const language of ['en', 'ar']) {
+    await page.evaluate(lang => { if (state.language !== lang) toggleLanguage(); }, language);
+    await expect(page.locator('html')).toHaveAttribute('dir', language === 'ar' ? 'rtl' : 'ltr');
+    const count = page.locator('#pages-count');
+    await expect(count).toBeVisible();
+    await expect(count).toHaveText(language === 'ar' ? /^\d+ صفحة فيسبوك$/ : /^\d+ Facebook pages$/);
+    const facts = await page.evaluate(() => {
+      const line = document.getElementById('pages-count'), header = line.closest('.page-header');
+      const title = header.querySelector('h1').getBoundingClientRect(), actions = header.lastElementChild.getBoundingClientRect(), box = line.getBoundingClientRect();
+      return { lines: Math.round(box.height / parseFloat(getComputedStyle(line).lineHeight)), countBottom: Math.round(box.bottom), actionsTop: Math.round(actions.top),
+        titleWidth: Math.round(title.width), actionsWidth: Math.round(actions.width), headerWidth: Math.round(header.getBoundingClientRect().width), header: Math.round(header.getBoundingClientRect().height) };
+    });
+    expect(facts.lines, `${language}: the count is one line`).toBe(1);
+    expect(facts.actionsTop, `${language}: the actions start under the count`).toBeGreaterThanOrEqual(facts.countBottom);
+    expect(facts.actionsWidth, `${language}: the actions use the full width`).toBeGreaterThanOrEqual(facts.headerWidth - 2);
+    expect(facts.header, `${language}: the header is no taller than a third of the screen`).toBeLessThan(Math.round(page.viewportSize().height / 3));
+    await expect(page.locator('.page-header .workspace-paused')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+  }
+  await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
+  expect(errors).toEqual([]);
+});
