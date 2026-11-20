@@ -31,7 +31,7 @@
 // it and shows its card until the screen registers itself. Two guarded hooks reach 15n: the bell's
 // badge (studioInboxBadge) and the classic 'help' tab (studioHelpClassicTab, through
 // studioV2ClassicTabKnown).
-// Classic view (P6-06, PLAN.md §12.2(e)): a "Classic view" link in the v2 header (customers and staff)
+// Classic view (P6-06, PLAN.md §12.2(e)): "Classic view" in Account (customers) and in the Team desk's More
 // keeps THIS TAB on the classic screens until "New studio" is chosen in the classic header (15c draws
 // renderStudioV2ClassicSwitch, guarded). The choice lives in sessionStorage (this tab, gone with it)
 // and in this page's memory; it never reaches the server, and it means nothing once /me stops saying
@@ -141,7 +141,7 @@ function studioV2ClassicChosen() {
   try { return window.sessionStorage.getItem(STUDIO_V2_CLASSIC_KEY) === uid; } catch (_) { return false; }
 }
 
-// "Classic view" (true) in the v2 header, "New studio" (false) in the classic header. Nothing is sent
+// "Classic view" (true) in Account or the desk's More, "New studio" (false) in the classic header. Nothing is sent
 // to the server: the rollout record is untouched, and the choice ends with the tab.
 function studioV2ChooseClassic(classic) {
   const uid = studioMeUserId();
@@ -155,11 +155,15 @@ function studioV2ChooseClassic(classic) {
   return on;
 }
 
-// The v2 header's link (customers and staff), '' outside the v2 layout.
-function renderStudioV2ClassicLink() {
+// The way to the classic view, '' outside the v2 layout: a row of Account (customers) and of the Team desk's
+// More. Until redesign round 4 it was a link on the kicker line of every header (proposal S12).
+function renderStudioV2ClassicRow() {
   if (!studioV2Frame()) return '';
-  const label = adsStudioText('Classic view', 'العرض القديم');
-  return `<button type="button" data-testid="studio-classic-view" class="studio-v2-header-link" onclick="studioV2ChooseClassic(true)">${studioEsc(label)}</button>`;
+  return `
+            <button type="button" class="studio-v2-row" data-testid="studio-classic-view" onclick="studioV2ChooseClassic(true)">
+              ${studioV2Icon('history')}
+              <span class="studio-v2-row-label">${studioEsc(adsStudioText('Classic view', 'العرض القديم'))}</span>
+            </button>`;
 }
 
 // The classic header's way back (15c draws it, guarded): only while this tab chose the classic view
@@ -796,13 +800,11 @@ function renderStudioV2Header(route, frame) {
     // Staff here have the Team desk off: its button opens their classic review tab.
     actions = (studioV2IsStaff() ? headButton('review') : '') + headButton('inbox') + headButton('account');
   }
-  // The "Classic view" link (P6-06) sits on the kicker line, in every screen of both frames.
-  const classicLink = renderStudioV2ClassicLink();
   return `
       <header class="studio-v2-header">
         ${back}
         <div class="studio-v2-heading">
-          ${kicker || classicLink ? `<div class="studio-v2-heading-meta">${kicker ? `<p class="studio-v2-kicker">${studioEsc(kicker)}</p>` : ''}${classicLink}</div>` : ''}
+          ${kicker ? `<p class="studio-v2-kicker">${studioEsc(kicker)}</p>` : ''}
           <h1 id="studio-v2-title" class="studio-v2-title">${studioEsc(title)}</h1>
         </div>
         ${actions ? `<div class="studio-v2-header-actions">${actions}</div>` : ''}
@@ -835,7 +837,7 @@ function renderStudioV2Basics() {
   return `
           <div class="studio-v2-list" data-testid="studio-basics">
             ${row('toggleLanguage()', 'languages', adsStudioText('Language', 'اللغة'), adsStudioIsAr() ? 'العربية' : 'English')}
-            ${row('toggleTheme()', dark ? 'moon' : 'sun', adsStudioText('Theme', 'المظهر'), dark ? adsStudioText('Dark', 'داكن') : adsStudioText('Light', 'فاتح'))}
+            ${row('toggleTheme()', dark ? 'moon' : 'sun', adsStudioText('Theme', 'المظهر'), dark ? adsStudioText('Dark', 'داكن') : adsStudioText('Light', 'فاتح'))}${renderStudioV2ClassicRow()}
             ${row('handleLogout()', 'log-out', adsStudioText('Log out', 'تسجيل الخروج'), '', ' is-danger')}
           </div>`;
 }

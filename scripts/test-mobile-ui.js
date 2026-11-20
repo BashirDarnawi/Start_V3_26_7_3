@@ -8922,6 +8922,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 
   // ---- P6-06: the Classic view link and the way back
   meReply(customerMe);
+  openAt('/studio?tab=account');  // round 4: the way to the classic view is a row of Account, no longer a link in every header
+  const accountPage = html();
+  const accountPageAr = String(inLanguage('ar', 'render(); __html'));
   openAt('/studio?tab=wallet');
   const v2Page = html();
   const v2PageAr = String(inLanguage('ar', 'render(); __html'));
@@ -8958,6 +8961,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   meReply(staffMe);
   openAt('/studio?tab=review&section=health');
   const staffPage = html();
+  openAt('/studio?tab=review&section=more');  // round 4: on the Team desk the row is in More
+  const staffMore = html();
   run('studioV2ChooseClassic(true)');
   const staffClassic = { page: html(), tab: run('_adsStudioActiveTab'), switchOn: String(run('renderStudioV2ClassicSwitch()')) };
   run('studioV2ChooseClassic(false)');
@@ -8990,8 +8995,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const chooseFn = shellSrc.slice(shellSrc.indexOf('function studioV2ChooseClassic('), shellSrc.indexOf('\n}\n', shellSrc.indexOf('function studioV2ChooseClassic(')));
   const classicCases = [
     !loadError,
-    v2Page.includes('data-testid="studio-v2-frame"') && v2Page.includes('<button type="button" data-testid="studio-classic-view" class="studio-v2-header-link" onclick="studioV2ChooseClassic(true)">Classic view</button>')
-      && v2PageAr.includes('data-testid="studio-classic-view"') && v2PageAr.includes('>العرض القديم<'),
+    v2Page.includes('data-testid="studio-v2-frame"') && !v2Page.includes('studio-classic-view') && !v2Page.includes('Classic view') && !v2PageAr.includes('العرض القديم')
+      && /<div class="studio-v2-list" data-testid="studio-account-settings">(?:(?!<\/div>)[\s\S])*<button type="button" class="studio-v2-row" data-testid="studio-classic-view" onclick="studioV2ChooseClassic\(true\)">\s*<i data-lucide="history"[^>]*><\/i>\s*<span class="studio-v2-row-label">Classic view<\/span>\s*<\/button>/.test(accountPage)
+      && (accountPage.match(/data-testid="studio-classic-view"/g) || []).length === 1 && accountPageAr.includes('<span class="studio-v2-row-label">العرض القديم</span>')
+      && !/<header class="studio-v2-header">(?:(?!<\/header>)[\s\S])*studio-classic-view/.test(accountPage),
     chose === true && classicPage.startsWith('<classic>') && !classicPage.includes('studio-v2-frame') && classicState.key === 'u1' && classicState.chosen === true
       && classicState.frame === '' && classicState.said === 'customer' && classicState.shown === 'classic' && classicState.tab === 'dashboard',  // wallet is not a classic tab
     classicPage.includes('data-testid="studio-new-studio"') && classicPage.includes('onclick="studioV2ChooseClassic(false)"') && classicPage.includes('>New studio<')
@@ -9002,7 +9009,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     answered.page.startsWith('<classic>') && answered.page.includes('data-testid="studio-new-studio"') && answered.page.includes('>New studio<') && answered.shown === 'classic' && answered.meCalls === 0 && answered.tab === 'campaigns',
     failPending.page.startsWith('<classic>') && !failPending.page.includes('studio-new-studio') && failPending.shown === 'classic-pending'
       && failed.page === 'not drawn again' && failed.shown === 'classic-pending' && failed.meCalls === 0 && failed.switchOff === '' && failed.held === 0,
-    staffPage.includes('data-testid="studio-staff-frame"') && staffPage.includes('data-testid="studio-classic-view"') && staffClassic.page.startsWith('<classic>') && staffClassic.tab === 'review'
+    staffPage.includes('data-testid="studio-staff-frame"') && !staffPage.includes('studio-classic-view')
+      && /<div class="studio-v2-list" data-testid="studio-basics">(?:(?!<\/div>)[\s\S])*data-testid="studio-classic-view" onclick="studioV2ChooseClassic\(true\)"/.test(staffMore) && (staffMore.match(/data-testid="studio-classic-view"/g) || []).length === 1
+      && staffClassic.page.startsWith('<classic>') && staffClassic.tab === 'review'
       && staffClassic.switchOn.includes('data-testid="studio-new-studio"') && staffBack.includes('data-testid="studio-staff-frame"'),
     classicMeSwitch === '' && classicMePage.startsWith('<classic>') && !classicMePage.includes('studio-new-studio'),
     otherUser.chosen === false && otherUser.page.includes('data-testid="studio-v2-frame"'),
@@ -9010,10 +9019,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     hookAt > 0 && hookAt < adsStudio.indexOf('onclick="toggleLanguage()"') && hookAt > adsStudio.indexOf('function renderAdsStudioHeader()'),
     shellSrc.includes("const STUDIO_V2_CLASSIC_KEY = 'albayan.studio.v2.classic';") && chooseFn.includes('try {') && chooseFn.includes('window.sessionStorage.setItem(STUDIO_V2_CLASSIC_KEY, uid)')
       && !/apiJson|fetch\(|studioApi/.test(chooseFn) && shellSrc.includes('if (studioV2ClassicChosen()) return \'\';'),
-    workspaceCss.includes('.studio-v2-header-link {') && /\.studio-v2-header-link \{[^}]*min-height: 44px/.test(workspaceCss) && workspaceCss.includes('.studio-v2-heading-meta {'),
+    !workspaceCss.includes('.studio-v2-header-link') && !workspaceCss.includes('.studio-v2-heading-meta') && /\.studio-v2-row \{[^}]*min-height: (?:4[4-9]|[5-9]\d)px/.test(workspaceCss),
     ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-classic-view"') && built.includes('function renderStudioV2ClassicSwitch()') && built.includes("'classic-pending'"); })
   ];
-  check('Classic view (P6-06): a "Classic view / العرض القديم" link in the v2 header of both frames keeps this tab classic (sessionStorage, memory when storage is blocked; the wallet address lands on the Overview) until "New studio / الاستوديو الجديد" in the classic header, drawn only while /me says v2; a /me re-read and a reload keep the choice, another user does not inherit it, nothing is written to the server; a reload drawn before /me answers gets "New studio" from the answer itself (classic-pending), and a failed answer draws nothing again',
+  check('Classic view (P6-06; round 4: moved out of every header): a "Classic view / العرض القديم" row in Account (customers) and in the Team desk\'s More keeps this tab classic (sessionStorage, memory when storage is blocked; the wallet address lands on the Overview) until "New studio / الاستوديو الجديد" in the classic header, drawn only while /me says v2; a /me re-read and a reload keep the choice, another user does not inherit it, nothing is written to the server; a reload drawn before /me answers gets "New studio" from the answer itself (classic-pending), and a failed answer draws nothing again',
     !loadError && classicCases.every(Boolean), loadError || `cases ${failedCases(classicCases)} state ${JSON.stringify(classicState)} back ${JSON.stringify(backState)} pending ${JSON.stringify({ shown: pending.shown, wanted: pending.wanted, answered: answered.shown, failed: failed.shown })}`);
 
   // ---- P5-07: the customer terms from Account, Help (v2 and classic) and the login help line

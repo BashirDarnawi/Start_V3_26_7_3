@@ -1296,7 +1296,7 @@ function renderStudioAccountScreen() {
             </div>
             <div class="studio-v2-list" data-testid="studio-account-settings">
               ${row('toggleLanguage()', 'languages', adsStudioText('Language', 'اللغة'), adsStudioIsAr() ? 'العربية' : 'English', 'studio-account-language')}
-              ${row('toggleTheme()', dark ? 'moon' : 'sun', adsStudioText('Theme', 'المظهر'), dark ? adsStudioText('Dark', 'داكن') : adsStudioText('Light', 'فاتح'), 'studio-account-theme')}
+              ${row('toggleTheme()', dark ? 'moon' : 'sun', adsStudioText('Theme', 'المظهر'), dark ? adsStudioText('Dark', 'داكن') : adsStudioText('Light', 'فاتح'), 'studio-account-theme')}${typeof renderStudioV2ClassicRow === 'function' ? renderStudioV2ClassicRow() : ''}
             </div>
             ${renderStudioAccountWhatsapp()}
             <div class="studio-v2-list">
