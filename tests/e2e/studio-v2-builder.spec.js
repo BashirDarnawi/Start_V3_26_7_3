@@ -303,6 +303,10 @@ test.describe('Albayan Studio v2 request builder (pilot)', () => {
     // 3 Content: Next names what is missing; each problem clears when fixed.
     await page.getByTestId('studio-builder-next').click();
     for (const field of ['text', 'photos', 'destination']) await expect(page.getByTestId(`studio-builder-error-${field}`)).toBeVisible();
+    // The builder then puts the cursor in the first field with a problem, 180 ms after it has drawn them. Wait for
+    // that before typing anywhere else: this test reaches the third field within those 180 ms (a person cannot),
+    // and now and then what it typed there was sent to the first field instead.
+    await expect(page.locator('#studio-b-text')).toBeFocused();
     await page.locator('#studio-b-text').fill('Fresh bread every morning — order before 9.');
     await expect(page.getByTestId('studio-builder-error-text')).toBeHidden();
     await page.locator('#ads-studio-image-input').setInputFiles({ name: 'bread.png', mimeType: 'image/png', buffer: makePng() });

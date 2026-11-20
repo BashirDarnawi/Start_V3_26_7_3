@@ -169,9 +169,18 @@ async function signInStudio(page, user, path = '/studio') {
   await page.waitForFunction(id => typeof state !== 'undefined' && String(state.currentUser?.id || '') === id, user.id);
 }
 
-// What the server says this user gets (GET /api/studio/me through the app's own apiJson).
-function studioMe(page) {
-  return page.evaluate(() => apiJson('/api/studio/me', { method: 'GET' }));
+// What the server says this user gets (GET /api/studio/me through the app's own apiJson). The app cancels its
+// in-flight reads on a navigation and during the post-login restore (AbortError), and this is asked right after a
+// sign-in: on that timing it is asked again rather than failing the journey (as walletSummary does in the Home spec).
+async function studioMe(page) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await page.evaluate(() => apiJson('/api/studio/me', { method: 'GET' }));
+    } catch (error) {
+      if (attempt >= 6 || !/abort/i.test(String(error && error.message))) throw error;
+      await page.waitForTimeout(500);
+    }
+  }
 }
 
 async function setLanguage(page, language) {
