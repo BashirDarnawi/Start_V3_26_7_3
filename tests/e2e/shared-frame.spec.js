@@ -122,8 +122,10 @@ test('from 901 to 1279 px the sidebar is a rail of icons that keeps every name a
   // In Arabic the rail sits on the right and the content ends where it starts.
   await page.evaluate(() => toggleLanguage());
   await awayFromSidebar(page);
-  await expect.poll(() => page.evaluate(() => Math.round(innerWidth - document.querySelector('.app-main').getBoundingClientRect().right))).toBe(72);
-  expect(await page.evaluate(() => Math.round(innerWidth - document.getElementById('app-sidebar').getBoundingClientRect().right))).toBe(0);
+  // Measured from the right edge of the visible width: in Arabic desktop Safari puts its scrollbar on
+  // the left, and positions are counted from the page area beside it, not from the window's edge.
+  await expect.poll(() => page.evaluate(() => Math.round(document.documentElement.clientWidth - document.querySelector('.app-main').getBoundingClientRect().right))).toBe(72);
+  expect(await page.evaluate(() => Math.round(document.documentElement.clientWidth - document.getElementById('app-sidebar').getBoundingClientRect().right))).toBe(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
 });
 
