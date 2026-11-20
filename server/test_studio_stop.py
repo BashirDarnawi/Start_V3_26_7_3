@@ -8,7 +8,7 @@
   delivering at the request paused or ended in a read since the request (never while it is in Meta
   review, never for an ad that never delivered); a late one raises ``stop_request_overdue``.
 * A help-desk refusal met by the stop request keeps the /api/ad-studio plain-text shape.
-* ``GET /api/studio/staff/pulse`` (counts only; payments for admins only) and ``GET
+* ``GET /api/studio/staff/pulse`` (counts only; payments and the desk's Launch and Settle list lengths for admins only) and ``GET
   /api/studio/staff/customers/{id}/contact`` (WhatsApp only with consent, audited).
 * ``staffDesk`` cannot be hidden (off, or pilot with an empty allowlist) while unresolved tickets or
   open stop requests exist, counted exactly as the pulse and the desk lists count them; services and
@@ -24,6 +24,7 @@ import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -39,7 +40,7 @@ from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import OWNED_TYPES, studio_jobs, studio_settings, studio_stop
+from server.systems.ads_studio import OWNED_TYPES, studio_jobs, studio_results, studio_settings, studio_stop
 from server.systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS
 from server.systems.ads_studio.studio_activity import ACTIVITY_TYPE, activity_id
 from server.systems.ads_studio.studio_jobs import ALERTS_TYPE, alert_id
@@ -555,7 +556,9 @@ def test_staff_pulse_counts_by_audience(people):
     assert client.get("/api/studio/staff/pulse").status_code == 401
     base_reviewer, base_admin = _pulse(reviewer).json(), _pulse(admin).json()
     assert "paymentsWaiting" not in base_reviewer and isinstance(base_admin["paymentsWaiting"], int)
-    assert set(base_admin) == {"waitingReview", "stopRequests", "openTickets", "stopTicketsOpen", "paymentsWaiting", "alerts", "updatedAt"}
+    assert set(base_admin) == {"waitingReview", "stopRequests", "openTickets", "stopTicketsOpen", "paymentsWaiting",
+                               "toLaunch", "toSettle", "alerts", "updatedAt"}
+    assert set(base_reviewer) == {"waitingReview", "stopRequests", "openTickets", "stopTicketsOpen", "alerts", "updatedAt"}
 
     _services_on()
     _campaign(owner["id"], "waiting1", status="Submitted")
@@ -593,6 +596,96 @@ def test_staff_pulse_counts_by_audience(people):
     assert owner["id"] not in json.dumps(as_admin) and owner["id"] not in json.dumps(as_reviewer)
     with db_conn() as conn:
         conn.execute(text("DELETE FROM entities WHERE type = 'walletPaymentRequests' AND id = :id"), {"id": pay_id})
+
+
+def _desk_ads(owner_id: str) -> dict[str, str]:
+    """One request of every kind the desk's Launch and Settle lists tell apart (the clock: THURSDAY_OPEN)."""
+    later, passed, read = "2026-10-05", "2026-09-20", _stamp(THURSDAY_OPEN - timedelta(minutes=30))
+    ads = {
+        "fresh": _campaign(owner_id, "fresh", endDate=later),  # Launch
+        "lapsed": _campaign(owner_id, "lapsed", endDate=passed),  # Launch AND Settle: never linked, past its end
+        "running": _campaign(owner_id, "running", endDate=later, metaCampaignId="120200000000101"),
+        "ended": _campaign(owner_id, "ended", endDate=passed, metaCampaignId="120200000000102"),  # Settle
+        "unread": _campaign(owner_id, "unread", endDate=passed, metaCampaignId="120200000000103"),  # still "checking Meta"
+        "byhand": _campaign(owner_id, "byhand", endDate=passed, metaCampaignId="made by hand"),  # Settle: marked by hand
+        "asked": _campaign(owner_id, "asked", endDate=later, metaCampaignId="120200000000104", stopRequestedAt=read),  # Settle
+        "settled": _campaign(owner_id, "settled", endDate=passed, metaCampaignId="120200000000105", settleBasis="final_read"),
+        # Not a state a settlement leaves (it writes Stopped): the desk's Launch list would still show it.
+        "oddbasis": _campaign(owner_id, "oddbasis", endDate=passed, settleBasis="never_linked"),
+        "waiting": _campaign(owner_id, "waiting", status="Submitted", endDate=passed),
+        "stopped": _campaign(owner_id, "stopped", status="Stopped", endDate=passed),
+        "archived": _campaign(owner_id, "archived", endDate=passed),
+    }
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": CAMPAIGNS, "id": ads["archived"]})
+    _results(ads["running"], owner_id, metaCampaignId="120200000000101", adStatusCounts={"ACTIVE": 1},
+             campaignEffectiveStatus="ACTIVE", anyAdDelivering=True, lastSyncedAt=read)
+    for label, meta_id in (("ended", "120200000000102"), ("asked", "120200000000104")):
+        _results(ads[label], owner_id, metaCampaignId=meta_id, adStatusCounts={"PAUSED": 1},
+                 campaignEffectiveStatus="PAUSED", lastSyncedAt=read)
+    return ads
+
+
+def test_staff_pulse_counts_the_desk_launch_and_settle_lists_for_admins(people, monkeypatch):
+    """``toLaunch`` and ``toSettle`` (the owner dashboard's two Ads Studio lines) are the lengths of the
+    desk's own Launch and Settle lists, for admins only: counts, never an id."""
+    owner, reviewer, admin = people["owner"], people["reviewer"], people["admin"]
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
+    monkeypatch.setattr(studio_results, "utc_now", lambda: THURSDAY_OPEN)  # the desk's own read, same moment
+    base = _pulse(admin).json()
+    assert type(base["toLaunch"]) is int and type(base["toSettle"]) is int
+
+    ads = _desk_ads(owner["id"])
+    studio_stop.reset_pulse_cache()
+    after = _pulse(admin).json()
+    assert after["toLaunch"] - base["toLaunch"] == 3  # fresh, lapsed, oddbasis: Approved, live, no Meta campaign id at all
+    assert after["toSettle"] - base["toSettle"] == 4  # lapsed, ended, byhand, asked: Approved, not settled, stage 10
+    as_reviewer = _pulse(reviewer).json()
+    assert "toLaunch" not in as_reviewer and "toSettle" not in as_reviewer  # the dashboard is the admin's
+    assert all(type(value) is int for key, value in after.items() if key != "updatedAt")  # counts only
+    assert not any(campaign_id in json.dumps(after) for campaign_id in ads.values())
+
+    # The same answer as the desk's own read (GET /campaigns/{id}/results), one request at a time.
+    def desk_stage(label: str) -> int:
+        response = client.get(f"/api/studio/campaigns/{ads[label]}/results", cookies=admin["cookies"])
+        assert response.status_code == 200, response.text
+        return response.json()["stage"]["stage"]
+
+    stages = {label: desk_stage(label) for label in ("fresh", "lapsed", "running", "ended", "unread", "byhand", "asked", "settled", "oddbasis")}
+    assert stages == {"fresh": 4, "lapsed": 10, "running": 8, "ended": 10, "unread": 4, "byhand": 10, "asked": 10, "settled": 11, "oddbasis": 11}
+    with db_conn() as conn:
+        counts = studio_stop.launch_and_settle_counts(conn, THURSDAY_OPEN)
+        everyone = studio_stop.launch_and_settle_counts(conn, THURSDAY_OPEN + timedelta(days=30))
+    assert counts == {"toLaunch": after["toLaunch"], "toSettle": after["toSettle"]}
+    # A month on, "fresh" is past its end as well: still to launch, and now to settle too.
+    assert (everyone["toLaunch"], everyone["toSettle"] - counts["toSettle"]) == (counts["toLaunch"], 1)
+
+
+def test_staff_pulse_reuses_the_launch_and_settle_counts_for_a_minute(people, monkeypatch):
+    owner, admin = people["owner"], people["admin"]
+    clock = [5000.0]
+    monkeypatch.setattr(studio_stop, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    reads = []
+    real = studio_stop.launch_and_settle_counts
+    monkeypatch.setattr(studio_stop, "launch_and_settle_counts", lambda conn, now: reads.append(now) or real(conn, now))
+
+    def pulse() -> tuple[int, int]:
+        with db_conn() as conn:
+            body = studio_stop.staff_pulse(conn, admin["id"], admin=True, now=THURSDAY_OPEN)
+        return body["toLaunch"], body["toSettle"]
+
+    first = pulse()
+    _campaign(owner["id"], "newlaunch", endDate="2026-09-20")  # to launch and, past its end, to settle
+    clock[0] += studio_stop.LAUNCH_SETTLE_CACHE_SECONDS - 1
+    assert pulse() == first and len(reads) == 1  # every open admin screen asks every few seconds: one read a minute
+    with db_conn() as conn:  # a reviewer's pulse never works these out
+        studio_stop.staff_pulse(conn, people["reviewer"]["id"], admin=False, now=THURSDAY_OPEN)
+    assert len(reads) == 1
+    clock[0] += 2
+    assert pulse() == (first[0] + 1, first[1] + 1) and len(reads) == 2
+    _campaign(owner["id"], "another", endDate="2026-10-05")
+    studio_stop.reset_pulse_cache()
+    assert pulse() == (first[0] + 2, first[1] + 1) and len(reads) == 3
 
 
 # ------------------------------------------------------------------ staff contact link (P3-11)

@@ -50,7 +50,7 @@ through /stop resolves it at once (``on_campaign_stopped``).
 
 **Staff pulse (P3-17).** ``GET /api/studio/staff/pulse`` (staff: admins and reviewers; others 403
 STAFF_ONLY): counts only, ``{waitingReview, stopRequests, openTickets, stopTicketsOpen,
-paymentsWaiting, alerts, updatedAt}``. waitingReview = live Submitted requests (a reviewer's own
+paymentsWaiting, toLaunch, toSettle, alerts, updatedAt}``. waitingReview = live Submitted requests (a reviewer's own
 left out: no self-review; PostgreSQL answers it from the status index); stopRequests = open queue
 rows; openTickets = tickets waiting for the team (status ``open``; reviewers count only tickets
 whose audience is not ``admin`` and that are not about a payment), the stop requests' own urgent tickets INCLUDED;
@@ -59,7 +59,12 @@ queue row AND a ticket, so the desk badge adds ``openTickets + (stopRequests - s
 and counts one stop request once); alerts = studio alerts of the last 24 hours nobody
 acknowledged; ``paymentsWaiting`` (charge requests waiting for confirmation, the platform door
 wallet_payments.pending_payment_requests_count) exists for admins only and is reused for up to a
-minute. Never an id, a name or an amount.
+minute. ``toLaunch`` and ``toSettle`` (admins only, for the owner dashboard's two Ads Studio lines;
+``launch_and_settle_counts``) are the lengths of the desk's own Launch and Settle lists: live
+Approved requests with no Meta campaign id, and live Approved requests without a ``settleBasis``
+whose display stage is 10 (ended) by the same ``derive_display_stage`` and results row the desk's
+read answers with; both are reused for up to a minute as well, so right after a link or a
+settlement they can lag that long. Never an id, a name or an amount.
 
 **Staff contact link (P3-11).** ``GET /api/studio/staff/customers/{id}/contact``
 ``[?relatedType=campaign|ticket&relatedId=...]`` (staff, from the Albayan site itself: the read is
@@ -104,7 +109,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from ...db import db_conn, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
+from ...db import db_conn, json_dumps, json_field_sql, json_fields_select_sql, json_loads, json_loads_or_raw, now_ms
 from ...rate_limiter import check_rate_limit
 from ...user_directory import user_exists
 from ...wallet_payments import pending_payment_requests_count
@@ -124,6 +129,7 @@ from .studio_profile import AUDIT_ACTION as PROFILE_AUDIT_ACTION
 from .studio_profile import profile_id, profile_view, save_profile
 from .studio_results import (
     PAUSED_STATUSES,
+    REQUEST_FIELDS,
     REVIEW_STATUSES,
     derive_display_stage,
     load_request,
@@ -152,6 +158,7 @@ PULSE_READS_PER_MINUTE = 30
 CONTACT_READS_PER_MINUTE = 20
 CONTACT_REMOVALS_PER_MINUTE = 10
 PAYMENTS_CACHE_SECONDS = 60
+LAUNCH_SETTLE_CACHE_SECONDS = 60  # the two dashboard counts parse every live Approved request once
 ALERTS_WINDOW = timedelta(hours=24)
 # Meta statuses that mean "not delivering, and not about to": every ad paused, deleted or archived.
 GONE_STATUSES = PAUSED_STATUSES + ("DELETED", "ARCHIVED")
@@ -172,6 +179,7 @@ TICKET_VIEW_FIELDS = (
 )
 
 _PAYMENTS_CACHE: dict[str, float] = {"at": -1.0, "count": 0.0}
+_LAUNCH_SETTLE_CACHE: dict[str, float] = {"at": -1.0, "toLaunch": 0.0, "toSettle": 0.0}
 
 
 # ------------------------------------------------------------------ small helpers
@@ -687,8 +695,48 @@ def _payments_waiting(conn: Any) -> int:
     return count
 
 
+def launch_and_settle_counts(conn: Any, now: datetime) -> dict[str, int]:
+    """The team desk's Launch and Settle lists, counted as the desk draws them (15p-studio-desk.js).
+
+    ``toLaunch``: live Approved requests that carry no Meta campaign id at all (studioDeskLaunchQueue).
+    ``toSettle``: live Approved requests without a ``settleBasis`` whose display stage is 10, ended
+    (studioDeskEndedList), by the same ``derive_display_stage`` and the same results row the desk's
+    own read answers with (studio_results: GET /campaigns/{id}/results). The request rows come
+    through a projection (``REQUEST_FIELDS``, never an image; each row's JSON parsed once); a results
+    row is read only for a request that carries a Meta id, the only kind whose stage can use it.
+    """
+    where = f"type = '{AD_CAMPAIGN_COLLECTION}' AND deleted = false AND {json_field_sql('status')} = 'Approved'"
+    rows = conn.execute(text(json_fields_select_sql(REQUEST_FIELDS, ("id",), where))).mappings().all()
+    to_launch = to_settle = 0
+    for row in rows:
+        request = {field: row.get(f"f_{field.lower()}") for field in REQUEST_FIELDS}
+        if str(request.get("status") or "") != "Approved":
+            continue
+        request["changeReasons"] = json_loads_or_raw(request.get("changeReasons"))
+        meta_campaign = str(request.get("metaCampaignId") or "").strip()
+        if not meta_campaign:
+            to_launch += 1
+        if str(request.get("settleBasis") or "").strip():
+            continue
+        results = load_results_row(conn, str(row["id"]))[0] if meta_campaign else None
+        if derive_display_stage(request, results, now)["stage"] == 10:
+            to_settle += 1
+    return {"toLaunch": to_launch, "toSettle": to_settle}
+
+
+def _launch_and_settle(conn: Any, now: datetime) -> dict[str, int]:
+    """launch_and_settle_counts, reused for LAUNCH_SETTLE_CACHE_SECONDS like the payments count."""
+    clock = time.monotonic()
+    if _LAUNCH_SETTLE_CACHE["at"] >= 0 and clock - _LAUNCH_SETTLE_CACHE["at"] < LAUNCH_SETTLE_CACHE_SECONDS:
+        return {"toLaunch": int(_LAUNCH_SETTLE_CACHE["toLaunch"]), "toSettle": int(_LAUNCH_SETTLE_CACHE["toSettle"])}
+    counts = launch_and_settle_counts(conn, now)
+    _LAUNCH_SETTLE_CACHE.update({"at": clock, "toLaunch": float(counts["toLaunch"]), "toSettle": float(counts["toSettle"])})
+    return counts
+
+
 def reset_pulse_cache() -> None:
     _PAYMENTS_CACHE.update({"at": -1.0, "count": 0.0})
+    _LAUNCH_SETTLE_CACHE.update({"at": -1.0, "toLaunch": 0.0, "toSettle": 0.0})
 
 
 def staff_pulse(conn: Any, viewer_id: str, *, admin: bool, now: datetime) -> dict[str, Any]:
@@ -716,6 +764,7 @@ def staff_pulse(conn: Any, viewer_id: str, *, admin: bool, now: datetime) -> dic
     }
     if admin:
         pulse["paymentsWaiting"] = _payments_waiting(conn)
+        pulse.update(_launch_and_settle(conn, now))  # the owner dashboard's two lines
     pulse["updatedAt"] = _iso(now)
     return pulse
 
