@@ -802,6 +802,9 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
    row on phones cut "Assignment" and "Completed" in two: there they take two rows of two. */
 @media (max-width: 359px) {
   .ops-workspace.ops-deliveries > .ops-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* A Clothes dialog's "Save Shipment" shares its row with Cancel: with 24 px at each side "Shipment" was cut in
+     two there (before the redesign as well). */
+  .clothes-primary.px-6 { padding-inline: 12px; }
 }
 @media (max-width: 389px) {
   /* Phones of 360 and 375 px keep the three Customers totals in one row for amounts up to five digits. */

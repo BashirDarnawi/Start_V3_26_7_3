@@ -2663,6 +2663,7 @@ async function main() {
     assert.equal(within(management, '  .audit-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }'), '@media (max-width: 359px) {');
     assert.equal(within(management, '  .management-door { padding: 12px 9px; gap: 7px; }'), '@media (max-width: 359px) {');
     assert.equal(within(studio, '  .ads-studio-method-label { gap: 8px; padding-inline: 8px; }'), '@media (max-width: 359px) {');
+    assert.equal(within(layout, '  .clothes-primary.px-6 { padding-inline: 12px; }'), '@media (max-width: 359px) {');
     // The two Health buttons that share a row from 360 px.
     assert.ok(studio.includes('\n.studio-desk-actions > .studio-v2-action { flex: 1 1 10rem; gap: 8px; padding-inline: 14px; }'));
   });
