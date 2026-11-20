@@ -194,6 +194,19 @@ const STATUS_TRANSLATIONS_AR = {
   'Partial': 'جزئي',
 };
 
+// One way of writing money everywhere (DESIGN.md 5.4): a thousands separator, two decimals, the
+// currency always shown; dollars "$1,250.00", dinars "1,250.00 LYD" (Arabic "1,250.00 د.ل"). The
+// digits are the ones toFixed(2) gives, so no figure changes: only how it is written.
+function fmt2(value) {
+  return (Number(value) || 0).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ',');
+}
+function fmtUsd(value) {
+  return `$${fmt2(value)}`;
+}
+function fmtLyd(value) {
+  return `${fmt2(value)} ${state.language === 'ar' ? 'د.ل' : 'LYD'}`;
+}
+
 // Translate a stored status/enum value for display (Arabic mode only).
 function trStatus(value) {
   if (state.language !== 'ar') return value == null ? '' : String(value);

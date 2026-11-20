@@ -6783,6 +6783,19 @@ const STATUS_TRANSLATIONS_AR = {
   'Partial': 'جزئي',
 };
 
+// One way of writing money everywhere (DESIGN.md 5.4): a thousands separator, two decimals, the
+// currency always shown; dollars "$1,250.00", dinars "1,250.00 LYD" (Arabic "1,250.00 د.ل"). The
+// digits are the ones toFixed(2) gives, so no figure changes: only how it is written.
+function fmt2(value) {
+  return (Number(value) || 0).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ',');
+}
+function fmtUsd(value) {
+  return `$${fmt2(value)}`;
+}
+function fmtLyd(value) {
+  return `${fmt2(value)} ${state.language === 'ar' ? 'د.ل' : 'LYD'}`;
+}
+
 // Translate a stored status/enum value for display (Arabic mode only).
 function trStatus(value) {
   if (state.language !== 'ar') return value == null ? '' : String(value);
@@ -18964,6 +18977,8 @@ function renderAdsView() {
   }
   const visibleAds = allAds.slice(0, _adsShowLimit);
   const remainingAds = allAds.length - visibleAds.length;
+  // Up to 900 px each ad is a card: every action is a worded button there, with no menu to open.
+  const adsAsCards = typeof matchMedia === 'function' && matchMedia('(max-width: 900px)').matches;
 
   return `
     <div class="space-y-6 animate-fade-in-up">
@@ -18999,6 +19014,10 @@ function renderAdsView() {
             ['stopped', "applyAdQuickFilter('stopped')", isAr ? 'متوقف' : 'Stopped', adTabCounts[3], 'warning']
           ])}
           ${renderWorkspaceFilterToggle('ads', adAdvancedFilterCount)}
+          <details class="frame-menu row-menu ads-columns">
+            <summary><i data-lucide="columns-3"></i>${isAr ? 'الأعمدة' : 'Columns'}</summary>
+            <div class="frame-menu-list">${[['adsLocal', isAr ? 'المبلغ بالدينار في عمود خاص' : 'Dinar amount in its own column'], ['adsSerial', isAr ? 'الرقم التسلسلي في عمود خاص' : 'Serial in its own column']].map(([key, words]) => `<label><input type="checkbox" onchange="toggleWorkspaceFilterPanel('${key}')"${isWorkspaceFilterPanelExpanded(key) ? ' checked' : ''}><span>${words}</span></label>`).join('')}</div>
+          </details>
         </div>
         ${adReceiptFilter ? `<div id="ad-receipt-link-filter" role="status" class="mt-3 flex flex-col gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-200 sm:flex-row sm:items-center sm:justify-between">
           <span class="inline-flex items-center gap-2 font-medium"><i data-lucide="receipt" class="h-4 w-4"></i>${isAr ? 'الإعلانات المرتبطة بالوصل' : 'Ads linked to receipt'} <strong>#${activeReceiptLabel}</strong></span>
@@ -19027,7 +19046,7 @@ function renderAdsView() {
 
       <div id="ads-table-container" class="ads-table-container glass-panel rounded-2xl p-6 overflow-x-auto">
         ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : adsFiltered ? (isAr ? 'لا توجد إعلانات تطابق الفلاتر' : 'No ads match your filters') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p>${!adReceiptFilter && adsFiltered ? `<button type="button" onclick="state.adSearch='';applyAdQuickFilter('all')" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : `
-          <table class="ads-summary-table mobile-card-table w-full text-sm">
+          <table class="ads-summary-table mobile-card-table w-full text-sm${isWorkspaceFilterPanelExpanded('adsLocal') ? ' ads-own-local' : ''}${isWorkspaceFilterPanelExpanded('adsSerial') ? ' ads-own-serial' : ''}">
             <colgroup>
               <col class="ads-col-customer">
               <col class="ads-col-page">
@@ -19045,11 +19064,11 @@ function renderAdsView() {
                 <th class="text-left py-3 px-2">${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الصفحة' : 'Page'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'المبلغ' : 'Amount'}</th>
-                <th class="text-left py-3 px-2">${isAr ? 'بالعملة المحلية' : 'Local'}</th>
+                <th class="text-left py-3 px-2 ads-cell-local" title="${isAr ? 'بالعملة المحلية' : 'Local currency'}">${isAr ? 'بالدينار' : 'Local'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الدفع' : 'Payment'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'الحالة' : 'Status'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'التوصيل' : 'Delivery'}</th>
-                <th class="text-left py-3 px-2">${isAr ? 'الرقم التسلسلي' : 'Serial'}</th>
+                <th class="text-left py-3 px-2 ads-cell-serial" title="${isAr ? 'الرقم التسلسلي' : 'Serial number'}">${isAr ? 'الرقم' : 'Serial'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'التاريخ' : 'Date'}</th>
                 <th class="text-left py-3 px-2">${isAr ? 'إجراءات' : 'Actions'}</th>
               </tr>
@@ -19125,9 +19144,13 @@ function renderAdsView() {
                 const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
                 const visibleLinkedReceiptIds = canOpenWorkspaceView('receipts')
                   ? adReceiptIds.filter(id => receiptsById.has(String(id))) : [];
+                const adId = Security.escapeHtml(String(ad.id || ''));
+                const adOpen = shellRowIsOpen('ads', String(ad.id || ''));
+                const adMoreId = shellRowDomId('ads', String(ad.id || ''), 'more');
+                const adEdits = getAdEditHistoryCount(ad);
                 return `
                   ${shellAdSummaryRow(ad, { customer, adPage, adDisplayNum, needsSetup, isAdPaid, deliveryPerson })}
-                  <tr ${shellTableDetailAttrs('ads', String(ad.id || ''))} class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 ${shellRowIsOpen('ads', String(ad.id || '')) ? 'is-open' : ''}">
+                  <tr ${shellTableDetailAttrs('ads', String(ad.id || ''))} class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 ${adOpen ? 'is-open' : ''}">
                     <td class="py-3 px-2" data-label="${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}">
                       <div class="ad-primary-summary">
                         ${adPageAvatarTile}
@@ -19159,12 +19182,13 @@ function renderAdsView() {
                       ${renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr)}
                     </td>
                     <td class="py-3 px-2 font-bold ${amountColorClass}" data-label="${isAr ? 'المبلغ' : 'Amount'}" data-payment-state="${needsSetup ? 'pending-setup' : (isAdPaid ? 'paid' : 'unpaid')}" title="${needsSetup ? (isAr ? 'لم يتم إدخال المبلغ بعد' : 'Amount has not been entered yet') : (isAdPaid ? (isAr ? 'مبلغ مدفوع' : 'Paid amount') : (isAr ? 'دين غير مدفوع على العميل' : 'Unpaid customer debt'))}">
-                      <span>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `$${(Number(ad.amountUSD) || 0).toFixed(2)}`}</span>
+                      <span>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : fmtUsd(ad.amountUSD)}</span>
                       ${needsSetup ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'لا يوجد دين بعد' : 'No debt yet'}</span>` : (!isAdPaid ? `<span class="text-[10px] font-semibold mt-0.5">${isAr ? 'دين غير مدفوع' : 'Unpaid debt'}</span>` : '')}
+                      ${needsSetup ? '' : `<small class="ads-under-amount"><bdi>${fmtLyd(adAmountLocalForDisplay)}</bdi> <span>· ${isAr ? 'السعر' : 'rate'} ${fmt2(receiptExchangeRate ?? ad.exchangeRate)}</span></small>`}
                       ${renderMetaAdBudgetSummary(ad, isAr)}
                     </td>
-                    <td class="py-3 px-2 font-medium ${amountColorClass}" data-label="${isAr ? 'بالدينار' : 'Local'}">
-                      <div>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `${adAmountLocalForDisplay.toFixed(2)} LYD`}</div>
+                    <td class="py-3 px-2 font-medium ${amountColorClass} ads-cell-local" data-label="${isAr ? 'بالدينار' : 'Local'}">
+                      <div>${needsSetup ? (isAr ? 'غير محدد' : 'Not set') : `<bdi>${fmtLyd(adAmountLocalForDisplay)}</bdi>`}</div>
                       ${needsSetup ? '' : `<div class="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400">${isAr ? 'السعر' : 'Rate'}: ${receiptExchangeRate?.toFixed(2) || ad.exchangeRate?.toFixed(2) || '0.00'}</div>`}
                     </td>
                     <td class="py-3 px-2" data-label="${isAr ? 'الدفع' : 'Payment'}">
@@ -19207,12 +19231,8 @@ function renderAdsView() {
                       </div>
                       ${deliveryPerson ? `<div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(deliveryPerson.name || '')}</div>` : ''}
                     </td>
-                    <td class="py-3 px-2" data-label="${isAr ? 'الرقم' : 'Serial'}">
+                    <td class="py-3 px-2 ads-cell-serial" data-label="${isAr ? 'الرقم' : 'Serial'}">
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
-                      ${(() => {
-                        const n = getAdEditHistoryCount(ad);
-                        return n ? `<button type="button" onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
-                      })()}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="${isAr ? 'التاريخ' : 'Date'}">
                       <div class="text-slate-500">${(() => { const d = new Date(ad.startDate); return isNaN(d) ? '-' : d.toLocaleDateString(appDateLocale()); })()}</div>
@@ -19235,36 +19255,28 @@ function renderAdsView() {
                       })()}
                       ${renderMetaAdScheduleSummary(ad, isAr)}
                       ${!ad.metaAdId && Number.isFinite(Number(ad.days)) && Number(ad.days) > 0 ? `<div>${isAr ? 'المدة' : 'Duration'}: ${Security.escapeHtml(String(ad.days))} ${isAr ? 'يوم' : 'days'}</div>` : ''}
+                      ${serialDisplay ? `<div class="ads-under-date">${isAr ? 'الرقم' : 'Serial'} <span class="font-mono">${Security.escapeHtml(serialDisplay)}</span></div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
-                      <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                      <div class="ads-table-actions">
                       ${visibleLinkedReceiptIds.length ? `<div class="ads-linked-receipts">${visibleLinkedReceiptIds.map(id => `<button type="button" data-action="view-ad-receipt" data-receipt-id="${Security.escapeHtml(String(id))}" onclick="openReceiptRecord(this.dataset.receiptId)"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${isAr ? 'وصل' : 'Receipt'} #${Security.escapeHtml(_rcptNo(receiptsById.get(String(id))) || String(id))}</span></button>`).join('')}</div>` : ''}
+                        ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="ads-row-step" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
+                        <button type="button" id="${adMoreId}" class="ads-row-details" aria-expanded="${adOpen}" onclick="shellToggleRow('ads', '${adId}'); document.getElementById('${adMoreId}')?.focus()">${isAr ? 'التفاصيل' : 'Details'}</button>
+                        <details class="${adsAsCards ? 'row-actions' : 'frame-menu row-menu'}"${adsAsCards ? ' open' : ''}>
+                          <summary>${isAr ? 'المزيد' : 'More'}<i data-lucide="chevron-down"></i></summary>
+                          <div class="frame-menu-list">
+                        ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `<button type="button" onclick="manageTopUps('${ad.id}')"><i data-lucide="trending-up"></i><span>${isAr ? 'عمليات الشحن' : 'Top-ups'}${ad.topUps && ad.topUps.length > 0 ? ` (${ad.topUps.length})` : ''}</span></button>` : ''}
+                        ${!needsSetup ? `<button type="button" onclick="manageRefund('${ad.id}')"><i data-lucide="arrow-left-circle"></i><span>${isAr ? 'استرجاع' : 'Refund'}${ad.refundType && ad.refundType !== 'None' ? (isAr ? ' (مسجّل)' : ' (recorded)') : ''}</span></button>` : ''}
+                        ${isAdReconciliationEligible(ad) && canActOnRecord('ads', 'stopAd', ad.creatorId) ? `<button type="button" onclick="stopAd('${ad.id}')"><i data-lucide="square"></i><span>${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}</span></button>` : ''}
+                        ${canEditThisAd ? `<button type="button" onclick="editAd('${ad.id}')"><i data-lucide="edit"></i><span>${t('edit')}</span></button>` : ''}
+                        ${adEdits ? `<button type="button" onclick="showAdEditHistory('${ad.id}')"><i data-lucide="history"></i><span>${isAr ? `سجل التعديلات (${adEdits})` : `History (${adEdits})`}</span></button>` : ''}
+                        ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `<button type="button" data-action="view-ad-photos" data-ad-id="${adId}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button"><i data-lucide="images"></i><span data-photo-loading-label>${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span></button>` : ''}
+                        ${canEditThisAd && can('ads', 'viewPhotos') && adPhotoCount > 1 ? `<button type="button" data-action="choose-ad-main-photo" data-ad-id="${adId}" onclick="openAdPrimaryPhotoPicker(this.dataset.adId, this)" title="${isAr ? 'اختيار الصورة الرئيسية التي تظهر خارج الإعلان' : 'Choose the main photo shown outside the ad'}"><i data-lucide="image-up"></i><span>${isAr ? 'الصورة الرئيسية' : 'Main photo'}</span></button>` : ''}
                         ${renderMetaAdActionButton(ad, isAr)}
                         ${typeof renderAdMergeActionButton === 'function' ? renderAdMergeActionButton(ad, isAr) : ''}
-                        ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
-                        ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
-                        <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
-                          <i data-lucide="images" class="w-4 h-4 shrink-0"></i><span data-photo-loading-label class="text-xs whitespace-nowrap">${isAr ? `عرض الصور (${adPhotoCount})` : `View Photos (${adPhotoCount})`}</span>
-                        </button>` : ''}
-                        ${canEditThisAd && can('ads', 'viewPhotos') && adPhotoCount > 1 ? `
-                        <button type="button" data-action="choose-ad-main-photo" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPrimaryPhotoPicker(this.dataset.adId, this)" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200" title="${isAr ? 'اختيار الصورة الرئيسية التي تظهر خارج الإعلان' : 'Choose the main photo shown outside the ad'}" aria-label="${isAr ? 'اختيار الصورة الرئيسية' : 'Choose main photo'}">
-                          <i data-lucide="image-up" class="h-4 w-4 shrink-0"></i><span>${isAr ? 'الرئيسية' : 'Main photo'}</span>
-                        </button>` : ''}
-                        ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
-                        <button type="button" onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
-                          <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
-                          ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
-                        </button>` : ''}
-                        ${!needsSetup ? `<button type="button" onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
-                          <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
-                          ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
-                        </button>` : ''}
-                        ${isAdReconciliationEligible(ad) && canActOnRecord('ads', 'stopAd', ad.creatorId) ? `<button type="button" onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
-                          <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
-                          ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
-                        </button>` : ''}
-                        ${canEditThisAd ? `<button type="button" onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
-                        ${canDeleteThisAd ? `<button type="button" onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
+                        ${canDeleteThisAd ? `<button type="button" onclick="deleteAd('${ad.id}')" class="frame-danger"><i data-lucide="trash-2"></i><span>${t('delete')}</span></button>` : ''}
+                          </div>
+                        </details>
                       </div>
                     </td>
                   </tr>
@@ -42893,7 +42905,7 @@ function renderMetaAdScheduleSummary(ad, isAr) {
 function renderMetaAdActionButton(ad, isAr) {
   if (!isCurrentUserAdmin() || !isServerModeEnabled() || !ad) return '';
   const linked = !!ad.metaAdId;
-  return `<button type="button" data-action="meta-ad-link" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdsConnectionModal(this.dataset.adId)" class="inline-flex min-h-10 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-bold ${linked ? 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-200' : 'border-slate-200 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300'}" title="${linked ? (isAr ? 'عرض ومزامنة رابط Meta' : 'View and sync Meta link') : (isAr ? 'ربط هذا الإعلان بإعلان Meta' : 'Link this ad to Meta')}"><i data-lucide="${linked ? 'refresh-cw' : 'link'}" class="h-4 w-4"></i><span>${linked ? 'Meta' : (isAr ? 'ربط' : 'Link')}</span></button>`;
+  return `<button type="button" data-action="meta-ad-link" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openMetaAdsConnectionModal(this.dataset.adId)" class="inline-flex min-h-10 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-bold ${linked ? 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-200' : 'border-slate-200 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300'}" title="${linked ? (isAr ? 'عرض ومزامنة رابط Meta' : 'View and sync Meta link') : (isAr ? 'ربط هذا الإعلان بإعلان Meta' : 'Link this ad to Meta')}"><i data-lucide="${linked ? 'refresh-cw' : 'link'}" class="h-4 w-4"></i><span>${linked ? (isAr ? 'رابط Meta' : 'Meta link') : (isAr ? 'ربط بـ Meta' : 'Link to Meta')}</span></button>`;
 }
 
 function closeMetaAdsConnectionModal() {

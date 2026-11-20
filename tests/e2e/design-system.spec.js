@@ -78,6 +78,16 @@ async function assertTouchable(locator, label) {
   expect(box.height, `${label}: tap height`).toBeGreaterThanOrEqual(43.5);
 }
 
+// From 901 px an ad row keeps its receipt link and "Details" on show and the rest in its "More" menu
+// (redesign round 3); up to 900 px every action is a worded button of the card, with nothing to open.
+async function openAdMenu(detail) {
+  const more = detail.locator('details.row-menu > summary');
+  if (await more.isVisible()) {
+    await more.click();
+    await expect(detail.locator('details.row-menu')).toHaveAttribute('open', '');
+  }
+}
+
 async function captureDesign(page, testInfo, name) {
   // Dismiss only transient notices through their real close action so they
   // cannot cover the content being inspected in a successful screenshot.
@@ -211,6 +221,7 @@ test(`Ads retain the classic table and phone rows while other operations keep ca
           await assertTouchable(summary.locator('.meta-ad-thumbnail-button'), 'Collapsed ad photo');
         }
         const detail = await expandRow(page, 'ads', ids.ad);
+        await openAdMenu(detail);
         await assertTouchable(detail.locator('[data-action="view-ad-photos"]'), 'Outside ad photos');
         await expect(detail.locator('[data-action="choose-ad-main-photo"]')).toBeVisible();
         await expect(detail.locator('.ads-linked-receipts [data-action="view-ad-receipt"]')).toHaveAttribute('data-receipt-id', ids.paid);
@@ -221,7 +232,10 @@ test(`Ads retain the classic table and phone rows while other operations keep ca
         const linkBounds = await receiptShortcut.boundingBox();
         expect(linkBounds.x).toBeGreaterThanOrEqual(cellBounds.x - 1);
         expect(linkBounds.x + linkBounds.width).toBeLessThanOrEqual(cellBounds.x + cellBounds.width + 1);
-        await expect(detail.locator('td[data-payment-state="paid"] > span').first()).toHaveText('$12345.67');
+        await expect(detail.locator('td[data-payment-state="paid"] > span').first()).toHaveText('$12,345.67');
+        // The menu closes on a press outside it, and the receipt link stays one press away.
+        await page.locator('#ads-count').click();
+        await expect(detail.locator('details.row-menu[open]')).toHaveCount(0);
       }
       if (view === 'deliveries') {
         await expect(page.locator(`[data-delivery-record="${ids.unpaid}"]`)).toBeVisible();
@@ -437,6 +451,7 @@ test(`editable record forms retain labelled fields and reachable save and cancel
     for (const form of forms) {
       await openView(page, form.view);
       const detail = await expandRow(page, form.view, form.id);
+      if (form.view === 'ads') await openAdMenu(detail);
       await detail.locator(`button[onclick^="${form.fn}("]`).first().click();
       const modal = page.locator('#app-modal');
       await expect(modal).toBeVisible();

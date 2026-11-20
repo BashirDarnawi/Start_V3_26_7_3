@@ -982,10 +982,13 @@ check('the ads list shows who created and completed an ad on its own row, never 
   assert(/\.ad-person-chip\s*\{[^}]*overflow-wrap:\s*anywhere/.test(css), 'a long name can still overflow its chip');
   assert(/\.dark \.ad-person-chip--completed/.test(css), 'the completed-by chip has no dark-mode colours');
 
-  // table-layout: fixed renormalises every column unless the widths total 100.
-  const widths = [...css.matchAll(/\.ads-summary-table \.ads-col-[a-z]+ \{ width: (\d+)%; \}/g)].map(m => Number(m[1]));
-  assert(widths.length === 10, `expected 10 ads column widths, found ${widths.length}`);
-  assert(widths.reduce((sum, w) => sum + w, 0) === 100, `ads column widths total ${widths.reduce((s, w) => s + w, 0)}%, not 100%`);
+  // table-layout: fixed renormalises every column unless the widths total 100. Eight columns show by
+  // default (redesign round 3); the dinar amount and the serial are columns only on request ("Columns").
+  const widths = Object.fromEntries([...css.matchAll(/\.ads-summary-table \.ads-col-([a-z]+) \{ width: (\d+)%; \}/g)].map(m => [m[1], Number(m[2])]));
+  const shown = Object.keys(widths).filter(name => !['local', 'serial'].includes(name));
+  assert(shown.length === 8 && widths.local > 0 && widths.serial > 0, `expected 8 ads column widths and 2 optional ones, found ${JSON.stringify(widths)}`);
+  const total = shown.reduce((sum, name) => sum + widths[name], 0);
+  assert(total === 100, `the eight default ads column widths total ${total}%, not 100%`);
 });
 
 check('classic ad rows retain direct receipt links without exposing inaccessible receipts', () => {

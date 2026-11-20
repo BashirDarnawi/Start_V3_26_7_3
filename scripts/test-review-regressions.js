@@ -1434,6 +1434,86 @@ async function main() {
       assert.ok(new RegExp(`swapViewParts\\('[a-z]+', render[A-Za-z]+View, \\[[^\\]]*'${id}'`).test(helpers), id);
     }
   });
+  await test('round 3 Ads table: eight columns with the dinar amount and the serial under Amount and Dates ("Columns" gives either its own column and is remembered), and every row action is in words: the receipt link, Details and one menu', async () => {
+    const f = frameFixture(frameAdmin, 'ads');
+    f.sandbox.render = () => {};
+    f.state.defaultExchangeRate = 7;
+    f.state.customers = [{ id: 'c1', name: 'Medina Coffee' }];
+    f.state.receipts = [{ id: 'r1', customerId: 'c1', amountUSD: 2000, amountLocal: 14000, exchangeRate: 7, status: 'Paid', isPaid: true, serialNumber: '471396', paymentMethod: 'Bank Transfer (LYD)', createdAt: '2026-11-01T10:00:00Z' }];
+    f.state.pages = [{ id: 'p1', name: 'Medina Page', customerIds: ['c1'], metaPageId: '1000' }];
+    f.state.ads = [
+      { id: 'a1', customerId: 'c1', pageId: 'p1', amountUSD: 1234.5, exchangeRate: 7, status: 'Active', paymentStatus: 'paid', isPaid: true, receiptId: 'r1', startDate: '2026-11-01', endDate: '2026-11-10', createdAt: '2026-11-01T09:00:00Z', createdBy: 'admin', topUps: [{ amount: 10, date: '2026-11-02' }], editHistory: [{ at: 1 }, { at: 2 }] },
+      { id: 'a2', customerId: 'c1', pageId: 'p1', amountUSD: 50, status: 'Active', paymentStatus: 'pending_setup', isPaid: false, metaImportState: 'needs_completion', metaAdId: '99', metaAdName: 'Imported', startDate: '2026-11-03', createdAt: '2026-11-03T09:00:00Z' }
+    ];
+    let html = '';
+    const draw = () => { html = String(f.run('renderAdsView()')); return html; };
+    const row = id => (html.split(`data-shell-detail-id="${id}"`)[1] || '').split('</tr>')[0];
+    const actions = id => row(id).split('class="ads-table-actions"')[1] || '';
+    const words = id => Array.from(actions(id).matchAll(/<button\b[^>]*>(.*?)<\/button>/gs), m => m[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim());
+    const cell = (id, label) => (row(id).split(`data-label="${label}"`)[1] || '').split('</td>')[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    draw();
+    // Ten cells stay in the markup (phones and "Columns" use them); the table shows eight until asked.
+    assert.equal((html.match(/<table class="([^"]*)"/) || [])[1], 'ads-summary-table mobile-card-table w-full text-sm');
+    assert.equal(html.split('<th ').length - 1, 10);
+    assert.equal(html.split(' ads-cell-local"').length - 1, 2 + 1, 'the heading and one cell per ad');
+    assert.equal(html.split(' ads-cell-serial"').length - 1, 2 + 1);
+    // One way of writing money: a thousands separator, two decimals, the currency shown. The dinar amount and its rate sit under the dollars.
+    assert.ok(cell('a1', 'Amount').endsWith('$1,234.50 8,641.50 LYD · rate 7.00'), cell('a1', 'Amount'));
+    assert.ok(cell('a1', 'Date').endsWith('Serial 471396'), cell('a1', 'Date'));
+    assert.ok(!row('a2').includes('ads-under-amount') && !row('a2').includes('ads-under-date'), 'an ad with no price and no serial yet has neither line');
+    // Every action that was an icon is a worded line now, under the same conditions as before.
+    assert.deepEqual(words('a1'), ['Receipt #471396', 'Details', 'Top-ups (1)', 'Refund', 'Stop Ad', 'Edit', 'History (2)', 'Link to Meta', 'Delete']);
+    assert.deepEqual(words('a2'), ['Complete', 'Details', 'Edit', 'Meta link', 'Delete'], 'an ad that needs setup leads with Complete and offers no money action');
+    for (const id of ['a1', 'a2']) assert.ok(words(id).every(text => /\p{L}/u.test(text)), `${id}: no action is an icon alone`);
+    for (const press of ["manageTopUps('a1')", "manageRefund('a1')", "stopAd('a1')", "editAd('a1')", "showAdEditHistory('a1')", "deleteAd('a1')", "completeMetaImportedAd('a2')"]) assert.equal(html.split(`onclick="${press}"`).length - 1, 1, press);
+    // On a computer the rest sit in one labelled menu; "Details" says whether the row is open and takes the focus back.
+    assert.ok(/<details class="frame-menu row-menu">\s*<summary>More<i data-lucide="chevron-down"><\/i><\/summary>\s*<div class="frame-menu-list">/.test(actions('a1')));
+    const details = (actions('a1').match(/<button type="button" id="([^"]+)" class="ads-row-details" aria-expanded="(true|false)" onclick="([^"]*)">Details<\/button>/) || []);
+    assert.equal(details[2], 'false');
+    assert.equal(details[3], `shellToggleRow('ads', 'a1'); document.getElementById('${details[1]}')?.focus()`);
+    f.run("_shellExpanded.add(shellRowKey('ads', 'a1'))");
+    draw();
+    assert.ok(/aria-expanded="true" onclick="shellToggleRow\('ads', 'a1'\)/.test(actions('a1')) && /data-shell-detail-id="a1" class="[^"]* is-open"/.test(html));
+    assert.ok(row('a1').includes('data-role="ad-creator"'), 'the "Created by" chip is in the row; the stylesheet shows it while the details are open');
+    f.run("_shellExpanded.clear()");
+    // Up to 900 px each ad is a card: the same actions as worded buttons, already on show, no menu to open.
+    f.sandbox.matchMedia = query => ({ matches: query === '(max-width: 900px)' });
+    draw();
+    assert.ok(/<details class="row-actions" open>/.test(actions('a1')) && !actions('a1').includes('frame-menu row-menu'));
+    assert.deepEqual(words('a1'), ['Receipt #471396', 'Details', 'Top-ups (1)', 'Refund', 'Stop Ad', 'Edit', 'History (2)', 'Link to Meta', 'Delete']);
+    f.sandbox.matchMedia = () => ({ matches: false });
+    // "Columns": two choices, each remembered like a filter panel.
+    const columns = () => (html.split('class="frame-menu row-menu ads-columns"')[1] || '').split('</details>')[0];
+    assert.deepEqual(Array.from(columns().matchAll(/<label><input type="checkbox" onchange="([^"]*)"( checked)?><span>(.*?)<\/span><\/label>/g), m => [m[1], !!m[2], m[3]]),
+      [["toggleWorkspaceFilterPanel('adsLocal')", false, 'Dinar amount in its own column'], ["toggleWorkspaceFilterPanel('adsSerial')", false, 'Serial in its own column']]);
+    f.sandbox.toggleWorkspaceFilterPanel('adsSerial');
+    draw();
+    assert.equal((html.match(/<table class="([^"]*)"/) || [])[1], 'ads-summary-table mobile-card-table w-full text-sm ads-own-serial');
+    assert.ok(/onchange="toggleWorkspaceFilterPanel\('adsSerial'\)" checked>/.test(columns()));
+    assert.equal(JSON.parse(f.sandbox.localStorage.getItem(f.run('FILTER_PANELS_STORAGE_KEY'))).adsSerial, true, 'kept for the next visit');
+    f.sandbox.toggleWorkspaceFilterPanel('adsLocal'); f.sandbox.toggleWorkspaceFilterPanel('adsSerial');
+    assert.equal((draw().match(/<table class="([^"]*)"/) || [])[1], 'ads-summary-table mobile-card-table w-full text-sm ads-own-local');
+    f.sandbox.toggleWorkspaceFilterPanel('adsLocal');
+    // The stylesheet: which of the two forms shows, the chips with the details, and no menu clipped by the table.
+    const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
+    for (const rule of [
+      '.ads-summary-table:not(.ads-own-local) :is(.ads-col-local, .ads-cell-local),\n.ads-summary-table.ads-own-local .ads-under-amount,\n.ads-summary-table:not(.ads-own-serial) :is(.ads-col-serial, .ads-cell-serial),\n.ads-summary-table.ads-own-serial .ads-under-date { display: none !important; }',
+      '.ads-summary-table :is(.payment-badge, [class*="rounded-full"], [class*="delivery-"], .font-mono) { overflow-wrap: normal; word-break: normal; }',
+      '  #ads-table-container.ads-table-container { overflow: visible; }\n  .ads-summary-table tr:not(.is-open) .ad-primary-people { display: none; }',
+      '  .ads-columns, .ads-row-details { display: none; }',
+      '  .row-actions > summary { display: none; }'
+    ]) assert.ok(css.includes(rule), rule.slice(0, 70));
+    // Arabic, and an account that may only look: no change, stop or delete action is offered.
+    f.state.language = 'ar';
+    draw();
+    assert.deepEqual(words('a1'), ['وصل #471396', 'التفاصيل', 'عمليات الشحن (1)', 'استرجاع', 'إيقاف الإعلان', 'تعديل', 'سجل التعديلات (2)', 'ربط بـ Meta', 'حذف']);
+    assert.ok(cell('a1', 'المبلغ').endsWith('$1,234.50 8,641.50 د.ل · السعر 7.00'), cell('a1', 'المبلغ'));
+    f.state.language = 'en';
+    f.state.currentUser = { id: 'emp', name: 'Sara', role: 'Employee', permissions: { ads: ['view'] } };
+    f.state.users = [f.state.currentUser];
+    draw();
+    assert.deepEqual(words('a1'), ['Details', 'Top-ups (1)', 'Refund', 'History (2)'], 'as before the redesign: these four open read-only or permission-checked dialogs');
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {

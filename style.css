@@ -1685,21 +1685,22 @@ textarea:disabled {
     table-layout: fixed;
   }
 
-  /* Must total exactly 100 — the browser renormalises all ten otherwise.
-     Customer/Page were the two starved columns: the customer cell carries two
-     picture tiles plus the name and the attribution chips, and the page cell
-     stacks a page ID over a page name. Width came from Status, which had the
-     most slack. */
-  .ads-summary-table .ads-col-customer { width: 19%; }
-  .ads-summary-table .ads-col-page { width: 10%; }
-  .ads-summary-table .ads-col-amount { width: 9%; }
-  .ads-summary-table .ads-col-local { width: 6%; }
-  .ads-summary-table .ads-col-payment { width: 7%; }
-  .ads-summary-table .ads-col-status { width: 15%; }
-  .ads-summary-table .ads-col-delivery { width: 6%; }
-  .ads-summary-table .ads-col-serial { width: 5%; }
-  .ads-summary-table .ads-col-date { width: 10%; }
-  .ads-summary-table .ads-col-actions { width: 13%; }
+  /* Eight columns by default (redesign round 3): they must total exactly 100,
+     or the browser renormalises them. The customer cell carries two picture
+     tiles plus the name, and the page cell stacks a page ID over a page name.
+     Actions holds worded buttons now, so it is wider than the icon row was. */
+  .ads-summary-table .ads-col-customer { width: 21%; }
+  .ads-summary-table .ads-col-page { width: 12%; }
+  .ads-summary-table .ads-col-amount { width: 12%; }
+  .ads-summary-table .ads-col-payment { width: 10%; }
+  .ads-summary-table .ads-col-status { width: 13%; }
+  .ads-summary-table .ads-col-delivery { width: 7%; }
+  .ads-summary-table .ads-col-date { width: 11%; }
+  .ads-summary-table .ads-col-actions { width: 14%; }
+  /* The dinar amount and the serial are columns of their own only on request
+     ("Columns"); the browser then shares the row between all the columns shown. */
+  .ads-summary-table .ads-col-local { width: 7%; }
+  .ads-summary-table .ads-col-serial { width: 6%; }
 
   .ads-summary-table th,
   .ads-summary-table td {
@@ -1725,23 +1726,6 @@ textarea:disabled {
     max-width: 100%;
   }
 
-  .ads-summary-table .ads-table-actions {
-    gap: 0.25rem;
-  }
-
-  .ads-summary-table .ads-table-actions > [data-action="meta-ad-link"],
-  .ads-summary-table .ads-table-actions > .ad-photo-view-button {
-    flex: 1 1 100%;
-    width: 100%;
-    min-width: 0;
-    padding-left: 0.35rem;
-    padding-right: 0.35rem;
-  }
-
-  .ads-summary-table .ads-table-actions > .ad-photo-view-button span {
-    white-space: normal;
-    line-height: 1.1;
-  }
 }
 
 /* Only tables that provide data-label attributes opt into the card layout.

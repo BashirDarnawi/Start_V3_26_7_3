@@ -530,3 +530,85 @@ pre.font-sans { font-family: inherit; }
    records the tab would list. Same colour as the word (so it stays readable), lighter weight. */
 .smart-filter-chip > b { font-weight: 500; font-variant-numeric: tabular-nums; }
 #page-quick-filters { margin-top: 12px; }
+
+/* ==========================================================================
+   The Ads table (redesign round 3, finding B-07; DESIGN.md 7.8).
+   - Eight columns: the dinar amount and its rate sit under Amount, the serial under the dates.
+     "Columns" gives either a column of its own (remembered like the filter panels).
+   - Pills and payment names break between words only (before: "Offic e", "Bank Transfe r (LYD)").
+   - Row actions: the receipt link, "Details" and one labelled menu instead of five small icons.
+     Up to 900 px, where each ad is a card, every action is a worded button and there is no menu.
+   - "Created by" shows when a row's details are open.
+   ========================================================================== */
+.ads-summary-table:not(.ads-own-local) :is(.ads-col-local, .ads-cell-local),
+.ads-summary-table.ads-own-local .ads-under-amount,
+.ads-summary-table:not(.ads-own-serial) :is(.ads-col-serial, .ads-cell-serial),
+.ads-summary-table.ads-own-serial .ads-under-date { display: none !important; }
+.ads-under-amount, .ads-under-date { display: block; margin-top: 2px; font-size: 11px; font-weight: 500; line-height: 1.35; }
+.ads-under-amount > * { display: inline-block; white-space: nowrap; }
+.ads-summary-table :is(.payment-badge, [class*="rounded-full"], [class*="delivery-"], .font-mono) { overflow-wrap: normal; word-break: normal; }
+
+.ads-table-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px; }
+.ads-row-details, .ads-row-step, .row-menu > summary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  min-height: 36px; padding: 4px 10px; border: 1px solid var(--ui-line); border-radius: 10px;
+  background: var(--ui-surface); font-size: 12px; font-weight: 650; line-height: 1.2; color: var(--ui-ink);
+  white-space: nowrap; cursor: pointer; list-style: none; user-select: none;
+}
+.row-menu > summary::-webkit-details-marker { display: none; }
+.ads-row-details:hover, .row-menu > summary:hover { background: var(--ui-surface-soft); }
+.ads-row-details[aria-expanded="true"], .row-menu[open] > summary { border-color: var(--ui-accent); color: var(--ui-accent); }
+:is(.ads-row-details, .ads-row-step, .row-menu > summary):focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 2px; }
+:is(.ads-row-step, .row-menu > summary) > :is(i, svg) { flex: none; width: 14px; height: 14px; }
+.ads-row-step { border-color: #f5c64b; background: #fffbeb; color: #92400e; }
+html.dark .ads-row-step { border-color: #92400e; background: rgb(146 64 14 / 28%); color: #fde68a; }
+
+/* The menu opens from the row's end, and nothing clips it: the table needs no sideways scrolling. */
+@media (min-width: 901px) {
+  #ads-table-container.ads-table-container { overflow: visible; }
+  .ads-summary-table tr:not(.is-open) .ad-primary-people { display: none; }
+}
+.row-menu > .frame-menu-list { z-index: 30; inset-inline: auto 0; width: max-content; min-width: 200px; max-width: min(280px, 80vw); }
+/* Whatever classes an item brings (the Meta link and the merge tool draw their own buttons): in the menu it is a menu line. */
+.row-menu > .frame-menu-list :is(button, a, label) {
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px; width: 100%; min-height: 44px;
+  padding: 8px 10px; border: 0; border-radius: 10px; background: none; box-shadow: none;
+  font-size: 13.5px; font-weight: 550; line-height: 1.3; text-align: start; color: var(--ui-ink); white-space: normal; cursor: pointer;
+}
+.row-menu > .frame-menu-list :is(button, a, label):hover { background: var(--ui-surface-soft); }
+.row-menu > .frame-menu-list :is(button, a):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+.row-menu > .frame-menu-list :is(button, a) > span { flex: 1; min-width: 0; font-size: inherit; font-weight: inherit; white-space: normal; }
+.row-menu > .frame-menu-list :is(button, a) > :is(i, svg) { flex: none; width: 18px; height: 18px; color: var(--ui-muted); }
+.row-menu > .frame-menu-list .frame-danger, .row-menu > .frame-menu-list .frame-danger > :is(i, svg) { color: var(--ui-danger-text); }
+.row-menu > .frame-menu-list .frame-danger { margin-top: 4px; border-top: 1px solid var(--ui-line); border-radius: 0 0 10px 10px; }
+.row-menu > .frame-menu-list label > input { flex: none; width: 18px; height: 18px; accent-color: var(--ui-accent); }
+
+/* A finger needs 44 px (a tablet on its side shows the table too); a mouse gets the compact 36 px. */
+@media (pointer: coarse) { .ads-row-details, .ads-row-step, .row-menu > summary { min-height: 44px; } }
+
+/* "Columns" beside "Filters & sort": a choice for the table, so it is not offered where ads are cards. */
+.ads-columns > summary { min-height: 2.75rem; padding: 0.55rem 0.85rem; border-radius: 0.85rem; font-size: 0.78rem; font-weight: 800; color: var(--brand-blue); border-color: #e7ebf2; }
+.ads-columns > summary > :is(i, svg) { flex: none; width: 16px; height: 16px; }
+html.dark .ads-columns > summary { border-color: var(--ui-line); color: var(--ui-accent); }
+
+@media (max-width: 900px) {
+  .ads-columns, .ads-row-details { display: none; }
+  .ads-table-actions { gap: 8px; }
+  .ads-row-step { min-height: 44px; flex: 1 1 100%; font-size: 13px; }
+  /* Every action in words, two to a row, each at least 44 px high. */
+  .row-actions { flex: 1 1 100%; }
+  .row-actions > summary { display: none; }
+  .row-actions > .frame-menu-list {
+    position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+    width: 100%; min-width: 0; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none;
+  }
+  .ads-summary-table .row-actions > .frame-menu-list :is(button, a) {
+    display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 44px;
+    margin: 0; padding: 8px 10px; border: 1px solid var(--ui-line); border-radius: 12px; background: var(--ui-surface);
+    box-shadow: none; font-size: 13px; font-weight: 650; line-height: 1.25; text-align: center; color: var(--ui-ink); white-space: normal;
+  }
+  .ads-summary-table .row-actions > .frame-menu-list :is(button, a) > span { flex: 0 1 auto; min-width: 0; font-size: inherit; white-space: normal; }
+  .ads-summary-table .row-actions > .frame-menu-list :is(button, a) > :is(i, svg) { flex: none; width: 16px; height: 16px; color: var(--ui-muted); }
+  .ads-summary-table .row-actions > .frame-menu-list .frame-danger { border-color: var(--ui-danger-text); color: var(--ui-danger-text); }
+  .ads-summary-table .row-actions > .frame-menu-list .frame-danger > :is(i, svg) { color: var(--ui-danger-text); }
+}
