@@ -739,9 +739,12 @@ textarea.studio-desk-input { resize: vertical; min-height: 84px; }
 .studio-desk-problem { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--studio-rose-bg); color: var(--studio-rose-fg); font-size: 13px; font-weight: 700; line-height: 1.6; }
 .studio-desk-problem > p { margin: 0; }
 /* The desk on a wide screen (round 3, DESIGN.md template T15). An opened request keeps its three boxes
-   apart; from 900 px the decision sits beside the brief and stays in view; from 1280 px the queue stays
+   apart; from 900 px the decision sits beside the brief and stays in view; from 1000 px the queue stays
    beside the opened request. Below those widths everything stacks, and the queue is a screen of its
-   own, as before. */
+   own, as before.
+   Round 4: the queue used to need 1280 px. Between 1000 and 1279 px there is room for it once the desk's own
+   list of sections shows only its icons while a request is open (the names stay for screen readers and as a
+   tooltip, the counts stay); closing the request brings the names back. */
 .studio-desk-detail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .studio-desk-queue { display: none; }
 /* Approving needs no reason, so its button comes first; the reason and the note belong to the two buttons under them. */
@@ -753,8 +756,8 @@ textarea.studio-desk-input { resize: vertical; min-height: 84px; }
   .studio-desk-detail:not([data-status="gone"]) > :is(.studio-desk-decision, .studio-desk-outcome) { grid-column: 2; grid-row: 1 / span 2; position: sticky; top: 16px; }
   .studio-desk-decision-actions > .studio-v2-action { padding-inline: 10px; }
 }
-@media (min-width: 1280px) {
-  .studio-desk-split { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); align-items: start; gap: 14px; min-width: 0; }
+@media (min-width: 1000px) {
+  .studio-desk-split { display: grid; grid-template-columns: clamp(170px, 22%, 220px) minmax(0, 1fr); align-items: start; gap: 14px; min-width: 0; }
   .studio-desk-queue { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .studio-desk-queue .studio-desk-h2 { font-size: 15px; }
   .studio-desk-queue .studio-desk-note { display: none; }
@@ -762,6 +765,17 @@ textarea.studio-desk-input { resize: vertical; min-height: 84px; }
   .studio-desk-queue .studio-desk-card-name { font-size: 14px; }
   .studio-desk-queue .studio-desk-card .studio-desk-note { display: block; }
   .studio-desk-card[aria-current="true"] { border-color: var(--ui-accent); box-shadow: 0 0 0 1px var(--ui-accent); }
+}
+@media (min-width: 1000px) and (max-width: 1279px) {
+  .studio-v2-frame.is-staff[data-open="1"] .studio-v2-body { grid-template-columns: 64px minmax(0, 1fr); gap: 16px; }
+  .studio-v2-frame.is-staff[data-open="1"] .studio-v2-nav { padding: 6px; }
+  .studio-v2-frame.is-staff[data-open="1"] .studio-v2-nav-item { justify-content: center; padding: 8px 0; }
+  .studio-v2-frame.is-staff[data-open="1"] .studio-v2-nav-item > span:not(.studio-desk-badge) { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+  .studio-v2-frame.is-staff[data-open="1"] .studio-desk-badge { inset-inline-end: 2px; }
+  .studio-desk-split > .studio-desk-detail:not([data-status="gone"]) { grid-template-columns: minmax(0, 1fr) minmax(280px, 300px); }
+}
+@media (min-width: 1280px) {
+  .studio-desk-split { grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); }
 }
 .studio-desk-outcome { border-color: var(--studio-fg); background: var(--studio-bg); }
 .studio-desk-outcome .studio-desk-note, .studio-desk-outcome .studio-desk-label { color: inherit; }

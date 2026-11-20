@@ -6442,11 +6442,19 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const deskOrder = ['data-testid="studio-desk-queue-beside"', 'data-testid="studio-desk-requests"', 'data-testid="studio-desk-request-detail"', 'data-testid="studio-desk-brief"', 'data-testid="studio-desk-decision"',
     'Approve charges the held $70.00 and runs the ad for 7 days from the start.', 'data-testid="studio-desk-approve"', 'data-testid="studio-desk-decision-error"', 'Send back or reject needs a reason and a note the customer will read.',
     'data-testid="studio-desk-reasons"', 'data-testid="studio-desk-note"', 'data-testid="studio-desk-changes"', 'data-testid="studio-desk-reject"'].map(part => detailHtml.indexOf(part));
-  check('Team desk, round 3: an opened request keeps the queue beside it with that request marked, the other one still opens from there, and the decision box reads Approve first, then the reason, the note, Send back and Reject',
+  check('Team desk, rounds 3 and 4: an opened request keeps the queue beside it with that request marked (from 1000 px, the section list as named icons up to 1279 px), the other one still opens from there, and the decision box reads Approve first, then the reason, the note, Send back and Reject',
     deskOrder.every((at, i) => at >= 0 && (i === 0 || at > deskOrder[i - 1]))
       && /data-testid="studio-desk-request-r_sub" aria-current="true" onclick="studioDeskGo\('requests', 'r_sub'\)"/.test(detailHtml)
       && /data-testid="studio-desk-request-r_sub2" onclick="studioDeskGo\('requests', 'r_sub2'\)"/.test(detailHtml)
       && !queueHtml.includes('studio-desk-queue-beside') && !queueHtml.includes('aria-current="true" onclick="studioDeskGo')
+      // round 4: the frame says when a request is open (from 1000 px the section list then shows only its icons, to make
+      // room for the queue), and every section carries its name as a tooltip for that
+      && detailHtml.includes('data-testid="studio-staff-frame" class="studio-v2-frame is-staff" dir="ltr" data-tab="review" data-section="requests" data-open="1" data-focus="0"')
+      && queueHtml.includes('data-section="requests" data-open="0" data-focus="0"')
+      && ['Requests', 'Launch', 'Settle', 'Tickets', 'Health', 'More'].every(name => detailHtml.includes(`class="studio-v2-nav-item" title="${name}" onclick="studioV2OpenSection('`) && new RegExp(`title="${name}"[^>]*>(?:(?!</button>)[\\s\\S])*<span>${name}</span>`).test(detailHtml))
+      && /@media \(min-width: 1000px\) \{\n  \.studio-desk-split \{ display: grid; grid-template-columns: clamp\(170px, 22%, 220px\) minmax\(0, 1fr\);/.test(read('assets/ads-workspace.css'))
+      && read('assets/ads-workspace.css').includes('@media (min-width: 1000px) and (max-width: 1279px) {\n  .studio-v2-frame.is-staff[data-open="1"] .studio-v2-body { grid-template-columns: 64px minmax(0, 1fr); gap: 16px; }')
+      && read('assets/ads-workspace.css').includes('.studio-v2-nav-item > span:not(.studio-desk-badge) { position: absolute; width: 1px; height: 1px;')
       && (detailHtml.match(/data-testid="studio-desk-approve"/g) || []).length === 1
       // once the request has left the lists, the queue beside the outcome no longer lists it
       && afterReject.includes('data-testid="studio-desk-queue-beside"') && !afterReject.includes('data-testid="studio-desk-request-r_sub"') && afterReject.includes('data-testid="studio-desk-request-r_sub2"'),
@@ -6729,7 +6737,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const rolloutHtml = html();
   const rolloutAr = String(inLanguage('ar', 'render(); __html'));
   check('Admin More, round 4: "No staff channel is configured on the server." and the rollout page\'s "Server switch = off" in plain words, the setting\'s name behind "Show technical steps" (the channel\'s only while it is not set up); EN and AR',
-    adminOutside(rolloutHtml).includes('data-testid="studio-admin-env">Server switch = off: &quot;off&quot; hides the new layout whatever is saved here.</p>') && adminOutside(rolloutAr).includes('data-testid="studio-admin-env">مفتاح الخادم = off: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.</p>')
+    // (round 4, the wide desk) only an opened REQUEST narrows the section list: a settings page with an address of its own does not
+    intakeHtml.includes('data-section="more" data-open="0" data-focus="0"') && rolloutHtml.includes('data-section="more" data-open="0" data-focus="0"') &&
+        adminOutside(rolloutHtml).includes('data-testid="studio-admin-env">Server switch = off: &quot;off&quot; hides the new layout whatever is saved here.</p>') && adminOutside(rolloutAr).includes('data-testid="studio-admin-env">مفتاح الخادم = off: «off» يخفي الواجهة الجديدة مهما حُفظ هنا.</p>')
       && !/ALBAYAN_/.test(adminOutside(rolloutHtml)) && !/ALBAYAN_/.test(adminOutside(rolloutAr)) && adminSetting(rolloutHtml, 'admin-rollout-switch', 'ALBAYAN_STUDIO_V2') && adminSetting(rolloutAr, 'admin-rollout-switch', 'ALBAYAN_STUDIO_V2') &&
     adminOutside(adminUnset).includes('>No staff channel is configured on the server.</p>') && adminOutside(adminUnsetAr).includes('>لا قناة للفريق مُعدّة على الخادم.</p>')
       && !/ALBAYAN_/.test(adminOutside(adminUnset)) && !/ALBAYAN_/.test(adminOutside(adminUnsetAr))

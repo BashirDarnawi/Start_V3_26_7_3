@@ -586,6 +586,77 @@ test.describe('Team desk (v2 staff frame)', () => {
     expect(errors.filter(line => !/^pageerror: .*\/api\/.* due to access control checks\.$/.test(line))).toEqual([]);
   });
 
+  // Redesign round 4 (DESIGN.md template T15): the queue stayed beside an opened request only from 1,280 px. It does
+  // from 1,000 px now: between 1,000 and 1,279 px the desk's own list of sections shows only its icons while a
+  // request is open, and that is the room the queue needed. Below 1,000 px a request is a screen of its own, as before.
+  test('wide desk: from 1,000 px the queue stays beside the opened request with the decision on the first screen; up to 1,279 px the section list narrows to icons that keep their names and counts; both languages', async ({ page, playwright, baseURL }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop-chromium', 'A layout of computer screens: one engine is enough');
+    test.setTimeout(150_000);
+    const seeded = await seedDesk(playwright, baseURL, testInfo, 'wide');
+    const errors = collectPageErrors(page);
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await openDesk(page, seeded.reviewer);
+    const frame = page.getByTestId('studio-staff-frame');
+    await expect(frame).toHaveAttribute('data-open', '0');
+    const card = page.getByTestId(`studio-desk-request-${seeded.ids.wait}`);
+    await expect(card).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await card.click();
+    await expect(page.getByTestId('studio-desk-decision')).toBeVisible();
+    await expect(frame).toHaveAttribute('data-open', '1');
+    const measure = () => page.evaluate(() => {
+      const box = selector => { const el = document.querySelector(selector); if (!el || getComputedStyle(el).display === 'none') return null; const r = el.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), width: Math.round(r.width) }; };
+      const items = [...document.querySelectorAll('[data-testid="studio-staffnav"] .studio-v2-nav-item')].map(item => {
+        const word = item.querySelector('span:not(.studio-desk-badge)'); const count = item.querySelector('.studio-desk-badge');
+        const r = item.getBoundingClientRect(); const w = word.getBoundingClientRect(); const c = count ? count.getBoundingClientRect() : null;
+        return { name: word.textContent, title: item.getAttribute('title'), wordWidth: Math.round(w.width), width: Math.round(r.width), height: Math.round(r.height),
+          count: c ? (c.width > 8 && c.height > 8 && getComputedStyle(count).clip === 'auto' && c.left >= r.left - 1 && c.right <= r.right + 1 && c.top >= r.top - 1) : null };
+      });
+      return { nav: box('[data-testid="studio-staffnav"]'), queue: box('[data-testid="studio-desk-queue-beside"]'), brief: box('[data-testid="studio-desk-brief"]'),
+        decision: box('[data-testid="studio-desk-decision"]'), approve: box('[data-testid="studio-desk-approve"]'), items, height: innerHeight };
+    });
+    for (const language of ['en', 'ar']) {
+      await setLanguage(page, language);
+      const rtl = language === 'ar';
+      const beside = (first, second) => (rtl ? first.left >= second.right - 1 : first.right <= second.left + 1);  // first, then second, in reading order
+      for (const width of [1440, 1280, 1279, 1100, 1000, 999, 920]) {
+        await page.setViewportSize({ width, height: 800 });
+        const at = `${language} ${width}`;
+        const seen = await measure();
+        // The decision sits beside the brief and its Approve button is on the first screen, at every width here.
+        expect(beside(seen.brief, seen.decision), `${at}: the decision beside the request`).toBe(true);
+        expect(seen.approve.top, `${at}: Approve is on the first screen`).toBeLessThan(seen.height - 60);
+        if (width >= 1000) {
+          expect(seen.queue, `${at}: the queue is in view`).not.toBeNull();
+          expect(beside(seen.nav, seen.queue) && beside(seen.queue, seen.brief), `${at}: sections, queue, request, decision side by side`).toBe(true);
+          expect(seen.queue.width, `${at}: a queue card has room for its lines`).toBeGreaterThanOrEqual(170);
+          expect(seen.brief.width, `${at}: the request is no narrower than it was at 1,280 px before`).toBeGreaterThanOrEqual(300);
+        } else {
+          expect(seen.queue, `${at}: no room for the queue, the request has the screen`).toBeNull();
+        }
+        const iconsOnly = width >= 1000 && width <= 1279;
+        expect(iconsOnly ? seen.nav.width <= 72 : seen.nav.width >= 200, `${at}: the section list is ${iconsOnly ? 'icons only' : 'written out'} (${seen.nav.width} px)`).toBe(true);
+        expect(seen.items.length).toBe(6);
+        for (const item of seen.items) {
+          expect(item.title, `${at}: "${item.name}" is also the tooltip`).toBe(item.name);
+          expect(item.name.trim().length, `${at}: the name stays for screen readers`).toBeGreaterThan(0);
+          expect(iconsOnly ? item.wordWidth <= 1 : item.wordWidth > 20, `${at}: "${item.name}" is ${iconsOnly ? 'not drawn' : 'drawn'}`).toBe(true);
+          expect(Math.min(item.width, item.height), `${at}: "${item.name}" is large enough to press`).toBeGreaterThanOrEqual(44);
+          if (item.count !== null) expect(item.count, `${at}: the count of "${item.name}" stays in view on its item`).toBe(true);
+        }
+        expect(seen.items.some(item => item.count === true), `${at}: at least the Requests count is shown`).toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), `${at}: nothing runs off the page`).toBeLessThanOrEqual(1);
+      }
+    }
+    await setLanguage(page, 'en');
+    // Closing the request brings the names of the sections back.
+    await page.setViewportSize({ width: 1100, height: 800 });
+    await page.getByTestId('studio-back').click();
+    await expect(frame).toHaveAttribute('data-open', '0');
+    await expect(page.getByTestId('studio-staffnav-settle')).toContainText('Settle');
+    expect((await page.getByTestId('studio-staffnav').boundingBox()).width).toBeGreaterThanOrEqual(200);
+    expect(errors.filter(line => !/^pageerror: .*\/api\/.* due to access control checks\.$/.test(line))).toEqual([]);
+  });
+
   // Redesign round 3: the owner dashboard's two Ads Studio lines. Their numbers come from the desk's own
   // server counter (toLaunch, toSettle: studio_stop.launch_and_settle_counts), worked out at most once a minute.
   test('owner dashboard: "waiting to be launched" and "waiting to be settled" show the lengths of the desk\'s own Launch and Settle lists, and each line opens its list', async ({ page, playwright, baseURL }, testInfo) => {

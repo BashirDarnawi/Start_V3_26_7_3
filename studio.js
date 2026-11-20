@@ -7138,11 +7138,12 @@ function renderStudioV2StaffFrame() {
   studioV2EnsureHistory(route, 'staff');
   studioV2SyncClassicTab(route);
   const section = studioV2StaffSection(route.section);
+  // title: between 1000 and 1279 px the list shows only its icons while a request is open (data-open; the queue takes the room).
   const items = STUDIO_V2_STAFF_SECTIONS.map(([id, icon, en, ar]) => `
-          <button type="button" data-testid="studio-staffnav-${id}" class="studio-v2-nav-item" onclick="studioV2OpenSection('${id}')"${section[0] === id ? ' aria-current="page"' : ''}>${studioV2Icon(icon, 'studio-v2-nav-icon')}<span>${studioEsc(adsStudioText(en, ar))}</span></button>`).join('');
+          <button type="button" data-testid="studio-staffnav-${id}" class="studio-v2-nav-item" title="${studioEsc(adsStudioText(en, ar))}" onclick="studioV2OpenSection('${id}')"${section[0] === id ? ' aria-current="page"' : ''}>${studioV2Icon(icon, 'studio-v2-nav-icon')}<span>${studioEsc(adsStudioText(en, ar))}</span></button>`).join('');
   const attrs = route.id ? ` data-id="${studioEsc(route.id)}"` : '';
   return `
-    <div data-testid="studio-staff-frame" class="studio-v2-frame is-staff" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" data-tab="review" data-section="${section[0]}" data-focus="0">
+    <div data-testid="studio-staff-frame" class="studio-v2-frame is-staff" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" data-tab="review" data-section="${section[0]}" data-open="${route.id && section[0] === 'requests' ? 1 : 0}" data-focus="0">
       ${renderStudioV2Header(route, 'staff')}
       <div class="studio-v2-body">
         <nav data-testid="studio-staffnav" class="studio-v2-nav is-staff" aria-label="${studioEsc(adsStudioText('Team desk sections', 'أقسام مكتب الفريق'))}">${items}
