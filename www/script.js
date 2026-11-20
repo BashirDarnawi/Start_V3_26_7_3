@@ -6836,10 +6836,10 @@ function platformLabel(p) {
 // stay as-is; only the generic words are localized.
 const METHOD_TRANSLATIONS_AR = {
   'Transfer': 'تحويل',
-  'Cash (LYD)': 'نقدي (LYD)',
+  'Cash (LYD)': 'نقدي (د.ل)',
   'Cash (USD)': 'نقدي (USD)',
   'Bank Transfer': 'حوالة مصرفية',
-  'Bank Transfer (LYD)': 'حوالة مصرفية (LYD)',
+  'Bank Transfer (LYD)': 'حوالة مصرفية (د.ل)',
   'Bank Transfer (USD)': 'حوالة مصرفية (USD)',
   'Transfer Office': 'مكتب صرافة',
   'Split Payment': 'دفعات مقسّمة',
@@ -17768,7 +17768,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (LYD)' : 'Total Paid (LYD)'}</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (د.ل)' : 'Total Paid (LYD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <!-- Exact to the cent (user request): rounding to whole
                            LYD hid real debt — 5019.10 + 1392.00 showed as a
@@ -20124,7 +20124,7 @@ function showDeliveryDetails(itemId) {
         <!-- Amount Details -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
-            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (LYD)' : 'To collect (LYD)') : (isAr ? 'المبلغ (LYD)' : 'Amount (LYD)')}</div>
+            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (د.ل)' : 'To collect (LYD)') : (isAr ? 'المبلغ (د.ل)' : 'Amount (LYD)')}</div>
             <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(detailAmountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
@@ -28076,7 +28076,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة (LYD) *' : 'Delivery fee collected (LYD) *'}</label>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة (د.ل) *' : 'Delivery fee collected (LYD) *'}</label>
           <div id="delivery-fee-payment" class="p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
             <div class="grid grid-cols-2 gap-2">
               <select id="delivery-fee-method" class="w-full glass-input px-2 py-1.5 rounded text-xs font-medium">
@@ -29870,7 +29870,7 @@ function _collectEditorView(receiptId, receipt) {
         </select>
       </div>
       <div class="col-span-4">
-        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>` : ''}
+        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'المبلغ (د.ل)' : 'Amount (LYD)'}</label>` : ''}
         <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(p.amount || ''))}" oninput="sanitizeMoneyInput(this); updateCollectPaymentRow(${idx}, 'amount', this.value)" onfocus="this.select()" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" placeholder="0.00" />
       </div>
       <div class="col-span-1 flex justify-center pb-1">
@@ -30418,7 +30418,7 @@ function _adEditHistoryText(value, fallback = '—') {
 
 // History rows are stored in English; Arabic mode translates them on display only.
 const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ (USD)',
-  'Amount (LYD)': 'المبلغ (LYD)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
+  'Amount (LYD)': 'المبلغ (د.ل)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
   'Payment Status': 'حالة الدفع', 'Delivery Status': 'حالة التوصيل', 'Ad Status': 'حالة الإعلان', 'Start Date': 'تاريخ البداية',
   'End Date': 'تاريخ النهاية', 'Serial Number': 'رقم الوصل', 'Phone Number': 'رقم الهاتف', Payments: 'الدفعات',
   'Receipt Funding': 'تمويل الوصولات', 'Funding Receipt': 'وصل التمويل', 'Ad Links': 'روابط الإعلان',
@@ -30948,7 +30948,7 @@ function addSplitPayment() {
         </select>
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">${isArSp ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'المبلغ (د.ل)' : 'Amount (LYD)'}</label>
         <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
       </div>
       <div>
@@ -31834,7 +31834,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <!-- Integrated Totals -->
             <div class="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-4">
               <div>
-                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
+                <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (د.ل)' : 'TOTAL PAID (LYD)'}</div>
                 <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
                   <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
                   <div class="text-[10px] font-bold text-slate-400 mt-1">${state.language === 'ar' ? 'د.ل' : 'LYD'}</div>
@@ -31932,7 +31932,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
       <div id="receipt-totals-section" class="mt-4 pt-4 border-t-2 border-slate-200 dark:border-slate-700">
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (LYD)' : 'TOTAL PAID (LYD)'}</div>
+            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isArF ? 'إجمالي المدفوع (د.ل)' : 'TOTAL PAID (LYD)'}</div>
             <div class="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-700">
               <div id="receipt-total-lyd" class="text-xl font-bold text-slate-800 dark:text-white">0.00</div>
               <div class="text-[10px] font-bold text-slate-400 mt-1">${state.language === 'ar' ? 'د.ل' : 'LYD'}</div>

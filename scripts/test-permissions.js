@@ -1959,7 +1959,7 @@ check('receipt and ad edit history dialogs speak Arabic in Arabic mode; the stor
     S.language = 'ar';
     sandbox.showReceiptEditHistory('history-receipt');
     let shown = text();
-    for (const arabic of ['الحالة', 'غير مدفوع', 'مدفوع', 'رقم الهاتف', 'طريقة الدفع', 'نقدي (LYD)', 'حوالة مصرفية', 'المبلغ (USD)', '$120.00', 'الدفعات: 0', 'الدفعات: 1', '—']) {
+    for (const arabic of ['الحالة', 'غير مدفوع', 'مدفوع', 'رقم الهاتف', 'طريقة الدفع', 'نقدي (د.ل)', 'حوالة مصرفية', 'المبلغ (USD)', '$120.00', 'الدفعات: 0', 'الدفعات: 1', '—']) {  // round 3: the dinar is written «د.ل» in Arabic, also in the name of a payment method
       assert(shown.includes(arabic), `receipt history lacks "${arabic}": ${shown}`);
     }
     for (const english of ['Status', 'Not Paid', 'Phone Number', 'None', 'Payment Method', 'Cash', 'Bank Transfer', 'Amount', 'Payments', 'payment(s)']) {

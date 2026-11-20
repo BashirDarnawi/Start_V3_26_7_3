@@ -2367,7 +2367,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                 <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
                   <!-- LYD Section - TOTAL PAID -->
                   <div class="mb-2">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (LYD)' : 'Total Paid (LYD)'}</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase mb-1">${isAr ? 'إجمالي المدفوع (د.ل)' : 'Total Paid (LYD)'}</div>
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <!-- Exact to the cent (user request): rounding to whole
                            LYD hid real debt — 5019.10 + 1392.00 showed as a
@@ -4723,7 +4723,7 @@ function showDeliveryDetails(itemId) {
         <!-- Amount Details -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
-            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (LYD)' : 'To collect (LYD)') : (isAr ? 'المبلغ (LYD)' : 'Amount (LYD)')}</div>
+            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (د.ل)' : 'To collect (LYD)') : (isAr ? 'المبلغ (د.ل)' : 'Amount (LYD)')}</div>
             <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(detailAmountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">

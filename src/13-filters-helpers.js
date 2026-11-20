@@ -3932,7 +3932,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة (LYD) *' : 'Delivery fee collected (LYD) *'}</label>
+          <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">${isArD ? 'قيمة التوصيل المُحصَّلة (د.ل) *' : 'Delivery fee collected (LYD) *'}</label>
           <div id="delivery-fee-payment" class="p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
             <div class="grid grid-cols-2 gap-2">
               <select id="delivery-fee-method" class="w-full glass-input px-2 py-1.5 rounded text-xs font-medium">
@@ -5726,7 +5726,7 @@ function _collectEditorView(receiptId, receipt) {
         </select>
       </div>
       <div class="col-span-4">
-        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>` : ''}
+        ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'المبلغ (د.ل)' : 'Amount (LYD)'}</label>` : ''}
         <input type="text" inputmode="decimal" value="${Security.escapeHtml(String(p.amount || ''))}" oninput="sanitizeMoneyInput(this); updateCollectPaymentRow(${idx}, 'amount', this.value)" onfocus="this.select()" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm" placeholder="0.00" />
       </div>
       <div class="col-span-1 flex justify-center pb-1">
@@ -6274,7 +6274,7 @@ function _adEditHistoryText(value, fallback = '—') {
 
 // History rows are stored in English; Arabic mode translates them on display only.
 const _EDIT_HISTORY_AR = { __proto__: null, Customer: 'العميل', Page: 'الصفحة', 'Amount (USD)': 'المبلغ (USD)',
-  'Amount (LYD)': 'المبلغ (LYD)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
+  'Amount (LYD)': 'المبلغ (د.ل)', 'Exchange Rate': 'سعر الصرف', 'Payment Method': 'طريقة الدفع', Status: 'الحالة',
   'Payment Status': 'حالة الدفع', 'Delivery Status': 'حالة التوصيل', 'Ad Status': 'حالة الإعلان', 'Start Date': 'تاريخ البداية',
   'End Date': 'تاريخ النهاية', 'Serial Number': 'رقم الوصل', 'Phone Number': 'رقم الهاتف', Payments: 'الدفعات',
   'Receipt Funding': 'تمويل الوصولات', 'Funding Receipt': 'وصل التمويل', 'Ad Links': 'روابط الإعلان',
@@ -6804,7 +6804,7 @@ function addSplitPayment() {
         </select>
       </div>
       <div>
-        <label class="block text-xs font-medium mb-1">${isArSp ? 'المبلغ (LYD)' : 'Amount (LYD)'}</label>
+        <label class="block text-xs font-medium mb-1">${isArSp ? 'المبلغ (د.ل)' : 'Amount (LYD)'}</label>
         <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" placeholder="0.00" oninput="sanitizeMoneyInput(this)" />
       </div>
       <div>

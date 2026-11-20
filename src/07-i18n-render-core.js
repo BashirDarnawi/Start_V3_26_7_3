@@ -247,10 +247,10 @@ function platformLabel(p) {
 // stay as-is; only the generic words are localized.
 const METHOD_TRANSLATIONS_AR = {
   'Transfer': 'تحويل',
-  'Cash (LYD)': 'نقدي (LYD)',
+  'Cash (LYD)': 'نقدي (د.ل)',
   'Cash (USD)': 'نقدي (USD)',
   'Bank Transfer': 'حوالة مصرفية',
-  'Bank Transfer (LYD)': 'حوالة مصرفية (LYD)',
+  'Bank Transfer (LYD)': 'حوالة مصرفية (د.ل)',
   'Bank Transfer (USD)': 'حوالة مصرفية (USD)',
   'Transfer Office': 'مكتب صرافة',
   'Split Payment': 'دفعات مقسّمة',
