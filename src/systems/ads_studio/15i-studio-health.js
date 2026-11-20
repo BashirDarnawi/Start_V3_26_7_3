@@ -44,6 +44,10 @@ const _studioHealth = {
   igForm: Object.create(null)
 };
 
+// "Show technical steps" (redesign round 3, finding B-25): which items' steps are open. The screen redraws
+// itself while it reads, so this is remembered (by item) until another account signs in.
+const _studioHealthSteps = { open: new Set(), all: false };
+
 // Meta error codes the server reports (MetaAdsError codes, which are also the (b) error
 // classes, and the check's own). Any other code shows the generic label with the code (LTR).
 const STUDIO_HEALTH_META_CODES = {
@@ -122,6 +126,8 @@ async function studioHealthApi(path, options = {}, extra = {}) {
 
 function resetStudioHealthState() {
   _studioHealthGeneration++;
+  _studioHealthSteps.open.clear();
+  _studioHealthSteps.all = false;
   _studioHealth.forUser = '';
   _studioHealth.loading = false;
   _studioHealth.loadedAt = 0;
@@ -487,7 +493,45 @@ function studioHealthFix(id, key, runbook, en, ar) {
   const heading = runbook
     ? studioHealthText(`What to do (runbook ${runbook})`, `ماذا تفعل (دليل التشغيل ${runbook})`)
     : studioHealthText('What to do', 'ماذا تفعل');
-  return `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${heading}:</strong> ${studioHealthText(en, ar)} ${where}</p>`;
+  return studioHealthSteps(id, `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${heading}:</strong> ${studioHealthText(en, ar)} ${where}</p>`);
+}
+
+// "Show technical steps" (redesign round 3, finding B-25): an item shows its reading; its "What to do" line,
+// which names server settings and runbook pages, is one press away (state: _studioHealthSteps, at the top).
+function studioHealthSteps(id, inner) {
+  const open = _studioHealthSteps.all || _studioHealthSteps.open.has(id);
+  return `<details class="tech-steps" data-testid="studio-health-steps-${id}"${open ? ' open' : ''} ontoggle="studioHealthStepsToggled('${id}', this.open)"><summary>${studioHealthText('Show technical steps', 'عرض الخطوات التقنية')}</summary><div class="tech-steps-body">${inner}</div></details>`;
+}
+
+function studioHealthStepsToggled(id, open) {
+  if (open) { _studioHealthSteps.open.add(id); return; }
+  if (_studioHealthSteps.all) {
+    // One fold closed by hand after "Show all": the others stay open, and the button offers "Show all" again.
+    try { document.querySelectorAll('[data-testid^="studio-health-steps-"]').forEach(el => { if (el.open && el.dataset) _studioHealthSteps.open.add(String(el.dataset.testid).slice('studio-health-steps-'.length)); }); } catch (_) { /* nothing drawn */ }
+    _studioHealthSteps.all = false;
+    studioHealthStepsButton();
+  }
+  _studioHealthSteps.open.delete(id);
+}
+
+// The one button that opens (or closes) every item's steps, for whoever looks after the server.
+function studioHealthAllSteps() {
+  _studioHealthSteps.all = !_studioHealthSteps.all;
+  if (!_studioHealthSteps.all) _studioHealthSteps.open.clear();
+  try { document.querySelectorAll('[data-testid^="studio-health-steps-"]').forEach(el => { el.open = _studioHealthSteps.all; }); } catch (_) { /* nothing drawn */ }
+  studioHealthStepsButton();
+  return _studioHealthSteps.all;
+}
+
+function studioHealthStepsLabel() {
+  return _studioHealthSteps.all ? studioHealthText('Hide all technical steps', 'إخفاء كل الخطوات التقنية') : studioHealthText('Show all technical steps', 'عرض كل الخطوات التقنية');
+}
+
+function studioHealthStepsButton() {
+  try {
+    const button = document.querySelector('[data-testid="studio-health-steps-all"]');
+    if (button) { button.textContent = studioHealthStepsLabel(); button.setAttribute('aria-pressed', _studioHealthSteps.all ? 'true' : 'false'); }
+  } catch (_) { /* nothing drawn */ }
 }
 
 // ---------- rendering ----------
@@ -786,15 +830,18 @@ function renderStudioHealthSection() {
   return `<section class="mt-6" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" data-testid="studio-health">
     <div class="glass-panel rounded-3xl p-5 sm:p-7">
       <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
-        <div><h2 class="text-2xl font-black text-slate-900 dark:text-white">${studioHealthText('Studio health', 'صحة الاستوديو')}</h2><p class="text-sm text-slate-500">${studioHealthText('Admin checks for Meta and the studio. Counts only, no customer data. Every item says what to do and where (the runbook page is named).', 'فحوص المدير لميتا والاستوديو. أرقام فقط، دون بيانات العملاء. كل بند يقول ماذا تفعل وأين (مع رقم صفحة دليل التشغيل).')}</p></div>
-        <button type="button" onclick="studioHealthRefreshFacts()" ${_studioHealth.refreshing ? 'disabled' : ''} class="touch-target min-h-11 rounded-xl bg-blue-600 px-4 text-sm font-black text-white hover:bg-blue-700 disabled:opacity-60 inline-flex items-center gap-2"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${_studioHealth.refreshing ? studioHealthText('Reading from Meta…', 'جارٍ القراءة من ميتا…') : studioHealthText('Refresh from Meta', 'تحديث من ميتا')}</button>
+        <div><h2 class="text-2xl font-black text-slate-900 dark:text-white">${studioHealthText('Studio health', 'صحة الاستوديو')}</h2><p class="text-sm text-slate-500">${studioHealthText('Admin checks for Meta and the studio. Counts only, no customer data. Under "Show technical steps", every item says what to do and where (the runbook page is named).', 'فحوص المدير لميتا والاستوديو. أرقام فقط، دون بيانات العملاء. تحت «عرض الخطوات التقنية» يقول كل بند ماذا تفعل وأين (مع رقم صفحة دليل التشغيل).')}</p></div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" data-testid="studio-health-steps-all" aria-pressed="${_studioHealthSteps.all ? 'true' : 'false'}" onclick="studioHealthAllSteps()" class="touch-target min-h-11 rounded-xl border border-slate-200 dark:border-slate-700 px-3 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">${studioHealthStepsLabel()}</button>
+          <button type="button" onclick="studioHealthRefreshFacts()" ${_studioHealth.refreshing ? 'disabled' : ''} class="touch-target min-h-11 rounded-xl bg-blue-600 px-4 text-sm font-black text-white hover:bg-blue-700 disabled:opacity-60 inline-flex items-center gap-2"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${_studioHealth.refreshing ? studioHealthText('Reading from Meta…', 'جارٍ القراءة من ميتا…') : studioHealthText('Refresh from Meta', 'تحديث من ميتا')}</button>
+        </div>
       </div>
       ${report ? `<p class="mb-3 text-[11px] text-slate-500">${studioHealthText('Meta readings are kept 24 h; refresh at most twice in 10 minutes.', 'تُحفظ قراءات ميتا 24 ساعة؛ التحديث مرتان كحد أقصى كل 10 دقائق.')}</p>` : ''}
       ${studioHealthNote(_studioHealth.refreshNote)}
       ${renderStudioHealthAlertChannel()}
       <div class="mt-3">${renderStudioHealthFacts()}</div>
       <h3 id="studio-health-pages" class="mt-6 mb-3 text-lg font-black text-slate-900 dark:text-white">${studioHealthText('Linked pages: Meta tests', 'الصفحات المربوطة: اختبارات ميتا')}</h3>
-      <p class="mb-3 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-page-tests"><strong>${studioHealthText('What to do (runbook 3.10)', 'ماذا تفعل (دليل التشغيل 3.10)')}:</strong> ${studioHealthText('Test subscription subscribes a page whose comments do not arrive; Read test and Check recent comments now prove an Instagram account. A page whose access stopped needs its owner to share it with Albayan again: the fix they see in Pages & replies is the one to send them.', 'اختبار الاشتراك يشترك بالصفحة التي لا تصل تعليقاتها؛ واختبار القراءة و«افحص التعليقات الأخيرة الآن» يثبتان حساب إنستغرام. الصفحة التي توقف وصولها تحتاج أن يشاركها مالكها مع البيان مرة أخرى: الإصلاح الذي يراه في الصفحات والردود هو ما ترسله له.')}</p>
+      ${studioHealthSteps('page-tests', `<p class="mb-3 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-page-tests"><strong>${studioHealthText('What to do (runbook 3.10)', 'ماذا تفعل (دليل التشغيل 3.10)')}:</strong> ${studioHealthText('Test subscription subscribes a page whose comments do not arrive; Read test and Check recent comments now prove an Instagram account. A page whose access stopped needs its owner to share it with Albayan again: the fix they see in Pages & replies is the one to send them.', 'اختبار الاشتراك يشترك بالصفحة التي لا تصل تعليقاتها؛ واختبار القراءة و«افحص التعليقات الأخيرة الآن» يثبتان حساب إنستغرام. الصفحة التي توقف وصولها تحتاج أن يشاركها مالكها مع البيان مرة أخرى: الإصلاح الذي يراه في الصفحات والردود هو ما ترسله له.')}</p>`)}
       <div class="space-y-3">${pages.length ? pages.map(renderStudioHealthPage).join('') : `<p class="text-sm text-slate-500">${studioHealthText('No linked pages yet.', 'لا توجد صفحات مربوطة بعد.')}</p>`}</div>
     </div>
   </section>`;

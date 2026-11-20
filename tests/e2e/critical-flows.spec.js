@@ -414,7 +414,15 @@ test('Meta Ads connection manager is safe, readable, and phone-sized', async ({ 
   await expect(modal).toBeVisible();
   await expect(page.getByText(/read-only.*accounting and photos are never changed/i)).toBeVisible();
   await expect(page.getByText(/setup needed/i)).toBeVisible();
+  // Redesign round 3 (B-25): plain words on the open screen; the settings and the caution about the access
+  // token are one press away, under "Show technical steps".
+  const notice = modal.locator('[data-meta-setup]');
+  await expect(notice).toContainText('Meta is not connected yet.');
+  await expect(page.getByText(/never type the access token into albayan or chat/i)).toBeHidden();
+  await expect(modal.locator('code')).toBeHidden();
+  await notice.locator('summary').click();
   await expect(page.getByText(/never type the access token into albayan or chat/i)).toBeVisible();
+  await expect(modal.locator('code')).toBeVisible();
   await expect(modal.locator('code')).not.toContainText('secret-token-must-never-leak');
   await expect(modal.locator('code')).not.toContainText('secret-app-value-must-never-leak');
   const bounds = await modal.locator(':scope > div').evaluate(element => {

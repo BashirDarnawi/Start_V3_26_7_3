@@ -9200,6 +9200,45 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Health "What to do" (P5-05): every item (token, webhook counters, jobs heartbeat, Meta lanes, replies, daily requests, allowlist, minimum budget, page subscription, funds, spend drift, page tests) names a real runbook page (or none) and links the desk section or settings form that fixes it (a real id of More, or the Requests queue; the pages link scrolls); the heartbeat and lanes come from /diagnostics at most every 10 min, a failed read is asked again on the next 60 s reload and by Refresh from Meta (the card says so); in classic the lines point in words at the section (More only for its items); EN and AR',
     !loadError && fixCases.every(Boolean), loadError || `cases ${failedCases(fixCases)} moves ${JSON.stringify(deskMoves)} diag ${diagReadsFirst}/${diagReadsReload}/${diagReadsLater} fail ${JSON.stringify({ reads: diagFail.reads, stampAge: diagFail.stampAge, retry: diagRetry.reads, refresh: diagRefresh })} missing ${fixIds.filter((id, i) => !linkedEn[i]).join(',')}`);
+
+  // ---- Redesign round 3 (finding B-25): an item shows its reading; its "What to do" line waits behind "Show technical steps"
+  const stepIds = [...fixIds, 'page-tests'];
+  const foldOf = (page, id, summary) => new RegExp(`<details class="tech-steps" data-testid="studio-health-steps-${id}"( open)? ontoggle="studioHealthStepsToggled\\('${id}', this\\.open\\)"><summary>${summary}</summary><div class="tech-steps-body"><p[^>]*data-testid="studio-health-fix-${id}"[\\s\\S]*?</p></div></details>`).exec(page);
+  const outsideFolds = page => page.replace(/<details class="tech-steps"[\s\S]*?<\/details>/g, '');
+  const openIds = page => stepIds.filter(id => (foldOf(page, id, '[^<]+') || [])[1]);
+  const stepsClosed = String(run('renderStudioHealthSection()'));
+  const allOn = run('studioHealthAllSteps()');
+  const stepsAll = String(run('renderStudioHealthSection()'));
+  const stepsAllAr = String(inLanguage('ar', 'renderStudioHealthSection()'));
+  // One fold closed by hand while "all" is on: the screen itself says which folds are still open.
+  run(`document.querySelectorAll = selector => selector === '[data-testid^="studio-health-steps-"]' ? ${JSON.stringify(stepIds.filter(id => id !== 'token'))}.map(id => ({ open: true, dataset: { testid: 'studio-health-steps-' + id } })) : [];`);
+  run("studioHealthStepsToggled('token', false)");
+  run('document.querySelectorAll = () => [];');
+  const stepsOneClosed = String(run('renderStudioHealthSection()'));
+  const allOff = [run('studioHealthAllSteps()'), run('studioHealthAllSteps()')];  // on again, then off: every fold closes
+  const stepsNone = String(run('renderStudioHealthSection()'));
+  run("studioHealthStepsToggled('funds', true)");
+  const stepsOne = String(run('renderStudioHealthSection()'));
+  run('resetStudioHealthState()');
+  const stepsAfterReset = json('[_studioHealthSteps.all, _studioHealthSteps.open.size]');
+  const stepCases = [
+    stepIds.every(id => foldOf(healthEn, id, 'Show technical steps')) && stepIds.every(id => foldOf(healthAr, id, 'عرض الخطوات التقنية')) && fixIds.every(id => foldOf(healthClassic, id, 'Show technical steps')),
+    (healthEn.match(/<details class="tech-steps"/g) || []).length === stepIds.length && openIds(healthEn).length === 0 && openIds(healthAr).length === 0,
+    // nothing technical is left on the open screen: no "What to do", no runbook number, no place in the hosting panel
+    !/<strong>What to do|runbook \d|Jelastic|Libyan Spider/.test(outsideFolds(healthEn)) && !/<strong>ماذا تفعل|دليل التشغيل \d|Jelastic|Libyan Spider/.test(outsideFolds(healthAr)),
+    healthEn.includes('Under "Show technical steps", every item says what to do and where (the runbook page is named).') && healthAr.includes('تحت «عرض الخطوات التقنية» يقول كل بند ماذا تفعل وأين (مع رقم صفحة دليل التشغيل).'),
+    healthEn.includes('<button type="button" data-testid="studio-health-steps-all" aria-pressed="false" onclick="studioHealthAllSteps()"') && healthEn.includes('>Show all technical steps</button>') && healthAr.includes('>عرض كل الخطوات التقنية</button>'),
+    openIds(stepsClosed).length === 0,
+    allOn === true && openIds(stepsAll).length === stepIds.length && stepsAll.includes('data-testid="studio-health-steps-all" aria-pressed="true"') && stepsAll.includes('>Hide all technical steps</button>') && stepsAllAr.includes('>إخفاء كل الخطوات التقنية</button>'),
+    JSON.stringify(openIds(stepsOneClosed)) === JSON.stringify(stepIds.filter(id => id !== 'token')) && stepsOneClosed.includes('aria-pressed="false"') && stepsOneClosed.includes('>Show all technical steps</button>'),
+    JSON.stringify(allOff) === '[true,false]' && openIds(stepsNone).length === 0,
+    JSON.stringify(openIds(stepsOne)) === '["funds"]',
+    JSON.stringify(stepsAfterReset) === '[false,0]',
+    /\.tech-steps > summary \{[^}]*min-height: 44px/.test(read('assets/workspace-layout.css')) && read('assets/workspace-layout.css').includes(".tech-steps[open] > summary::before { content: '\\2212'; }"),
+    ['studio-staff.js', 'www/studio-staff.js'].every(file => { const built = read(file); return built.includes('function studioHealthSteps(id, inner)') && built.includes('function studioHealthAllSteps()') && built.includes("studioHealthSteps('page-tests', "); })
+  ];
+  check('Studio health, round 3 (B-25): every "What to do" line (12 items and the page tests) sits in a closed "Show technical steps" fold with its link, nothing technical is left on the open screen, one button shows or hides all of them, opened folds survive a redraw (also after one is closed by hand), and another account starts with all of them closed; EN and AR',
+    !loadError && stepCases.every(Boolean), loadError || `cases ${failedCases(stepCases)} open ${JSON.stringify({ all: openIds(stepsAll).length, oneClosed: openIds(stepsOneClosed), none: openIds(stepsNone), one: openIds(stepsOne), reset: stepsAfterReset, allOn, allOff })}`);
   who.staff = false; who.admin = false;
 }
 

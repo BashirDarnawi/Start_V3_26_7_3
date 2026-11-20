@@ -522,18 +522,33 @@ test.describe('Team desk (v2 staff frame)', () => {
     // P5-05: the heartbeat and the lanes from the real diagnostics, and a "What to do" line with a link on every item.
     await expect(page.getByTestId('studio-health-heartbeat')).toHaveAttribute('data-late', /^[01]$/, { timeout: BOOT_TIMEOUT });
     await expect(page.getByTestId('studio-health-lanes')).toHaveAttribute('data-paused', /^[01]$/);
+    // Redesign round 3 (B-25): an item shows its reading; its "What to do" line waits behind "Show technical steps".
+    await expect(page.getByTestId('studio-health-fix-token')).toBeHidden();
+    await expect(page.getByTestId('studio-health-fix-link-heartbeat')).toBeHidden();
+    await page.getByTestId('studio-health-steps-token').locator('summary').click();  // one item's steps
+    await expect(page.getByTestId('studio-health-fix-token')).toBeVisible();
+    await expect(page.getByTestId('studio-health-fix-heartbeat')).toBeHidden();
+    await page.getByTestId('studio-health-steps-token').locator('summary').click();
+    await expect(page.getByTestId('studio-health-fix-token')).toBeHidden();
+    const allSteps = page.getByTestId('studio-health-steps-all');  // every item's steps, for whoever looks after the server
+    await expect(allSteps).toHaveText('Show all technical steps');
+    await allSteps.click();
+    await expect(allSteps).toHaveText('Hide all technical steps');
+    await expect(allSteps).toHaveAttribute('aria-pressed', 'true');
     for (const id of ['token', 'webhooks', 'heartbeat', 'lanes', 'private-replies', 'public-replies', 'daily-requests', 'allowlist', 'min-budget', 'pages', 'funds', 'spend-drift']) {
       // min-budget has no runbook page of its own (the Budget limits form is the fix), so its heading carries no number.
       await expect(page.getByTestId(`studio-health-fix-${id}`), `the ${id} item says what to do`).toContainText(id === 'min-budget' ? /What to do/ : /What to do \(runbook /);
       await expect(page.getByTestId(`studio-health-fix-link-${id}`), `the ${id} item links its fix`).toBeVisible();
     }
     await expect(page.getByTestId('studio-health-fix-page-tests')).toContainText('What to do (runbook 3.10)');
+    await expect(page.getByTestId('studio-health-fix-page-tests')).toBeVisible();
     await expectNoPageOverflow(page, 'health (admin)');
     await page.getByTestId('studio-health-fix-link-heartbeat').click();  // Diagnostics: the heartbeat and the token line
     await expect(page.getByTestId('studio-admin-heartbeat')).toBeVisible({ timeout: BOOT_TIMEOUT });
     await expect(page.getByTestId('studio-desk')).toHaveAttribute('data-section', 'more');
     await page.getByTestId('studio-staffnav-health').click();
     await expect(health).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-health-fix-link-funds'), 'the steps that were opened are still open after leaving the screen and coming back').toBeVisible();
     await page.getByTestId('studio-health-fix-link-funds').click();  // Alerts: acknowledge after the top-up
     await expect(page.getByTestId('studio-admin-alerts').or(page.getByTestId('studio-admin-alerts-empty'))).toBeVisible({ timeout: BOOT_TIMEOUT });
     await page.getByTestId('studio-staffnav-health').click();

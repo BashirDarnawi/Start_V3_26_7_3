@@ -771,3 +771,14 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
    the same Retry button. It used to be a red alarm above the first field. */
 .first-run-note { margin-block-end: 24px; padding: 14px 16px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface-soft); color: var(--ui-ink); font-size: 13px; line-height: 1.6; }
 .first-run-note > p { margin: 0 0 12px; }
+
+/* "Show technical steps" (round 3, B-25): the plain sentence stays on screen; what names a server setting or a
+   runbook page is one press away, for whoever looks after the server. Used by Meta Sync and Studio health. */
+.tech-steps { margin-block-start: 6px; }
+.tech-steps > summary { display: inline-flex; align-items: center; min-height: 44px; padding-inline: 2px; border-radius: 8px; color: var(--ui-accent); font-size: 12px; font-weight: 700; cursor: pointer; list-style-position: inside; }
+.tech-steps > summary::-webkit-details-marker { display: none; }
+.tech-steps > summary::before { content: '+'; inline-size: 14px; margin-inline-end: 4px; font-size: 16px; line-height: 1; text-align: center; }
+.tech-steps[open] > summary::before { content: '\2212'; }
+.tech-steps > summary:focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 2px; }
+.tech-steps > .tech-steps-body { margin-block-start: 4px; }
+

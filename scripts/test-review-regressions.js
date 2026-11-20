@@ -3155,13 +3155,68 @@ async function main() {
   }
   const metaFbState = html => (html.match(/data-meta-fb-state="([a-z-]+)"/) || [])[1] || '';
 
+  await test('round 3 Meta Sync: a connection that is not set up is said in plain words, every line that names a server setting waits behind "Show technical steps" (with the caution about the access token), and the steps stay open while the dialog works', async () => {
+    const outside = html => html.replace(/<details class="tech-steps"[\s\S]*?<\/details>/g, '');
+    const folds = html => [...html.matchAll(/<details class="tech-steps"( open)? ontoggle="metaTechStepsToggled\(this\.open\)"><summary>([^<]+)<\/summary><div class="tech-steps-body">([\s\S]*?)<\/div><\/details>/g)].map(match => ({ open: !!match[1], summary: match[2], body: match[3] }));
+    const words = html => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    for (const language of ['en', 'ar']) {
+      const isAr = language === 'ar';
+      // Neither way of connecting is set up: the Facebook button is not switched on, and no key is on the server.
+      const cold = await metaFbDialog({ language, fb: { ...metaFbBase(), appReady: false } });
+      let html = cold.html();
+      assert.ok(!/ALBAYAN_[A-Z_]+|Jelastic/.test(outside(html)), `${language}: no server setting is named on the open screen`);
+      const shown = words(outside(html));
+      assert.ok(shown.includes(isAr ? 'لم يُربط Meta بعد. لن يقرأ Albayan إعلانات Meta قبل إعداد الاتصال على الخادم. يقوم بذلك من يدير الخادم.' : 'Meta is not connected yet. Albayan cannot read Meta ads until the connection is set up on the server. Whoever looks after the server does this.'), shown);
+      assert.ok(shown.includes(isAr ? 'هذا الزر غير مفعّل بعد. يحتاج إعداداً لمرة واحدة على الخادم.' : 'This button is not turned on yet. It needs a one-time setup on the server.'));
+      assert.ok(!shown.includes(isAr ? 'الربط مع فيسبوك» في الأعلى' : 'Connect with Facebook above'), 'no pointer at a button that is not there');
+      const parts = folds(html);
+      assert.equal(parts.length, 2, `${language}: one fold on the Facebook card and one on the notice`);
+      assert.ok(parts.every(part => !part.open && part.summary === (isAr ? 'عرض الخطوات التقنية' : 'Show technical steps')));
+      const [card, notice] = parts;
+      assert.equal(words(card.body), isAr ? 'لتفعيل هذا الزر مرة واحدة: أضف ALBAYAN_META_APP_ID و ALBAYAN_META_APP_SECRET في إعدادات الاستضافة ثم أعد التشغيل.' : 'One-time setup to turn this on: add ALBAYAN_META_APP_ID and ALBAYAN_META_APP_SECRET in the hosting settings, then restart.');
+      assert.ok(words(notice.body).startsWith(isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'));
+      assert.ok(notice.body.includes('ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789'), 'the three settings, as they were');
+      assert.ok(words(notice.body).endsWith(isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'), 'the caution stays with the steps it is about');
+      // Opened steps stay open when the dialog redraws itself (it does while it loads and works) ...
+      cold.sandbox.metaTechStepsToggled(true);
+      cold.sandbox.metaAdsRenderModal();
+      assert.ok(folds(cold.html()).every(part => part.open), 'still open after a redraw');
+      cold.sandbox.metaTechStepsToggled(false);
+      cold.sandbox.metaAdsRenderModal();
+      assert.ok(folds(cold.html()).every(part => !part.open));
+      // ... and start closed each time Meta Sync is opened.
+      cold.sandbox.metaTechStepsToggled(true);
+      cold.sandbox.closeMetaAdsConnectionModal();
+      cold.sandbox.openMetaAdsConnectionModalNow();
+      await settle(); await settle();
+      assert.ok(folds(cold.html()).length >= 1 && folds(cold.html()).every(part => !part.open), 'closed again on a new opening');
+
+      // The Facebook button can be used: the plain sentence points at it, and only the notice has steps.
+      const ready = await metaFbDialog({ language });
+      html = ready.html();
+      assert.ok(words(outside(html)).includes(isAr ? 'يقوم بذلك من يدير الخادم. أو استخدم «الربط مع فيسبوك» في الأعلى.' : 'Whoever looks after the server does this. Or use Connect with Facebook above.'));
+      assert.equal(folds(html).length, 1);
+      assert.ok(!/ALBAYAN_[A-Z_]+|Jelastic/.test(outside(html)));
+      // In the phone app the button is not offered, so the sentence does not point at it.
+      const phone = await metaFbDialog({ language, phone: true });
+      assert.ok(!words(outside(phone.html())).includes(isAr ? 'في الأعلى' : 'Connect with Facebook above'));
+
+      // A working connection has no notice and no steps.
+      const working = await metaFbDialog({ language, meta: { configured: true, graphApiVersion: 'v25.0', tokenSource: 'connection' }, fb: metaFbConnected() });
+      assert.equal(folds(working.html()).length, 0);
+      assert.ok(!working.html().includes('data-meta-setup'));
+    }
+    const css = fs.readFileSync(path.join(__dirname, '..', 'assets', 'workspace-layout.css'), 'utf8');
+    assert.ok(/\.tech-steps > summary \{[^}]*min-height: 44px;[^}]*cursor: pointer;/.test(css), 'the fold is a full-height control');
+  });
+
   await test('Connect with Facebook: the card shows each state from GET /api/meta-ads/connection, in English and Arabic', async () => {
     const notReady = await metaFbDialog({ fb: { ...metaFbBase(), appReady: false } });
     let html = notReady.html();
     assert.equal(notReady.calls[0].url, '/api/meta-ads/connection', 'the card reads its own status when Meta Sync opens');
     assert.equal(metaFbState(html), 'app-not-ready');
     assert.ok(html.includes('ALBAYAN_META_APP_ID') && html.includes('ALBAYAN_META_APP_SECRET') && !html.includes('metaFbConnect()'), html);
-    assert.ok(html.includes('Never type the access token into Albayan or chat. Put it only in Jelastic settings.') && !html.includes('Or use Connect with Facebook above'), 'the notice is unchanged when Connect is not usable');
+    assert.ok(html.includes('Never type the access token into Albayan or chat. Put it only in Jelastic settings.') && !html.includes('Or use Connect with Facebook above'), 'the notice does not point at a button that cannot be used');
 
     const config = await metaFbDialog({ fb: { ...metaFbBase(), loginConfigId: '', loginConfigSource: '' } });
     html = config.html();
@@ -3173,7 +3228,8 @@ async function main() {
     html = idle.html();
     assert.equal(metaFbState(html), 'not-connected');
     assert.ok(html.includes('onclick="metaFbConnect()"') && html.includes('Connect with Facebook') && html.includes('Key in use: hosting settings'), html);
-    assert.ok(html.includes('Never type the access token into Albayan or chat. Put it only in Jelastic settings. Or use Connect with Facebook above.'), 'the notice keeps its sentence and points at the button');
+    // Round 3: the caution about the access token sits with the technical steps; the pointer at the button is in the plain sentence.
+    assert.ok(html.includes('Never type the access token into Albayan or chat. Put it only in Jelastic settings.') && html.includes('Whoever looks after the server does this. Or use Connect with Facebook above.'), 'the notice keeps its caution and points at the button');
     assert.ok(html.includes('onclick="metaFbEditConfig()"'), 'a saved configuration id can be changed');
     const noKey = await metaFbDialog({ fb: { ...metaFbBase(), tokenSource: 'none' }, meta: { configured: false, tokenSource: 'none' } });
     assert.ok(noKey.html().includes('No key yet'));

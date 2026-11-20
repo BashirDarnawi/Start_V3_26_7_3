@@ -361,7 +361,7 @@ function metaAdsRenderModal() {
       </div>
     </div>` : ''}
 
-    ${!metaAdsUi.loading && status && !configured ? `<div class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100"><div class="font-black">${isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'}</div><code class="mt-2 block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789</code><p class="mt-2">${isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'}${metaFbUi.status?.appReady && !metaFbIsPhoneApp() ? (isAr ? ' أو استخدم «الربط مع فيسبوك» في الأعلى.' : ' Or use Connect with Facebook above.') : ''}</p></div>` : ''}
+    ${!metaAdsUi.loading && status && !configured ? `<div data-meta-setup class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100"><div class="font-black">${isAr ? 'لم يُربط Meta بعد.' : 'Meta is not connected yet.'}</div><p class="mt-1">${isAr ? 'لن يقرأ Albayan إعلانات Meta قبل إعداد الاتصال على الخادم. يقوم بذلك من يدير الخادم.' : 'Albayan cannot read Meta ads until the connection is set up on the server. Whoever looks after the server does this.'}${metaFbUi.status?.appReady && !metaFbIsPhoneApp() ? (isAr ? ' أو استخدم «الربط مع فيسبوك» في الأعلى.' : ' Or use Connect with Facebook above.') : ''}</p>${metaTechSteps(isAr, `<div class="font-bold">${isAr ? 'أضف هذه المتغيرات في Jelastic ثم أعد تشغيل الحاوية:' : 'Add these environment variables in Jelastic, then restart the container:'}</div><code class="mt-2 block select-all whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-emerald-300" dir="ltr">ALBAYAN_META_ACCESS_TOKEN=your_token\nALBAYAN_META_APP_SECRET=your_app_secret\nALBAYAN_META_AD_ACCOUNT_IDS=123456789</code><p class="mt-2">${isAr ? 'لا تكتب رمز الدخول في Albayan أو في المحادثة. ضعه فقط داخل إعدادات Jelastic.' : 'Never type the access token into Albayan or chat. Put it only in Jelastic settings.'}</p>`)}</div>` : ''}
 
     ${target ? `<div class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-800 dark:bg-indigo-950/20"><div class="text-xs font-bold text-indigo-600">${isAr ? 'إعلان Albayan المحدد' : 'Selected Albayan ad'}</div><div class="mt-1 font-black text-slate-800 dark:text-white">#${Security.escapeHtml(String(target.id))} · ${Security.escapeHtml(target.customerName || target.pageName || (isAr ? 'إعلان' : 'Ad'))}</div>${target.metaAdId ? `<div class="mt-2 text-sm text-slate-600 dark:text-slate-300">${isAr ? 'مرتبط بـ' : 'Linked to'}: <strong>${Security.escapeHtml(currentName)}</strong> (#${Security.escapeHtml(String(target.metaAdId))})</div><div class="mt-3 flex flex-wrap gap-2"><button type="button" onclick="metaAdsSyncCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white disabled:opacity-60"><i data-lucide="refresh-cw" class="h-4 w-4 ${metaAdsUi.busyAction === 'sync' ? 'animate-spin' : ''}"></i>${isAr ? 'مزامنة الآن' : 'Sync now'}</button><button type="button" onclick="metaAdsUnlinkCurrent()" ${metaAdsUi.busyAction ? 'disabled' : ''} class="inline-flex min-h-11 items-center gap-2 rounded-xl border border-rose-200 px-4 py-2 font-bold text-rose-600 disabled:opacity-60"><i data-lucide="unlink" class="h-4 w-4"></i>${isAr ? 'إلغاء الربط' : 'Unlink'}</button></div>` : `<div class="mt-2 text-sm text-slate-500">${isAr ? 'غير مرتبط حتى الآن.' : 'Not linked yet.'}</div>`}</div>` : `<div class="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200">${isAr ? 'لفتح الربط: أغلق هذه النافذة واضغط زر «ربط» الصغير بجانب إعلان Albayan.' : 'To link an ad: close this window and press the small Link button beside an Albayan ad.'}</div>`}
 
@@ -610,6 +610,17 @@ function metaFbIsPhoneApp() {
   return typeof isPackagedMobileApp === 'function' && isPackagedMobileApp();
 }
 
+// "Show technical steps": the plain sentence stays on screen and what names a server setting sits one press
+// away, for whoever looks after the server (finding B-25, as on the owner dashboard). The dialog is redrawn
+// while it works, so whether the steps are open is remembered while Meta Sync stays open.
+function metaTechSteps(isAr, inner) {
+  return `<details class="tech-steps"${metaFbUi.steps ? ' open' : ''} ontoggle="metaTechStepsToggled(this.open)"><summary>${isAr ? 'عرض الخطوات التقنية' : 'Show technical steps'}</summary><div class="tech-steps-body">${inner}</div></details>`;
+}
+
+function metaTechStepsToggled(open) {
+  metaFbUi.steps = !!open;
+}
+
 // The key Albayan uses now, in words: the Connection tile and the card say the same thing.
 function metaFbSourceLabel(source, isAr) {
   if (source === 'connection') return isAr ? 'المفتاح المستخدم: الربط مع فيسبوك' : 'Key in use: Connect with Facebook';
@@ -619,7 +630,7 @@ function metaFbSourceLabel(source, isAr) {
 }
 
 function metaFbReset() {
-  Object.assign(metaFbUi, { status: null, loading: false, loadError: '', busy: '', error: '', ticks: null, pick: '', configDraft: '', editConfig: false, seq: (Number(metaFbUi.seq) || 0) + 1 });
+  Object.assign(metaFbUi, { status: null, loading: false, loadError: '', busy: '', error: '', ticks: null, pick: '', configDraft: '', editConfig: false, steps: false, seq: (Number(metaFbUi.seq) || 0) + 1 });
 }
 
 function metaFbErrorText(error, isAr) {
@@ -820,7 +831,7 @@ function metaFbConnectionCard(isAr, status) {
   if (metaFbUi.error) parts.push(`<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${esc(metaFbUi.error)}</div>`);
 
   if (!s.appReady) {
-    parts.push(`<p class="mt-3 text-sm text-slate-500" data-meta-fb-state="app-not-ready">${isAr ? 'لتفعيل هذا الزر مرة واحدة: أضف ALBAYAN_META_APP_ID و ALBAYAN_META_APP_SECRET في إعدادات الاستضافة ثم أعد التشغيل.' : 'One-time setup to turn this on: add ALBAYAN_META_APP_ID and ALBAYAN_META_APP_SECRET in the hosting settings, then restart.'}</p>`);
+    parts.push(`<div class="mt-3 text-sm text-slate-500" data-meta-fb-state="app-not-ready"><p>${isAr ? 'هذا الزر غير مفعّل بعد. يحتاج إعداداً لمرة واحدة على الخادم.' : 'This button is not turned on yet. It needs a one-time setup on the server.'}</p>${metaTechSteps(isAr, `<p>${isAr ? 'لتفعيل هذا الزر مرة واحدة: أضف ALBAYAN_META_APP_ID و ALBAYAN_META_APP_SECRET في إعدادات الاستضافة ثم أعد التشغيل.' : 'One-time setup to turn this on: add ALBAYAN_META_APP_ID and ALBAYAN_META_APP_SECRET in the hosting settings, then restart.'}</p>`)}</div>`);
   } else if (s.reconnectNeeded) {
     parts.push(`<div role="alert" data-meta-fb-state="reconnect" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-100">${isAr ? 'تعذّرت قراءة المفتاح المحفوظ (تغيّر مفتاح التشفير أو التطبيق). يستخدم Albayan مفتاح الاستضافة الآن. أعد الربط أو افصل.' : 'The stored key cannot be read (the encryption key or the app changed). Albayan uses the hosting key for now. Reconnect, or disconnect.'}</div>
       <div class="mt-3 flex flex-wrap gap-2">${metaFbConnectArea(isAr, isAr ? 'إعادة الربط' : 'Reconnect')}${metaFbButton('disconnect', 'metaFbDisconnect()', 'unlink', isAr ? 'فصل' : 'Disconnect', 'danger')}</div>`);
