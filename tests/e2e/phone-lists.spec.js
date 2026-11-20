@@ -246,3 +246,97 @@ test('on the narrowest phones no tile label is cut inside a word: the dashboard,
   await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
   expect(errors).toEqual([]);
 });
+
+// Redesign round 4 (DESIGN.md section 9, wireframe 09): on a phone the one main action of a screen stays in view
+// above the bottom bar. Reminders is that screen: "Remind all overdue" used to be the last line of the list.
+// The list is drawn by the app's own screen from twelve invented customers (no record is written).
+test('on a phone the main button of Reminders stays in view above the bottom bar while the list is longer than the screen, and rests in its place at the end', async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width: 390, height: 700 });
+  await signIn(page);
+  await page.evaluate(() => {
+    shellDebtorRows = () => Array.from({ length: 12 }, (_, index) => ({ customer: { id: `pin-${index}`, name: index % 2 ? `عميل تجريبي ${index + 1}` : `Invented customer ${index + 1}` }, dueLyd: 100 * (index + 1), dueUsd: 14 * (index + 1), overdue: index < 3, unpaid: [], ageDays: index < 3 ? 40 : 2 }));
+    navigateTo('reminders');
+  });
+  await expect.poll(() => page.evaluate(() => state.currentView)).toBe('reminders');
+  const button = page.getByRole('button', { name: 'Remind all overdue (3)', exact: true });
+  await expect(button).toBeVisible();
+  const measure = () => page.evaluate(() => {
+    const pin = document.querySelector('.phone-pin'); const main = pin.querySelector('button');
+    const bar = document.querySelector('.mobile-bottom-nav');
+    const rows = [...document.querySelectorAll('.hub-shell .hub-card button[onclick^="remindDebtor"]')];
+    const box = el => { const r = el.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right), height: Math.round(r.height) }; };
+    const b = box(main);
+    // A row's own button whose middle lies behind the main button, or in the band between it and the bar, must not
+    // be what a finger meets there.
+    const pinTop = pin.getBoundingClientRect().top;
+    const hit = rows.map(box).map(r => ({ x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 })).filter(point => point.y >= pinTop && point.y < innerHeight)
+      .map(point => { const el = document.elementFromPoint(point.x, point.y); return !!el && !!el.closest('button[onclick^="remindDebtor"]'); });
+    return { position: getComputedStyle(pin).position, button: b, barTop: bar ? box(bar).top : null, fab: box(document.querySelector('.mobile-bottom-nav-fab-circle') || bar), rows: rows.length, reachableUnder: hit.filter(Boolean).length,
+      scrollY: Math.round(scrollY), max: document.documentElement.scrollHeight - innerHeight, width: innerWidth, height: innerHeight, overflow: document.documentElement.scrollWidth - innerWidth };
+  });
+  for (const language of ['en', 'ar']) {
+    await page.evaluate(lang => { if (state.language !== lang) toggleLanguage(); }, language);
+    for (const [width, height] of [[320, 568], [360, 740], [390, 700], [430, 932], [820, 900]]) {
+      await page.setViewportSize({ width, height });
+      await page.evaluate(() => scrollTo(0, 0));
+      const at = `${language} ${width}x${height}`;
+      let seen = await measure();
+      expect(seen.rows, at).toBe(12);
+      expect(seen.max, `${at}: the list is longer than the screen`).toBeGreaterThan(100);
+      // At the top of a long list: in view, above the bottom bar and clear of its raised "+" button, full width.
+      expect(seen.position, at).toBe('sticky');
+      expect(seen.button.bottom, `${at}: above the bottom bar`).toBeLessThanOrEqual(seen.barTop);
+      expect(seen.button.bottom, `${at}: clear of the "+" button`).toBeLessThanOrEqual(seen.fab.top + 1);
+      expect(seen.button.top, `${at}: on the screen`).toBeGreaterThan(seen.height / 2);
+      expect(seen.button.height, `${at}: large enough to press`).toBeGreaterThanOrEqual(44);
+      expect(seen.reachableUnder, `${at}: no row's own button shows through under the main button`).toBe(0);
+      expect(seen.overflow, `${at}: nothing runs off the page`).toBeLessThanOrEqual(1);
+      // Half way down it has not moved.
+      await page.evaluate(y => scrollTo(0, y), Math.round(seen.max / 2));
+      const middle = await measure();
+      expect(Math.abs(middle.button.top - seen.button.top), `${at}: it stays where it is while the list moves`).toBeLessThanOrEqual(1);
+      expect(middle.reachableUnder, `${at}, half way: no row's button shows through`).toBe(0);
+      // At the end it rests after the last row, still above the bar.
+      await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+      const end = await measure();
+      const last = await page.evaluate(() => Math.round([...document.querySelectorAll('.hub-shell .hub-card')].pop().getBoundingClientRect().bottom));
+      expect(end.button.top, `${at}: at the end it follows the last row`).toBeGreaterThanOrEqual(last);
+      expect(end.button.bottom, `${at}: at the end it is above the bar`).toBeLessThanOrEqual(end.barTop);
+      expect(Math.abs(end.button.top - seen.button.top), `${at}: its resting place is its pinned place (no jump when the list ends)`).toBeLessThanOrEqual(1);
+    }
+  }
+  // The sync badge lives in the same corner. While it shows (here: "Sync failed", which stays until pressed) it stands
+  // clear of the main button, at the top of the list and at its end, in both languages.
+  await page.setViewportSize({ width: 390, height: 700 });
+  for (const language of ['en', 'ar']) {
+    await page.evaluate(lang => { if (state.language !== lang) toggleLanguage(); _paintSyncIndicator('error'); }, language);
+    for (const where of ['top', 'end']) {
+      await page.evaluate(end => scrollTo(0, end ? document.documentElement.scrollHeight : 0), where === 'end');
+      const boxes = await page.evaluate(() => {
+        const box = el => { const r = el.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) }; };
+        return { badge: box(document.getElementById('sync-status-indicator')), button: box(document.querySelector('.phone-pin button')), bar: box(document.querySelector('.mobile-bottom-nav')) };
+      });
+      expect(boxes.badge.bottom, `${language}, ${where}: the sync badge stands above the main button`).toBeLessThanOrEqual(boxes.button.top);
+      expect(boxes.badge.top, `${language}, ${where}: the sync badge is on the screen`).toBeGreaterThan(60);
+    }
+    await page.evaluate(() => { const badge = document.getElementById('sync-status-indicator'); if (badge) badge.remove(); });
+  }
+  await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
+  // While the keyboard is open the bottom bar is away and the button is back in its place in the page.
+  await page.setViewportSize({ width: 390, height: 700 });
+  await page.evaluate(() => { scrollTo(0, 0); document.body.classList.add('keyboard-open'); });
+  expect((await measure()).position).toBe('static');
+  await page.evaluate(() => document.body.classList.remove('keyboard-open'));
+  expect((await measure()).position).toBe('sticky');
+  // A computer has no bottom bar: the button is the last line of the list, as before.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect.poll(async () => (await page.evaluate(() => getComputedStyle(document.querySelector('.phone-pin')).position))).toBe('static');
+  // It still does its work: the next overdue customer with a usable number is asked for, or the skip is said.
+  await page.setViewportSize({ width: 390, height: 700 });
+  await button.click();
+  await expect(page.locator('#notification-container')).toContainText(/No usable phone|Reminder opened|All reminded/);
+  expect(errors).toEqual([]);
+});

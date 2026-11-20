@@ -23775,7 +23775,7 @@ function renderRemindersView() {
           <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500"><span dir="ltr">${shellEsc(shellLyd(row.dueLyd))}</span> · ${isAr ? 'آخر تذكير' : 'Last reminder'}: ${shellEsc(shellReminderAgo(log[String(row.customer.id)]))}</span></span>
           <button type="button" onclick="remindDebtor('${shellEsc(row.customer.id)}')" class="touch-target min-h-10 rounded-full bg-emerald-600 hover:bg-emerald-700 px-4 text-xs font-bold text-white">${isAr ? 'تذكير' : 'Remind'}</button>
         </div>`).join('')}</div>
-      <button type="button" onclick="remindAllOverdue()" ${overdueCount ? '' : 'disabled'} class="touch-target mt-4 w-full min-h-12 rounded-2xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold">${isAr ? `تذكير كل المتأخرين (${overdueCount})` : `Remind all overdue (${overdueCount})`}</button>`
+      <div class="phone-pin"><button type="button" onclick="remindAllOverdue()" ${overdueCount ? '' : 'disabled'} class="touch-target w-full min-h-12 rounded-2xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold">${isAr ? `تذكير كل المتأخرين (${overdueCount})` : `Remind all overdue (${overdueCount})`}</button></div>`
         : `<div class="hub-card p-8 text-center"><i data-lucide="badge-check" class="w-10 h-10 mx-auto text-emerald-400 mb-3"></i><p class="font-bold text-slate-800 dark:text-white">${isAr ? 'لا أحد يحتاج تذكيراً' : 'Nobody needs a reminder'}</p></div>`}
     </div>
   `;

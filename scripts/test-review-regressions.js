@@ -5637,6 +5637,46 @@ async function main() {
     assert.ok(notes.length === 1 && notes[0].type === 'success' && notes[0].title === 'All reminded', JSON.stringify(notes));
   });
 
+  // Redesign round 4 (ROUND3.md section 4, item 6; DESIGN.md section 9, wireframe 09): on a phone the one main action
+  // of a screen stays in view above the bottom bar. Reminders is the screen the drawings show it on. The browser
+  // test in tests/e2e/phone-lists.spec.js measures it; this one holds the markup and the rules it depends on.
+  await test('round 4 pinned main action: "Remind all overdue" is wrapped to stay above the phone\'s bottom bar, with the page\'s own figure for the room of the bar, and steps back while the keyboard is open', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    // The browser's textContent -> innerHTML escaping (this fake document has no innerHTML).
+    run('Security').escapeHtml = value => (value === null || value === undefined ? '' : String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'));
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    sandbox.shellDebtorRows = () => [{ customer: { id: 'a', name: 'First' }, overdue: true, dueLyd: 100 }, { customer: { id: 'b', name: 'Second' }, overdue: false, dueLyd: 50 }];
+    for (const [language, words] of [['en', 'Remind all overdue (1)'], ['ar', 'تذكير كل المتأخرين (1)']]) {
+      state.language = language;
+      const html = String(sandbox.renderRemindersView());
+      const pin = html.match(/<div class="phone-pin"><button type="button" onclick="remindAllOverdue\(\)" ([^>]*)class="([^"]*)">([^<]*)<\/button><\/div>/);
+      assert.ok(pin, `${language}: the main button is the one thing in the pinned place`);
+      assert.equal(pin[3], words);
+      assert.ok(/\bw-full\b/.test(pin[2]) && /\bmin-h-12\b/.test(pin[2]) && !/\bmt-4\b/.test(pin[2]) && !pin[1].includes('disabled'), 'full width, 48 px tall, the space above it belongs to the wrapper');
+      assert.equal((html.match(/class="phone-pin"/g) || []).length, 1);
+      assert.ok(html.trimEnd().endsWith('</button></div>\n    </div>'), 'it is the last line of the screen (the rule that keeps it from jumping relies on that)');
+    }
+    state.language = 'en';
+    sandbox.shellDebtorRows = () => [{ customer: { id: 'b', name: 'Second' }, overdue: false, dueLyd: 50 }];
+    assert.ok(/<div class="phone-pin"><button type="button" onclick="remindAllOverdue\(\)" disabled /.test(String(sandbox.renderRemindersView())), 'nobody overdue: the button is there and off, as before');
+    sandbox.shellDebtorRows = () => [];
+    assert.ok(!String(sandbox.renderRemindersView()).includes('phone-pin'), 'nobody to remind: no button, as before');
+    const root = path.join(__dirname, '..');
+    const css = fs.readFileSync(path.join(root, 'assets', 'workspace-layout.css'), 'utf8');
+    const page = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
+    assert.equal(fs.readFileSync(path.join(root, 'www', 'assets', 'workspace-layout.css'), 'utf8'), css, 'the phone apps carry the same styles');
+    // The room the page keeps free for the bottom bar, safe area included, and the button's place: the same figure.
+    assert.ok(/\.app-content \{\s*padding-bottom: calc\(5\.25rem \+ var\(--app-safe-bottom\)\) !important;/.test(page));
+    const phone = css.slice(css.lastIndexOf('@media (max-width: 900px) {', css.indexOf('.phone-pin { position: sticky;')));
+    assert.ok(phone.startsWith('@media (max-width: 900px) {\n  .phone-pin { position: sticky; bottom: calc(5.25rem + var(--app-safe-bottom, 0px)); z-index: 5;'), 'only where the bottom bar is (900 px and narrower)');
+    assert.ok(/\.phone-pin::after \{ content: ''; position: absolute; inset-inline: 0; top: 100%; height: calc\(5\.25rem \+ var\(--app-safe-bottom, 0px\)\); background: var\(--ui-canvas\); \}/.test(phone), 'the band hides the rows behind and takes their taps (no pointer-events: none)');
+    assert.ok(!/\.phone-pin::after \{[^}]*pointer-events/.test(css));
+    assert.ok(phone.includes('.hub-shell > .phone-pin:last-child { margin-bottom: -2rem; }'), 'no jump when the list ends');
+    assert.ok(phone.includes('body.keyboard-open .phone-pin { position: static; }') && phone.includes("body.keyboard-open .phone-pin::after { content: none; }"), 'back in its place while the keyboard is open');
+    assert.ok(phone.includes('body:has(.phone-pin):not(.keyboard-open) .sync-status-indicator { bottom: calc(5.25rem + var(--app-safe-bottom, 0px) + 66px) !important; }'), 'the sync badge stands above it');
+    assert.ok(!/env\(safe-area|visualViewport|keyboard-inset/.test(css.slice(css.indexOf('/* One main action of a phone screen'))), 'nothing here reads the safe area or the keyboard itself: the phone layer owns them');
+  });
+
   await test('r5 PRN n=20 + R3 ios-app-review-5: the packaged app draws no Print or Export button that can only fail; a direct call says it is not available in the app (never "use the web version") and never claims a download', async () => {
     // The buttons: drawn on the web, gone in the packaged app.
     const drawn = app => {

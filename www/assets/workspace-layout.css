@@ -823,3 +823,23 @@ body:has([data-testid="studio-login-help"]) #login-forgot-note { visibility: hid
    line breaks after "End:", never inside the date. */
 .ads-summary-table .ads-date { white-space: nowrap; }
 
+/* One main action of a phone screen stays in view above the bottom bar (redesign round 4; DESIGN.md section 9,
+   wireframe 09 "Reminders"). The button keeps its place in the page: at the end of the list it rests there, and
+   while the list is longer than the screen it sticks just above the room the page already keeps free for the
+   bottom bar (.app-content in style.css: 5.25rem plus the safe area). So nothing here measures the bar, the safe
+   area or the keyboard: it uses the page's own figure, and while the keyboard is open (when the bar is away) the
+   button is simply back in its place. The band under it hides the rows that pass behind and takes the taps that
+   would otherwise reach a button nobody can see (the bottom bar lies over the band and keeps its own). Wider
+   screens have no bottom bar: there the button is the last line of the list, as before. */
+.phone-pin { margin-top: 16px; }
+@media (max-width: 900px) {
+  .phone-pin { position: sticky; bottom: calc(5.25rem + var(--app-safe-bottom, 0px)); z-index: 5; padding-top: 10px; background: linear-gradient(to bottom, transparent, var(--ui-canvas) 10px); }
+  .phone-pin::after { content: ''; position: absolute; inset-inline: 0; top: 100%; height: calc(5.25rem + var(--app-safe-bottom, 0px)); background: var(--ui-canvas); }
+  /* The last line of a phone-first screen: the screen's own bottom padding (2rem) would lift the button when the
+     list ends, so the button would jump. Without it, the resting place and the pinned place are the same. */
+  .hub-shell > .phone-pin:last-child { margin-bottom: -2rem; }
+  body.keyboard-open .phone-pin { position: static; }
+  body.keyboard-open .phone-pin::after { content: none; }
+  /* The sync badge lives in the same corner (style.css): with a pinned button on screen it stands just above it. */
+  body:has(.phone-pin):not(.keyboard-open) .sync-status-indicator { bottom: calc(5.25rem + var(--app-safe-bottom, 0px) + 66px) !important; }
+}
