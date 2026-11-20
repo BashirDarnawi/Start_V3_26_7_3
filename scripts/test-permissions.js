@@ -411,9 +411,10 @@ check('viewOwn-only employee sees ONLY their own log entries', () => {
 check('viewOwn-only employee: rendered Audit screen contains no other user\'s entry', () => {
   loginAs(employee({ auditLogs: ['viewOwn'] }));
   const html = visible(sandbox.renderAuditView());
-  assert(!html.includes('Bashir logged out'), "admin's log leaked into the page");
-  assert(!html.includes('Abdu logged out'), "another user's log leaked into the page");
-  assert(html.includes('Updated Receipt'), 'own log entry is missing');
+  // Round 3: a row reads "<name> signed out", so the leak check looks for the name as well as the stored message.
+  assert(!html.includes('Bashir logged out') && !html.includes('<strong>Bashir</strong>'), "admin's log leaked into the page");
+  assert(!html.includes('Abdu logged out') && !html.includes('<strong>Abdu</strong>'), "another user's log leaked into the page");
+  assert(html.includes('<strong>Albayan</strong></span>: Updated Receipt'), 'own log entry is missing');
 });
 
 check('viewOwn-only employee: user-filter dropdown does not enumerate other users', () => {
@@ -426,15 +427,17 @@ check('viewOwn-only employee: user-filter dropdown does not enumerate other user
 
 check('auditLogs.view (full) DOES see every entry', () => {
   loginAs(employee({ auditLogs: ['view'] }));
-  const visible = sandbox.getVisibleAuditLogs();
-  assert(visible.length === 3, `expected all 3 logs, got ${visible.length}`);
+  const logs = sandbox.getVisibleAuditLogs();
+  assert(logs.length === 3, `expected all 3 logs, got ${logs.length}`);
+  const html = visible(sandbox.renderAuditView());
+  assert(html.includes('<strong>Bashir</strong></span> signed out') && html.includes('<strong>Abdu</strong></span> signed out') && html.includes('<strong>Albayan</strong></span>: Updated Receipt'), 'the full view lists all three people');
 });
 
 check('no auditLogs permission => no logs at all + no-access screen', () => {
   loginAs(employee({ analytics: ['view'] }));
   assert(sandbox.getVisibleAuditLogs().length === 0, 'logs returned without permission');
   const html = visible(sandbox.renderAuditView());
-  assert(!html.includes('Updated Receipt') && !html.includes('Bashir logged out'), 'logs rendered without permission');
+  assert(!html.includes('Updated Receipt') && !html.includes('Bashir logged out') && !html.includes('<strong>Bashir</strong>') && !html.includes('signed out'), 'logs rendered without permission');
 });
 
 check('Admin sees everything (role bypass)', () => {

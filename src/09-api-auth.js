@@ -934,6 +934,7 @@ async function apiListAuditLogs(limit = 500, offset = 0, after = '') {
       severity: 'info',
       description: String(r.message || ''),
       resourceId: String(r.resource_id || ''),
+      resourceType: String(r.resource_type || ''),  // names the record in the list's sentence
       metadata: (r.metadata && typeof r.metadata === 'object') ? r.metadata : {}
     };
   });

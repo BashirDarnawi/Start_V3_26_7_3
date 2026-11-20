@@ -1757,6 +1757,116 @@ async function main() {
     assert.deepEqual(buttons('r4').map(button => button.words), ['قبول', 'اتصال', 'WhatsApp', 'نسخ', 'مشاركة للمجموعة', 'إلغاء']);
     assert.ok(text(card('r1')).includes('المطلوب تحصيله 1,234.50 د.ل $100.00'), text(card('r1')));
   });
+  await test('round 3 Audit logs: each entry is one sentence (who did what to which record), the internal id stays in View details, old and new values show only where both are stored, and the search finds the words on screen', async () => {
+    const f = frameFixture(frameAdmin, 'audit');
+    f.sandbox.refreshServerAuditLogs = () => {};
+    f.state.users = [frameAdmin, { id: 'u2', name: 'Sara', role: 'Employee', permissions: { auditLogs: ['viewOwn'] } }];
+    f.state.customers = [{ id: 'cust_1', name: 'Medina Coffee' }, { id: 'cust_2', name: 'مخبز النخلة' }];
+    f.state.receipts = [{ id: 'receipt_171_abc', customerId: 'cust_1', tempReceiptNo: 'D12' }, { id: 'receipt_172_def', customerId: 'cust_1', tempReceiptNo: 'D13', finalReceiptNo: '4521' }, { id: 'receipt_173_ghi', customerId: 'cust_2' }];
+    f.state.pages = [{ id: 'page_1', name: 'Summer Sale' }];
+    f.state.ads = [{ id: 'ad_1', customerId: 'cust_1' }];
+    // The server's rows as the app keeps them (GET /api/audit): its message, and the type and id of the record.
+    const calls = [];
+    f.sandbox.apiJson = async url => { calls.push(String(url)); return String(url).startsWith('/api/audit') ? [{ id: 'a1', ts: Date.parse('2026-11-19T10:33:00'), user_id: 'u2', action: 'create', resource_type: 'receipts', resource_id: 'receipt_171_abc', message: 'Created receipts receipt_171_abc' }] : []; };
+    const mapped = await f.sandbox.apiListAuditLogs(500);
+    assert.equal(mapped[0].resourceType, 'receipts', 'the record type is kept so the list can name the record');
+    const entry = (id, userId, action, type, resourceId, description, more = {}) => ({ id, date: new Date(2026, 10, 19, 10, 33).toISOString(), userId, userName: userId || 'System', action, category: type === 'auth' ? 'auth' : 'data', severity: 'info', description, resourceId, resourceType: type, metadata: {}, ...more });
+    f.state.serverLogs = [
+      entry('l01', 'u2', 'login', 'auth', 'u2', 'User sara@shop.example logged in'),
+      entry('l02', 'u_gone', 'login', 'auth', 'u_gone', 'User old@shop.example logged in'),
+      entry('l03', 'u2', 'create', 'receipts', 'receipt_171_abc', 'Created receipts receipt_171_abc'),
+      entry('l04', 'u2', 'update', 'receipts', 'receipt_172_def', 'Updated receipts receipt_172_def (delivery)'),
+      entry('l05', 'u2', 'create', 'receipts', 'receipt_173_ghi', 'Created receipts receipt_173_ghi'),
+      entry('l06', 'admin', 'delete', 'receipts', 'receipt_999_zzz', 'Deleted receipts receipt_999_zzz', { severity: 'warning' }),
+      entry('l07', 'u2', 'create', 'customers', 'cust_1', 'Created customers cust_1'),
+      entry('l08', 'u2', 'create', 'pages', 'page_1', 'Created pages page_1'),
+      entry('l09', 'u2', 'create', 'ads', 'ad_1', 'Ad create'),
+      entry('l10', 'u2', 'status', 'clothesShipments', 'ship_1', 'Clothes shipment status'),
+      entry('l11', 'u2', 'settle', 'receipts', 'receipt_171_abc', 'Settled receipt and linked ads'),
+      entry('l12', 'u2', 'update', 'page', 'page_1', 'Updated page: Summer Sale'),
+      entry('l13', 'u2', 'password_reset_request', 'auth', 'u2', 'Password reset requested'),
+      entry('l14', 'admin', 'studio_setting', 'studioSettings', 'sts_1', "Saved studio setting 'rollout' as version 2", { metadata: { before: { staffDesk: 'pilot', ui: 'pilot', list: [1] }, after: { staffDesk: 'on', ui: 'pilot', list: [1, 2] } } }),
+      entry('l15', '', 'cleanup', 'audit_logs', 'startup', 'Startup audit-log cleanup'),
+      entry('l16', 'u2', 'Delete', 'receipts', '', ''),
+      entry('l17', 'u2', 'create', 'dollarPurchases', 'dp_1', 'Created dollarPurchases dp_1'),
+      entry('l18', 'u2', 'logout', 'auth', 'u2', 'User logged out'),
+      entry('l19', 'u2', 'update', 'receipts', 'receipt_171_abc', 'Updated receipts in a batch'),
+      entry('l20', 'admin', 'update', 'users', 'admin', 'Updated user owner@shop.example'),
+      entry('l21', 'admin', 'update', 'users', 'u2', 'Updated user sara@shop.example')
+    ];
+    f.state.auditPageSize = 250;
+    let html = '';
+    const draw = () => { html = String(f.run('renderAuditView()')); return html; };
+    const row = id => (html.split(`data-log-id="${id}"`)[0].split('<li class="management-timeline-item">').pop() || '');
+    const says = id => (row(id).match(/<p class="management-activity-description">(.*?)<\/p>/s) || ['', ''])[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    const shown = () => Array.from(html.matchAll(/data-log-id="([^"]+)"/g), m => m[1]);
+    draw();
+    // A sign-in or sign-out by someone the app can name is two words; the e-mail stays in View details.
+    assert.equal(says('l01'), 'Sara signed in');
+    assert.equal(says('l18'), 'Sara signed out');
+    assert.ok(!row('l01').includes('sara@shop.example'));
+    // A person the app cannot name keeps the stored message, which is the only thing that identifies them.
+    assert.equal(says('l02'), 'u_gone: User old@shop.example logged in');
+    // The server's generic messages name the record as people know it; the internal id is not printed on the row.
+    assert.equal(says('l03'), 'Sara created receipt D12 for Medina Coffee');
+    assert.equal(says('l04'), 'Sara updated receipt 4521 for Medina Coffee (delivery)');
+    assert.equal(says('l05'), 'Sara created a receipt for مخبز النخلة');
+    assert.equal(says('l06'), 'Owner deleted a receipt', 'a record that is not on this device is not named');
+    assert.equal(says('l07'), 'Sara created customer Medina Coffee');
+    assert.equal(says('l08'), 'Sara created page Summer Sale');
+    assert.equal(says('l09'), 'Sara created an ad for Medina Coffee');
+    assert.equal(says('l17'), 'Sara created a dollarPurchase', 'a collection without a name of its own keeps the stored word');
+    for (const id of ['l03', 'l04', 'l06', 'l09']) assert.ok(!/receipt_\d|ad_1/.test(row(id)), `the internal id is on the row of ${id}`);
+    assert.ok(!html.includes('Record ID') && !html.includes('management-resource-id'));
+    // Any other message is shown as stored, with the record's name added only when it is known, is not the person themself, and is not in the message already.
+    assert.equal(says('l10'), 'Sara: Clothes shipment status');
+    assert.equal(says('l11'), 'Sara: Settled receipt and linked ads · receipt D12 for Medina Coffee');
+    assert.equal(says('l12'), 'Sara: Updated page: Summer Sale');
+    assert.equal(says('l13'), 'Sara: Password reset requested');
+    assert.equal(says('l15'), 'System: Startup audit-log cleanup');
+    assert.equal(says('l16'), 'Sara: Delete', 'an entry without a message says its action');
+    assert.equal(says('l19'), 'Sara: Updated receipts in a batch · receipt D12 for Medina Coffee', 'only the exact generic message is reworded');
+    assert.equal(says('l20'), 'Owner: Updated user owner@shop.example', 'a person is not named again as their own record');
+    assert.equal(says('l21'), 'Owner: Updated user sara@shop.example · user Sara');
+    // When, and the three labels as words. The labels keep the classes the Arabic test reads.
+    assert.ok(/<p class="audit-row-meta"><time datetime="[^"]+">19 Nov 2026, 10:33<\/time> · <span class="management-action-tag">create<\/span> · <span class="management-category-tag">data<\/span> · <span class="management-severity-tag is-info">info<\/span><\/p>/.test(row('l03')), row('l03'));
+    assert.ok(row('l14').includes('<span class="management-action-tag">studio setting</span>') && row('l06').includes('<span class="management-severity-tag is-warning">warning</span>'));
+    // Old and new values: only where the entry stores both, and only plain values.
+    assert.ok(row('l14').includes('<p class="audit-row-change">staffDesk: pilot → on · and 1 more</p>'), row('l14'));
+    assert.equal((html.match(/audit-row-change/g) || []).length, 1, 'no other entry stores an old and a new value');
+    // Every row opens its details with the same button as before.
+    assert.ok(html.includes('<button type="button" data-log-id="l03" onclick="showLogDetails(this.dataset.logId)" class="management-button">View details</button>'));
+    assert.equal((html.match(/onclick="showLogDetails\(this\.dataset\.logId\)" class="management-button">View details<\/button>/g) || []).length, 21);
+    // The title row holds the list-wide tools in words; the summary is four figures.
+    const tools = Array.from((html.split('class="management-audit-actions">')[1] || '').split('</header>')[0].matchAll(/onclick="([^"]+)" class="management-button"[^>]*><i data-lucide="[^"]+" class="h-4 w-4"><\/i>([^<]+)</g), m => `${m[2]} ${m[1]}`);
+    assert.deepEqual(tools, ["CSV exportAuditLogs('csv')", "JSON exportAuditLogs('json')", 'Backup backupAuditLogs()', 'Cleanup cleanupAuditLogs()']);
+    assert.deepEqual(Array.from((html.split('class="audit-facts"')[1] || '').split('</dl>')[0].matchAll(/<dt>([^<]*)<\/dt><dd>([^<]*)<\/dd>/g), m => `${m[1]} ${m[2]}`), ['Records available to you 21', 'Creates 6', 'Updates 5', 'Deletes 2']);
+    assert.ok(html.includes('Workspace activity within your permissions.') && html.includes('<strong>Server activity trail.</strong> The latest trail is requested from the server when this page opens.'));
+    // The search finds the words on screen, and still finds an entry by its internal id.
+    f.state.auditSearch = 'medina'; draw();
+    assert.deepEqual(shown(), ['l03', 'l04', 'l07', 'l09', 'l11', 'l19']);
+    f.state.auditSearch = 'signed in'; draw();
+    assert.deepEqual(shown(), ['l01']);
+    f.state.auditSearch = 'receipt_171_abc'; draw();
+    assert.deepEqual(shown(), ['l03', 'l11', 'l19']);
+    f.state.auditSearch = 'sara@shop.example'; draw();
+    assert.deepEqual(shown(), ['l01', 'l21'], 'the stored message is still searched');
+    f.state.auditSearch = ''; draw();
+    // Arabic: the person, then what was done as a noun (no he/she form), the record with its Arabic name, and the arrow the other way.
+    f.state.language = 'ar'; draw();
+    assert.equal(says('l01'), 'Sara: تسجيل دخول');
+    assert.equal(says('l03'), 'Sara: إنشاء الوصل D12 للعميل Medina Coffee');
+    assert.equal(says('l05'), 'Sara: إنشاء وصل للعميل مخبز النخلة');
+    assert.equal(says('l06'), 'Owner: حذف وصل');
+    assert.equal(says('l09'), 'Sara: إنشاء إعلان للعميل Medina Coffee');
+    assert.equal(says('l11'), 'Sara: Settled receipt and linked ads · الوصل D12 للعميل Medina Coffee');
+    assert.ok(row('l14').includes('<p class="audit-row-change">staffDesk: pilot ← on · و1 أخرى</p>') && row('l11').includes('<span class="management-action-tag">تسوية</span>'), row('l14'));
+    f.state.language = 'en';
+    // Someone who may see only their own activity: their rows only, said so, and none of the list-wide tools.
+    f.state.currentUser = f.state.users[1]; draw();
+    assert.ok(!shown().includes('l06') && !shown().includes('l14') && !shown().includes('l02') && shown().includes('l03') && shown().length === 15, shown().join());
+    assert.ok(html.includes('Your own activity only.') && !html.includes('exportAuditLogs') && !html.includes('cleanupAuditLogs') && !html.includes('<strong>Owner</strong>'));
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {

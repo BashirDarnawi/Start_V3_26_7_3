@@ -5697,6 +5697,59 @@ function renderUsersView() {
   `;
 }
 
+// Audit entries as sentences (DESIGN.md section 8, template T8): who did what to which record. The
+// entry's own message stays the source. A sign-in or sign-out by a known person is said in two words;
+// the generic "Created receipts receipt_…" names the record as people know it (its number, its
+// customer) when the record is on this device, and the internal id stays in View details; any other
+// message is shown as stored, followed by the record's name when that is known and not in it already.
+const AUDIT_KINDS = { customer: ['customer', 'عميل'], receipt: ['receipt', 'وصل'], page: ['page', 'صفحة'], ad: ['ad', 'إعلان'], user: ['user', 'مستخدم'],
+  adCampaignRequest: ['ad request', 'طلب إعلان'], clothesProduct: ['Clothes product', 'منتج ملابس'], clothesOrder: ['Clothes order', 'طلب ملابس'], clothesShipment: ['Clothes shipment', 'شحنة ملابس'],
+  walletTransaction: ['wallet transaction', 'حركة محفظة'], walletPaymentRequest: ['payment request', 'طلب دفع'], serviceSubscription: ['subscription', 'اشتراك'] };
+const AUDIT_VERBS = { Created: ['created', 'إنشاء'], Updated: ['updated', 'تعديل'], Deleted: ['deleted', 'حذف'], Restored: ['restored', 'استعادة'] };
+function auditRecordNamer(isAr) {
+  const maps = {};
+  const byId = key => maps[key] || (maps[key] = new Map((Array.isArray(state[key]) ? state[key] : []).filter(Boolean).map(r => [String(r.id), r])));
+  return (type, id) => {   // { name, words }: "receipt D12 for X", "an ad for X", "customer X"; without a name "a receipt"
+    const kind = String(type || '').replace(/s$/, '');
+    const [en, ar] = AUDIT_KINDS[kind] || [kind, kind];
+    let name = '', loose = true;   // loose: only "for X", so the kind keeps its article
+    if (kind === 'user') name = getKnownUserNameById(id);
+    else if (kind === 'customer' || kind === 'page') name = String(byId(kind + 's').get(id)?.name || '');
+    else if (kind === 'receipt' || kind === 'ad') {
+      const record = byId(kind + 's').get(id);
+      const customer = record ? String(byId('customers').get(String(record.customerId))?.name || '') : '';
+      const number = kind === 'receipt' && record ? shellReceiptNumber(record) : '';
+      name = [number, customer && `${isAr ? 'للعميل' : 'for'} ${customer}`].filter(Boolean).join(' ');
+      loose = !number;
+    }
+    if (kind !== 'receipt' && kind !== 'ad') loose = !name;
+    const words = isAr ? `${loose ? ar : 'ال' + ar}${name ? ' ' + name : ''}` : `${loose ? `${/^[aeiou]/i.test(en) ? 'an' : 'a'} ${en}` : en}${name ? ' ' + name : ''}`;
+    return { name, words };
+  };
+}
+function auditWhat(log, known, isAr, record) {   // [after a colon?, what happened]
+  const action = String(log.action || '').toLowerCase(), message = String(log.description || ''), id = String(log.resourceId || '');
+  if (known && (action === 'login' || action === 'logout')) return [isAr, isAr ? (action === 'login' ? 'تسجيل دخول' : 'تسجيل خروج') : (action === 'login' ? 'signed in' : 'signed out')];
+  // The server's two generic shapes: "Created receipts receipt_1…" (any collection) and "Ad create" (ads, Clothes orders and shipments).
+  const generic = id && message.match(/^(Created|Updated|Deleted|Restored) (\w+) (\S+)(.*)$/), terse = id && log.resourceType && message.match(/^(?:Ad|Clothes order|Clothes shipment) (create|update|delete)$/);
+  let verb = '', type = '', rest = '';
+  if (generic && generic[3] === id) [, verb, type, , rest] = generic;
+  else if (terse) [verb, type] = [{ create: 'Created', update: 'Updated', delete: 'Deleted' }[terse[1]], log.resourceType];
+  if (verb) return [isAr, `${AUDIT_VERBS[verb][isAr ? 1 : 0]} ${record(type, id).words}${rest}`];
+  const named = id && id !== String(log.userId || '') ? record(log.resourceType, id) : null;
+  return [true, message + (named && named.name && !message.includes(named.name) ? `${message ? ' · ' : ''}${named.words}` : '')];
+}
+// "field: old → new", only where the entry stores both values (metadata.before and metadata.after).
+function auditChange(log, isAr) {
+  const { before, after } = log.metadata || {}, arrow = isAr ? '←' : '→';
+  const plain = v => ['string', 'number', 'boolean'].includes(typeof v), fields = v => v && typeof v === 'object' && !Array.isArray(v);
+  if (plain(before) && plain(after)) return before === after ? '' : `${before} ${arrow} ${after}`;
+  if (!fields(before) || !fields(after)) return '';
+  const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+  const shown = changed.filter(k => plain(before[k]) && plain(after[k])).slice(0, 3), more = changed.length - shown.length;
+  return shown.length ? shown.map(k => `${k}: ${before[k]} ${arrow} ${after[k]}`).join(' · ') + (more ? (isAr ? ` · و${more} أخرى` : ` · and ${more} more`) : '') : '';
+}
+
 function renderAuditView() {
   const isAr = state.language === 'ar';
   // PERMISSION SCOPING: auditLogs.view sees all, viewOwn only their own; everything below derives from allLogs.
@@ -5709,6 +5762,15 @@ function renderAuditView() {
   // fresh; re-renders this view when it arrives).
   refreshServerAuditLogs();
   const allLogs = getVisibleAuditLogs();
+  // Arabic display text only; values, filters and unknown ids stay raw.
+  const auditAr = { create: 'إنشاء', update: 'تعديل', delete: 'حذف', login: 'تسجيل دخول', logout: 'تسجيل خروج', restore: 'استعادة', cleanup: 'تنظيف', password_change: 'تغيير كلمة المرور', password_reset: 'إعادة تعيين كلمة المرور', password_reset_request: 'طلب إعادة تعيين كلمة المرور', password_change_failed: 'فشل تغيير كلمة المرور', password_change_blocked: 'حظر تغيير كلمة المرور', setup_admin: 'إعداد المدير', wallet_release: 'تحرير المحفظة', sync: 'مزامنة', automatic_sync: 'مزامنة تلقائية', link: 'ربط', transfer: 'تحويل', settle: 'تسوية', unsettle: 'إلغاء تسوية', stop: 'إيقاف', merge: 'دمج', review: 'مراجعة', submit: 'إرسال', status: 'تغيير حالة', payment: 'دفعة', import: 'استيراد', auth: 'مصادقة', data: 'بيانات', financial: 'مالي', general: 'عام' };
+  const auditLabel = id => { const label = isAr && auditAr[String(id).toLowerCase()]; return typeof label === 'string' ? label : String(id).replace(/_/g, ' '); };
+  const record = auditRecordNamer(isAr);
+  const sentence = log => {   // [who, after a colon?, what]
+    const known = getKnownUserNameById(log.userId) || (log.userName && log.userName !== log.userId && log.userName !== 'System' ? String(log.userName) : '');  // deleted staff by name
+    const [colon, what] = auditWhat(log, !!known, isAr, record);
+    return [known || log.userName || (isAr ? 'النظام' : 'System'), colon, what || auditLabel(log.action || '')];
+  };
   // The server trail comes newest first (500 rows, then older pages): say so while older ones are not here.
   const auditPartial = isServerModeEnabled() && state.serverLogsComplete === false && allLogs.length > 0;
   const newest = isAr ? `أحدث ${allLogs.length.toLocaleString('en-US')} سجل` : `${allLogs.length.toLocaleString('en-US')} entries`;
@@ -5725,7 +5787,8 @@ function renderAuditView() {
         foldSearchText(log.description || '').includes(search) ||
         foldSearchText(getKnownUserNameById(log.userId) || log.userName || '').includes(search) ||
         foldSearchText(log.action || '').includes(search) ||
-        foldSearchText(log.resourceId || '').includes(search);
+        foldSearchText(log.resourceId || '').includes(search) ||
+        foldSearchText(sentence(log)[2]).includes(search);  // the words on screen
       if (!matchesSearch) return false;
     }
     
@@ -5787,70 +5850,29 @@ function renderAuditView() {
   ].filter(Boolean).length;
   const auditAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('audit');
   
-  // Severity badge colors
-  const severityColors = {
-    'info': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
-    'warning': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
-    'error': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
-    'critical': 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-  };
-  
-  // Category icons
-  const categoryIcons = {
-    'auth': 'shield',
-    'data': 'database',
-    'financial': 'dollar-sign',
-    'general': 'file-text'
-  };
-  // Arabic display text only; values, filters and unknown ids stay raw.
-  const auditAr = { create: 'إنشاء', update: 'تعديل', delete: 'حذف', login: 'تسجيل دخول', logout: 'تسجيل خروج', restore: 'استعادة', cleanup: 'تنظيف', password_change: 'تغيير كلمة المرور', password_reset: 'إعادة تعيين كلمة المرور', password_reset_request: 'طلب إعادة تعيين كلمة المرور', password_change_failed: 'فشل تغيير كلمة المرور', password_change_blocked: 'حظر تغيير كلمة المرور', setup_admin: 'إعداد المدير', wallet_release: 'تحرير المحفظة', sync: 'مزامنة', automatic_sync: 'مزامنة تلقائية', link: 'ربط', auth: 'مصادقة', data: 'بيانات', financial: 'مالي', general: 'عام' };
-  const auditLabel = id => { const label = isAr && auditAr[String(id).toLowerCase()]; return typeof label === 'string' ? label : id; };
-  
+  const tool = (show, onclick, icon, words, title = '') => show ? `<button type="button" onclick="${onclick}" class="management-button"${title ? ` title="${title}"` : ''}><i data-lucide="${icon}" class="h-4 w-4"></i>${words}</button>` : '';
+  const countOf = (...actions) => allLogs.filter(l => actions.includes(l.action)).length;
+
   return `
     <div class="management-workspace audit-workspace" dir="${isAr ? 'rtl' : 'ltr'}">
       <header class="management-hero">
         <div class="management-hero-copy">
-          <span class="management-eyebrow">${isAr ? 'تاريخ مساحة العمل' : 'Workspace history'}</span>
           <h1>${t('auditLogs')}</h1>
-          <p>${isAr ? 'راجع ما تغيّر ومن قام به. افتح أي نشاط للاطلاع على تفاصيله.' : 'See what changed and who changed it. Open any activity for its full details.'}</p>
+          <p>${isAr ? 'راجع ما تغيّر ومن قام به. افتح أي نشاط للاطلاع على تفاصيله.' : 'See what changed and who changed it. Open any activity for its full details.'} ${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p>
         </div>
         <div class="management-audit-actions">
-          ${canExportLogs ? `
-          <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
-            <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
-            <span class="text-emerald-700 dark:text-emerald-400">${isAr ? 'نسخ احتياطي' : 'Backup'}</span>
-          </button>
-          ` : ''}
-          ${canClearLogs ? `
-          ${isServerModeEnabled() ? '' : `<button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
-            <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
-            <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
-          </button>`}
-          <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="${isAr ? 'حذف سجلات التدقيق القديمة (يحتفظ بآخر سنة)' : 'Delete old audit logs (keeps last 1 year)'}">
-            <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
-            <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
-          </button>
-          ` : ''}
-          ${canExportLogs ? `
-          <div class="w-px h-6 bg-slate-300 dark:bg-slate-600"></div>
-          <button onclick="exportAuditLogs('csv')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
-            <i data-lucide="download" class="w-4 h-4"></i>
-            <span>CSV</span>
-          </button>
-          <button onclick="exportAuditLogs('json')" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
-            <i data-lucide="file-json" class="w-4 h-4"></i>
-            <span>JSON</span>
-          </button>
-          ` : ''}
+          ${tool(canExportLogs, "exportAuditLogs('csv')", 'download', 'CSV')}
+          ${tool(canExportLogs, "exportAuditLogs('json')", 'file-json', 'JSON')}
+          ${tool(canExportLogs, 'backupAuditLogs()', 'archive', isAr ? 'نسخ احتياطي' : 'Backup', isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs')}
+          ${tool(canClearLogs && !isServerModeEnabled(), 'restoreAuditLogs()', 'upload', isAr ? 'استرجاع' : 'Restore', isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file')}
+          ${tool(canClearLogs, 'cleanupAuditLogs()', 'trash-2', isAr ? 'تنظيف' : 'Cleanup', isAr ? 'حذف سجلات التدقيق القديمة (يحتفظ بآخر سنة)' : 'Delete old audit logs (keeps last 1 year)')}
         </div>
       </header>
 
-      <div class="management-audit-layout">
-        <aside class="management-audit-overview" aria-label="${isAr ? 'ملخص الأنشطة المتاحة' : 'Available activity summary'}">
-          <section class="management-card management-audit-summary"><span class="management-section-icon"><i data-lucide="activity" class="h-5 w-5"></i></span><span class="management-eyebrow">${auditPartial ? (isAr ? newest : `Newest ${newest}`) : (isAr ? 'السجلات المتاحة لك' : 'Records available to you')}</span><strong class="management-audit-total">${allLogs.length.toLocaleString('en-US')}</strong><p>${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p><dl class="management-facts"><div><dt>${isAr ? 'إنشاء' : 'Creates'}</dt><dd>${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'تعديلات' : 'Updates'}</dt><dd>${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'حذف' : 'Deletes'}</dt><dd>${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</dd></div></dl>${loadOlderBtn}</section>
-          <section class="management-card management-audit-storage"><i data-lucide="${isServerModeEnabled() ? 'cloud' : 'hard-drive'}" class="h-5 w-5"></i><h2>${isServerModeEnabled() ? (isAr ? 'سجل الخادم' : 'Server activity trail') : (isAr ? 'سجل هذا الجهاز' : 'This device’s activity trail')}</h2><p>${isServerModeEnabled() ? (isAr ? 'يُطلب أحدث سجل من الخادم عند فتح هذه الصفحة. تعكس الصادرات السجلات المتاحة لحسابك.' : 'The latest trail is requested from the server when this page opens. Exports reflect the records available to your account.') : (isAr ? 'السجلات محفوظة في هذا المتصفح. أنشئ نسخة احتياطية قبل مسح بيانات المتصفح أو تغيير الجهاز.' : 'Records are stored in this browser. Back up before clearing browser data or changing devices.')}</p>${!isServerModeEnabled() ? `<span class="management-storage-caption">${db ? 'IndexedDB' : 'LocalStorage'}</span>` : ''}</section>
-        </aside>
-        <div class="management-audit-feed">
+      <dl class="audit-facts" aria-label="${isAr ? 'ملخص الأنشطة المتاحة' : 'Available activity summary'}">${[
+        [auditPartial ? (isAr ? newest : `Newest ${newest}`) : (isAr ? 'السجلات المتاحة لك' : 'Records available to you'), allLogs.length],
+        [isAr ? 'إنشاء' : 'Creates', countOf('create')], [isAr ? 'تعديلات' : 'Updates', countOf('update')], [isAr ? 'حذف' : 'Deletes', countOf('delete', 'Delete')]
+      ].map(([label, count]) => `<div><dt>${label}</dt><dd>${count.toLocaleString('en-US')}</dd></div>`).join('')}</dl>
 
       <!-- Filters -->
       <div class="smart-filter-panel management-card">
@@ -5931,17 +5953,19 @@ function renderAuditView() {
           <ol class="management-timeline" aria-label="${isAr ? 'الأنشطة' : 'Activities'}">
                 ${paginatedLogs.map(log => {
                   const severity = log.severity || 'info';
-                  const category = log.category || 'general';
-                  const userName = getKnownUserNameById(log.userId) || log.userName || (isAr ? 'النظام' : 'System');  // deleted staff by name
+                  const [who, colon, what] = sentence(log);
+                  const change = auditChange(log, isAr);
+                  const tags = [log.action && `<span class="management-action-tag">${Security.escapeHtml(auditLabel(log.action))}</span>`, `<span class="management-category-tag">${Security.escapeHtml(auditLabel(log.category || 'general'))}</span>`,
+                    `<span class="management-severity-tag is-${Security.escapeHtml(severity)}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span>`];
                   return `
                     <li class="management-timeline-item">
-                      <span class="management-timeline-marker" aria-hidden="true"><i data-lucide="${categoryIcons[category] || 'file-text'}" class="h-4 w-4"></i></span>
-                      <article class="management-card management-activity-card">
-                        <div class="management-activity-top"><div class="management-activity-tags"><span class="management-action-tag">${Security.escapeHtml(auditLabel(log.action || ''))}</span><span class="management-category-tag">${Security.escapeHtml(auditLabel(category))}</span><span class="management-severity-tag ${severityColors[severity] || severityColors.info}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span></div><time datetime="${Security.escapeHtml(String(log.date || ''))}">${new Date(log.date).toLocaleDateString(appDateLocale())}<span>${new Date(log.date).toLocaleTimeString(appDateLocale())}</span></time></div>
-                        <div class="management-activity-author"><span class="management-avatar" aria-hidden="true">${Security.escapeHtml(String(userName).charAt(0).toUpperCase())}</span><strong>${Security.escapeHtml(userName)}</strong></div>
-                        <p class="management-activity-description">${Security.escapeHtml(log.description || '')}</p>
-                        <div class="management-activity-footer">${log.resourceId ? `<p class="management-resource-id"><span>${isAr ? 'معرّف السجل' : 'Record ID'}</span><bdi>${Security.escapeHtml(String(log.resourceId))}</bdi></p>` : '<span></span>'}<button type="button" data-log-id="${Security.escapeHtml(String(log.id || ''))}" onclick="showLogDetails(this.dataset.logId)" class="management-button"><i data-lucide="eye" class="h-4 w-4"></i>${isAr ? 'عرض التفاصيل' : 'View details'}</button></div>
-                      </article>
+                      <span class="management-avatar" aria-hidden="true">${Security.escapeHtml(String(who).charAt(0).toUpperCase())}</span>
+                      <div>
+                        <p class="management-activity-description"><span class="management-activity-author"><strong>${Security.escapeHtml(who)}</strong></span>${colon ? ': ' : ' '}${Security.escapeHtml(what)}</p>
+                        <p class="audit-row-meta"><time datetime="${Security.escapeHtml(String(log.date || ''))}">${fmtDay(log.date, true)}</time>${tags.filter(Boolean).map(tag => ` · ${tag}`).join('')}</p>
+                        ${change ? `<p class="audit-row-change">${Security.escapeHtml(change)}</p>` : ''}
+                      </div>
+                      <button type="button" data-log-id="${Security.escapeHtml(String(log.id || ''))}" onclick="showLogDetails(this.dataset.logId)" class="management-button">${isAr ? 'عرض التفاصيل' : 'View details'}</button>
                     </li>
                   `;
                 }).join('')}
@@ -5981,11 +6005,11 @@ function renderAuditView() {
                 <i data-lucide="chevrons-right" class="w-3 h-3"></i>
               </button>
             </nav>
+            ${loadOlderBtn}
           </div>
         `}
       </div>
-        </div>
-      </div>
+      <p class="audit-storage-note"><i data-lucide="${isServerModeEnabled() ? 'cloud' : 'hard-drive'}" class="h-4 w-4"></i><span><strong>${isServerModeEnabled() ? (isAr ? 'سجل الخادم' : 'Server activity trail') : (isAr ? 'سجل هذا الجهاز' : 'This device’s activity trail')}.</strong> ${isServerModeEnabled() ? (isAr ? 'يُطلب أحدث سجل من الخادم عند فتح هذه الصفحة. تعكس الصادرات السجلات المتاحة لحسابك.' : 'The latest trail is requested from the server when this page opens. Exports reflect the records available to your account.') : (isAr ? 'السجلات محفوظة في هذا المتصفح. أنشئ نسخة احتياطية قبل مسح بيانات المتصفح أو تغيير الجهاز.' : 'Records are stored in this browser. Back up before clearing browser data or changing devices.')}${!isServerModeEnabled() ? ` <span class="management-storage-caption">${db ? 'IndexedDB' : 'LocalStorage'}</span>` : ''}</span></p>
     </div>
   `;
 }
@@ -6036,26 +6060,8 @@ function updateAuditFilter(filterType, value) {
 }
 
 let _auditSearchTimer = null;
-function updateAuditViewFiltered() {
-  if (state.currentView !== 'audit') return;
-  const results = document.getElementById('audit-results');
-  if (!results) {
-    render();
-    if (window.lucide) lucide.createIcons();
-    return;
-  }
-  // Swap only the logs table (and the clear-X wrapper, like the receipts
-  // search) so the search input keeps its caret and the phone keyboard
-  // stays open (same approach as updateCustomersViewFiltered).
-  const tpl = document.createElement('template');
-  tpl.innerHTML = renderAuditView();
-  const newResults = tpl.content.querySelector('#audit-results');
-  if (newResults) results.innerHTML = newResults.innerHTML;
-  const clearEl = document.getElementById('audit-search-clear');
-  const newClear = tpl.content.querySelector('#audit-search-clear');
-  if (clearEl && newClear) clearEl.innerHTML = newClear.innerHTML;
-  _lastViewHTML = null; // scoped swap left the DOM unknown to render()
-  if (window.lucide) lucide.createIcons();
+function updateAuditViewFiltered() {   // only the results and the clear-X: the search box keeps its caret and the phone keyboard stays open
+  swapViewParts('audit', renderAuditView, ['audit-results', 'audit-search-clear']);
 }
 
 function clearAuditSearch() {

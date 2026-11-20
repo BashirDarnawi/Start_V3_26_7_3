@@ -102,46 +102,35 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
 .management-settings-card th { font-size: 11px; color: var(--ui-muted); }
 .management-settings-card #passkey-list > div > div { flex-wrap: wrap; gap: 10px; }
 .management-signout { justify-self: start; margin-inline-start: 240px; }
-.management-audit-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 380px; }
-.management-audit-actions button { background: var(--ui-surface); border: 1px solid var(--ui-line); box-shadow: none; }
-.management-audit-actions > .w-px { display: none; }
-.management-audit-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); align-items: start; gap: 24px; }
-.management-audit-overview { display: grid; gap: 16px; }
-.management-audit-summary { display: grid; gap: 15px; }
-.management-audit-total { color: var(--ui-ink); font-size: 38px; font-weight: 750; letter-spacing: -.04em; line-height: 1; font-variant-numeric: tabular-nums; }
-.management-audit-summary > p, .management-audit-storage p { color: var(--ui-muted); font-size: 11px; line-height: 1.7; }
-.management-audit-summary .management-facts { margin: 0; }
-.management-audit-storage { background: var(--ui-surface-soft); box-shadow: none; }
-.management-audit-storage > svg { margin-block-end: 12px; color: var(--ui-accent); }
-.management-audit-storage h2 { margin-block-end: 10px; font-size: 13px; }
+.management-audit-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; align-items: center; gap: 8px; }
+.audit-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.audit-facts > div { padding: 12px 16px; border: 1px solid var(--ui-line); border-radius: 14px; background: var(--ui-surface); }
+.audit-facts dt { color: var(--ui-muted); font-size: 12px; line-height: 1.4; }
+.audit-facts dd { margin: 3px 0 0; color: var(--ui-ink); font-size: 20px; font-weight: 750; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.audit-workspace > .smart-filter-panel { padding: 16px; }
 .management-storage-caption { color: var(--ui-muted); font-size: 10px; font-weight: 650; }
-.management-audit-feed { display: grid; gap: 24px; }
-.management-audit-feed > .smart-filter-panel { padding: 16px; }
-.management-audit-feed .audit-filter-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.management-audit-results > .management-section-heading { align-items: center; margin-block-end: 17px; }
+.management-audit-results > .management-section-heading { align-items: center; margin-block-end: 12px; }
 .management-audit-results > .management-section-heading h2 { font-size: 15px; }
-.management-audit-results > .management-section-heading p { font-size: 11px; }
-.management-timeline { list-style: none; padding: 0; margin: 0; }
-.management-timeline-item { position: relative; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 13px; padding-block-end: 17px; }
-.management-timeline-item::before { content: ''; position: absolute; inset-inline-start: 16px; top: 28px; bottom: -7px; width: 1px; background: var(--ui-line); }
-.management-timeline-item:last-child::before { display: none; }
-.management-timeline-marker { position: relative; display: flex; justify-content: center; align-items: center; width: 34px; height: 34px; margin-block-start: 13px; border: 1px solid var(--ui-line); border-radius: 50%; color: var(--ui-accent); background: var(--ui-surface); }
-.management-activity-card { padding: 18px 20px; border-radius: 18px; }
-.management-activity-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.management-activity-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.management-action-tag, .management-category-tag, .management-severity-tag { padding: 5px 8px; border-radius: 7px; font-size: 10px; font-weight: 650; line-height: 1.3; }
-.management-action-tag { background: var(--ui-accent-soft); color: var(--ui-accent); }
-.management-category-tag { background: var(--ui-surface-soft); color: var(--ui-muted); }
-.management-activity-top time { display: grid; flex-shrink: 0; gap: 3px; color: var(--ui-muted); font-size: 10px; line-height: 1.4; text-align: end; }
-.management-activity-top time span { font-size: 9px; }
-.management-activity-author { display: flex; align-items: center; gap: 8px; margin-block-start: 17px; }
-.management-avatar { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 27px; width: 27px; height: 27px; border-radius: 9px; background: var(--ui-surface-soft); color: var(--ui-muted); font-size: 11px; font-weight: 750; }
-.management-activity-author strong { font-size: 12px; }
-.management-activity-description { margin-block: 12px 15px; color: var(--ui-ink); font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
-.management-activity-footer { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; padding-block-start: 13px; border-block-start: 1px solid var(--ui-line); }
-.management-resource-id { display: grid; gap: 4px; flex: 1; min-width: 90px; color: var(--ui-muted); font-size: 10px; }
-.management-resource-id bdi { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
-.management-activity-footer .management-button { min-height: 44px; padding-inline: 11px; font-size: 11px; }
+.management-audit-results > .management-section-heading p { font-size: 12px; }
+/* One audit entry is one row: who did what, then when and its three labels in words, then
+   "View details" (which holds the internal ids). Round 3, DESIGN.md section 8, template T8. */
+.management-timeline { list-style: none; margin: 0; padding: 0 18px; border: 1px solid var(--ui-line); border-radius: 18px; background: var(--ui-surface); }
+.management-timeline-item { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding-block: 12px; border-block-end: 1px solid var(--ui-line); }
+.management-timeline-item:last-child { border-block-end: 0; }
+.management-avatar { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: var(--ui-surface-soft); color: var(--ui-muted); font-size: 12px; font-weight: 750; }
+.management-activity-description { margin: 0; color: var(--ui-ink); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.management-activity-author strong { font-weight: 700; }
+.audit-row-meta { margin: 2px 0 0; color: var(--ui-muted); font-size: 12px; line-height: 1.5; }
+.audit-row-meta > span { display: inline-block; }
+.audit-row-meta > span::first-letter { text-transform: uppercase; }
+.management-severity-tag.is-warning { color: var(--ui-warning-text); font-weight: 650; }
+.management-severity-tag:is(.is-error, .is-critical) { color: var(--ui-danger-text); font-weight: 700; }
+.audit-row-change { margin: 2px 0 0; color: var(--ui-ink); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.management-timeline-item > .management-button { min-height: 36px; padding-block: 6px; white-space: nowrap; }
+@media (pointer: coarse) { .management-timeline-item > .management-button { min-height: 44px; } }
+.audit-storage-note { display: flex; align-items: flex-start; gap: 8px; margin: 0; color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
+.audit-storage-note > :is(i, svg) { flex: none; margin-block-start: 2px; }
+.audit-storage-note strong { color: var(--ui-ink); font-weight: 650; }
 .management-audit-pagination { display: grid; justify-items: center; gap: 13px; padding-block: 20px 0; border-block-start: 1px solid var(--ui-line); }
 .management-pagination-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; color: var(--ui-muted); font-size: 11px; }
 .management-page-buttons { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 5px; }
@@ -155,21 +144,19 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
   .management-settings-layout { grid-template-columns: 180px minmax(0, 1fr); gap: 20px; }
   .management-settings-grid { grid-template-columns: minmax(0, 1fr); }
   .management-signout { margin-inline-start: 200px; }
-  .management-audit-layout { grid-template-columns: 200px minmax(0, 1fr); gap: 20px; }
   .management-plan-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 }
 @media (max-width: 899px) {
   .management-hero { flex-direction: column; gap: 18px; }
   .management-hero-side { width: 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
-  .management-settings-layout, .management-audit-layout { grid-template-columns: minmax(0, 1fr); }
+  .management-settings-layout { grid-template-columns: minmax(0, 1fr); }
   .management-settings-nav { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 0; }
   .management-settings-nav > .management-eyebrow, .management-settings-nav > p { grid-column: 1 / -1; }
   .management-settings-nav > p { margin-block-start: 0; }
   .management-settings-nav button { gap: 7px; padding: 11px; background: var(--ui-surface); border-color: var(--ui-line); font-size: 11px; }
   .management-settings-nav .management-direction-icon { display: none; }
   .management-signout { margin-inline-start: 0; }
-  .management-audit-actions { justify-content: flex-start; max-width: none; }
-  .management-audit-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .management-audit-actions { justify-content: flex-start; }
 }
 @media (max-width: 599px) {
   .management-workspace { gap: 18px; }
@@ -194,25 +181,15 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
   .management-plan-workspace > section { padding: 17px; }
   .management-plan-workspace details { padding: 12px; }
   .management-plan-workspace details .grid.grid-cols-2 { grid-template-columns: minmax(0, 1fr); }
-  .management-audit-overview { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .management-audit-summary { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; }
-  .management-audit-summary > .management-section-icon { grid-row: span 2; }
-  .management-audit-total { font-size: 32px; }
-  .management-audit-summary > p, .management-audit-summary > dl { grid-column: 1 / -1; }
-  .management-audit-storage { padding: 14px 17px; }
-  .management-audit-storage > svg { float: inline-start; margin-inline-end: 10px; margin-block-end: 0; }
-  .management-audit-feed { gap: 20px; }
-  .management-audit-feed .audit-filter-controls { grid-template-columns: minmax(0, 1fr); }
-  .management-timeline-item { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
-  .management-timeline-item::before { inset-inline-start: 11px; }
-  .management-timeline-marker { width: 24px; height: 24px; margin-block-start: 16px; }
-  .management-timeline-marker svg { width: 12px; height: 12px; }
-  .management-activity-card { padding: 14px; border-radius: 16px; }
-  .management-activity-top { flex-direction: column; gap: 10px; }
-  .management-activity-top time { display: flex; flex-wrap: wrap; gap: 6px; text-align: start; }
-  .management-activity-description { font-size: 12px; }
-  .management-activity-footer { align-items: stretch; }
-  .management-activity-footer .management-button { width: 100%; }
+  .management-audit-actions { gap: 6px; }
+  .management-audit-actions > .management-button { gap: 6px; padding-inline: 10px; }
+  .audit-facts { grid-template-columns: 1.7fr 1fr 1fr 1fr; gap: 6px; }
+  .audit-facts > div { padding: 8px 10px; border-radius: 12px; }
+  .audit-facts dt { font-size: 11px; }
+  .audit-facts dd { font-size: 16px; }
+  .management-timeline { padding-inline: 12px; }
+  .management-timeline-item { grid-template-columns: 30px minmax(0, 1fr); align-items: start; row-gap: 8px; }
+  .management-timeline-item > .management-button { grid-column: 2; justify-self: start; }
   .management-page-buttons { gap: 3px; }
   .management-page-buttons button { min-width: 38px; padding-inline: 7px; }
   .management-page-buttons > span { padding-inline: 4px; font-size: 10px; }

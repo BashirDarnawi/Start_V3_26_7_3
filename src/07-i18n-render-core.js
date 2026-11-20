@@ -206,6 +206,13 @@ function fmtUsd(value) {
 function fmtLyd(value) {
   return `${fmt2(value)} ${state.language === 'ar' ? 'د.ل' : 'LYD'}`;
 }
+// One way of writing dates (DESIGN.md 5.4): "19 Nov 2026", with a time "19 Nov 2026, 12:33"; the
+// same order in Arabic, with the Western digits and Gregorian months the app already pins.
+function fmtDay(value, withTime) {
+  const date = new Date(value);
+  if (!value || isNaN(date)) return '';
+  return date.toLocaleString(appDateLocale(), { day: 'numeric', month: 'short', year: 'numeric', ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}) });
+}
 
 // Translate a stored status/enum value for display (Arabic mode only).
 function trStatus(value) {

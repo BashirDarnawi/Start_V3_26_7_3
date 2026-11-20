@@ -171,7 +171,8 @@ check('audit timeline exposes readable activity fields and detail actions on pho
   views.includes('management-activity-author') &&
   views.includes('management-severity-tag') &&
   views.includes('management-category-tag') &&
-  views.includes('management-resource-id') &&
+  // Round 3: the internal record id is no longer printed on every row; "View details" shows it.
+  !views.includes('management-resource-id') && views.includes("'Resource ID'") &&
   views.includes('onclick="showLogDetails(this.dataset.logId)"') &&
   read('assets/management-workspace.css').includes('.management-timeline-item'));
 check('hosted audit detail buttons resolve the server-visible row',
