@@ -11,7 +11,9 @@ customers too; always the caller's own tickets: another owner's ticket is 404, n
   an hour and 20 unresolved tickets per customer (409 TICKET_OPEN_LIMIT). A related item must be the
   caller's own: a request (``campaign``: 404 UNKNOWN_CAMPAIGN), a charge request (``payment``, by its
   id or its PAY- reference: 404 UNKNOWN_PAYMENT) or a linked page (``page``: 404 UNKNOWN_PAGE).
-* ``GET /tickets?cursor=&status=&limit=`` -> ``{tickets, nextCursor}``, newest first, 20 a page.
+* ``GET /tickets?cursor=&status=&limit=`` -> ``{tickets, nextCursor}``, newest first, 20 a page. The
+  first page (no cursor) also carries ``counts: {active, resolved}``: how many of the caller's own
+  tickets each tab of the list holds (ticket_tab_counts).
 * ``GET /tickets/{id}`` -> ``{ticket, messages}`` (at most 50 messages, oldest first).
 * ``POST /tickets/{id}/messages`` ``{text, operationId}`` -> ``{ticket, message}``: the ticket goes
   back to ``open`` (waiting for the team). A resolved ticket is reopened by a message within 7 days
@@ -27,7 +29,10 @@ too, whatever category the customer chose (audience_for), and every staff read c
 (reviewer_may_see), so an older payment ticket saved as 'staff' stays hidden as well.
 
 * ``GET /staff/tickets?status=&priority=&cursor=&limit=`` -> ``{tickets, nextCursor}``: unresolved
-  urgent tickets (stop requests) pinned on top, then newest first.
+  urgent tickets (stop requests) pinned on top, then newest first. The first page (no cursor, no
+  ``priority``) also carries ``counts: {active, open, answered, waiting_customer}``: how many tickets
+  each of those tabs holds for this caller, by the list's own rules (a reviewer's counts leave out
+  what a reviewer may not see). There is no count of resolved tickets for the team: those only grow.
 * ``GET /staff/tickets/{id}`` -> ``{ticket, messages}``.
 * ``POST /staff/tickets/{id}/messages`` ``{text, operationId}`` -> ``{ticket, message}``: the ticket
   becomes ``answered``.
@@ -589,10 +594,13 @@ def list_tickets_page(
     cursor: tuple[int, int, str] | None = None,
     limit: int = PAGE_DEFAULT,
     now: datetime | None = None,
+    with_counts: bool = False,
 ) -> dict[str, Any]:
     """A page of tickets: the owner's own (``owner_id``, newest first) or the team queue (unresolved
     urgent tickets first, then newest first; reviewers only ``audience: 'staff'``). ``kind`` narrows
-    to one ticket kind and ``tiktok_state`` (a TIKTOK_STATE_FILTERS value) to one service state."""
+    to one ticket kind and ``tiktok_state`` (a TIKTOK_STATE_FILTERS value) to one service state.
+    ``with_counts``: the first page of a plain list (no cursor, no priority, kind or service-state
+    filter) also carries ``counts``, the tabs of that list (ticket_tab_counts)."""
     status_sql, priority_sql = json_field_sql("status"), json_field_sql("priority")
     where = ["type = :type", "deleted = false"]
     params: dict[str, Any] = {"type": SUPPORT_TICKETS_TYPE, "limit": int(limit) + 1}
@@ -645,10 +653,59 @@ def list_tickets_page(
     for ticket in tickets:
         if ticket["id"] in held:
             ticket["stopOpen"] = True  # its stop request is still open, whatever the ticket's own status
-    return {
+    page_out: dict[str, Any] = {
         "tickets": tickets,
         "nextCursor": f"{int(last['pinned'])}:{int(last['created_at'])}:{last['id']}" if last else None,
     }
+    if with_counts and cursor is None and not (priority or kind or tiktok_state):
+        page_out["counts"] = ticket_tab_counts(conn, owner_id=owner_id, admin=admin)
+    return page_out
+
+
+def ticket_tab_counts(conn: Any, *, owner_id: str | None = None, admin: bool = False) -> dict[str, int]:
+    """How many tickets each tab of a ticket list holds: whole numbers, no texts. The rules are the
+    list's own (list_tickets_page), so a tab's number is the number of rows that tab would show.
+
+    * The owner's own tickets (``owner_id``): ``active`` (not resolved) and ``resolved``.
+    * The team queue (``owner_id`` None): ``active``, ``open``, ``answered`` and ``waiting_customer``.
+      Reviewers (``admin`` False) count only ``audience: 'staff'`` tickets that are not about a
+      payment, as in the list. ``active`` also counts the ticket of a stop request still open after
+      the team resolved it by hand, because the active list shows it. Resolved tickets are not
+      counted for the team: they only grow, and the other rows are bounded by the open work."""
+    status_sql = f"COALESCE({json_field_sql('status')}, '')"
+    where = ["type = :type", "deleted = false"]
+    params: dict[str, Any] = {"type": SUPPORT_TICKETS_TYPE}
+    staff = owner_id is None
+    if not staff:
+        where.append("created_by = :uid")
+        params["uid"] = owner_id
+    elif not admin:  # reviewer_may_see in SQL, as in list_tickets_page
+        where.append(f"{json_field_sql('audience')} = 'staff'")
+        where.append(f"COALESCE({json_field_sql('relatedType')}, '') <> 'payment'")
+    visible = " AND ".join(where)
+    # The team's counts read the unresolved rows only (resolved rows only grow).
+    counted = f"{visible} AND {status_sql} <> 'resolved'" if staff else visible
+    rows = conn.execute(
+        text(f"SELECT {status_sql} AS status, COUNT(*) AS n FROM entities WHERE {counted} GROUP BY {status_sql}"),
+        params,
+    ).mappings().all()
+    by_status = {str(row["status"] or ""): int(row["n"] or 0) for row in rows}
+    resolved = by_status.get("resolved", 0)
+    active = sum(by_status.values()) - resolved
+    if not staff:
+        return {"active": active, "resolved": resolved}
+    held = _open_stop_ticket_ids(conn)
+    if held:  # resolved by hand while the stop request is still open: the active list keeps them
+        held_params = {**params, **{f"held{i}": ticket_id for i, ticket_id in enumerate(held)}}
+        active += int(conn.execute(
+            text(
+                f"SELECT COUNT(*) FROM entities WHERE {visible} AND {status_sql} = 'resolved' "
+                f"AND id IN ({', '.join(f':held{i}' for i in range(len(held)))})"
+            ),
+            held_params,
+        ).scalar() or 0)
+    return {"active": active, "open": by_status.get("open", 0), "answered": by_status.get("answered", 0),
+            "waiting_customer": by_status.get("waiting_customer", 0)}
 
 
 def _open_stop_ticket_ids(conn: Any) -> list[str]:
@@ -1385,7 +1442,7 @@ def create_studio_support_router(
         with db_conn() as conn:
             page = list_tickets_page(
                 conn, owner_id=str(user.get("id") or ""), status=_status_filter(query.get("status")),
-                cursor=_parse_cursor(query.get("cursor")), limit=_limit(query.get("limit")),
+                cursor=_parse_cursor(query.get("cursor")), limit=_limit(query.get("limit")), with_counts=True,
             )
         return for_customer(page, user)
 
@@ -1447,7 +1504,7 @@ def create_studio_support_router(
             return list_tickets_page(
                 conn, admin=admin, status=_status_filter(query.get("status")),
                 priority=_priority_filter(query.get("priority")), cursor=_parse_cursor(query.get("cursor")),
-                limit=_limit(query.get("limit")), now=utc_now(),
+                limit=_limit(query.get("limit")), now=utc_now(), with_counts=True,
             )
 
     @router.get("/staff/tickets/{ticket}")

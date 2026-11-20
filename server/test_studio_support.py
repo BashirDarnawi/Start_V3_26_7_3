@@ -711,6 +711,120 @@ def test_lists_page_newest_first_with_urgent_pinned_for_staff(staff):
         _error(_get(staff["admin"], "/staff/tickets", **params), 400, "INVALID_VALUE")
 
 
+def _all_pages(person: dict, path: str, **params) -> list[dict]:
+    seen, cursor = [], None
+    while True:
+        page = _get(person, path, limit=50, **({"cursor": cursor} if cursor else {}), **params).json()
+        seen += page["tickets"]
+        cursor = page["nextCursor"]
+        if not cursor:
+            return seen
+
+
+def test_the_first_page_of_a_list_carries_the_count_of_each_tab(staff, monkeypatch):
+    """Redesign round 4 (item 5): ``counts`` on the first page of a ticket list. A tab's number is the
+    number of rows that tab shows, for the customer, the admin and a reviewer alike."""
+    admin, reviewer = staff["admin"], staff["reviewer"]
+    user, other = _customer("tabs"), _customer("tabs-other")
+    assert _get(user, "/tickets").json()["counts"] == {"active": 0, "resolved": 0}
+    made = [_opened(user, subject=f"Tab count {n}") for n in range(5)]
+    payment = _opened(user, category="payment", subject="My charge PAY-9 is waiting")  # admin-only
+    _opened(other, subject="Someone else's ticket")
+    assert _say(admin, made[0], "Answered.", staff_route=True).json()["ticket"]["status"] == "answered"
+    assert _post(reviewer, f"/staff/tickets/{made[1]['id']}/status", {"status": "waiting_customer"}).json()["ticket"]["status"] == "waiting_customer"
+    for ticket in made[2:4]:
+        assert _post(user, f"/tickets/{ticket['id']}/resolve", {"operationId": _op()}).json()["ticket"]["status"] == "resolved"
+
+    # The customer: own tickets only (4 not resolved: answered, waiting, open, the payment one; 2 resolved).
+    for status in (None, "active", "resolved"):
+        page = _get(user, "/tickets", **({"status": status} if status else {})).json()
+        assert set(page) == {"tickets", "nextCursor", "counts"}
+        assert page["counts"] == {"active": 4, "resolved": 2}  # the same on every tab: the tabs of the whole list
+    assert len(_all_pages(user, "/tickets", status="active")) == 4 and len(_all_pages(user, "/tickets", status="resolved")) == 2
+    assert _get(other, "/tickets").json()["counts"] == {"active": 1, "resolved": 0}
+    assert all(type(value) is int for value in _get(user, "/tickets").json()["counts"].values())
+
+    # The team: each number is the length of that tab's own list, for an admin and for a reviewer.
+    for person in (admin, reviewer):
+        counts = _get(person, "/staff/tickets").json()["counts"]
+        assert set(counts) == {"active", "open", "answered", "waiting_customer"}  # no count of resolved tickets for the team
+        assert all(type(value) is int and value >= 0 for value in counts.values())
+        for tab, number in counts.items():
+            assert number == len(_all_pages(person, "/staff/tickets", status=tab)), tab
+        assert _get(person, "/staff/tickets", status="resolved").json()["counts"] == counts
+    admin_counts, reviewer_counts = _get(admin, "/staff/tickets").json()["counts"], _get(reviewer, "/staff/tickets").json()["counts"]
+    assert admin_counts["active"] > reviewer_counts["active"] and admin_counts["open"] > reviewer_counts["open"]  # the payment ticket
+    assert payment["id"] not in [item["id"] for item in _all_pages(reviewer, "/staff/tickets", status="open")]
+
+    # One more open ticket moves "open" and "active" by one for both, and nothing else.
+    _opened(user, subject="One more")
+    after = _get(reviewer, "/staff/tickets").json()["counts"]
+    assert after == {**reviewer_counts, "active": reviewer_counts["active"] + 1, "open": reviewer_counts["open"] + 1}
+    assert _get(user, "/tickets").json()["counts"] == {"active": 5, "resolved": 2}
+
+    # A stop request still open keeps its ticket in the active list after the team resolved it by hand:
+    # the active count follows the list. (The list of open stop requests is studio_stop's; here it is given.)
+    held = made[2]["id"]
+    admin_before = _get(admin, "/staff/tickets").json()["counts"]
+    assert _post(admin, f"/staff/tickets/{payment['id']}/status", {"status": "resolved"}).json()["ticket"]["status"] == "resolved"
+    monkeypatch.setattr(studio_support, "_open_stop_ticket_ids", lambda conn: [held, payment["id"], "tkt_" + "0" * 40])
+    for person in (admin, reviewer):
+        counts = _get(person, "/staff/tickets").json()["counts"]
+        listed = _all_pages(person, "/staff/tickets", status="active")
+        assert held in [item["id"] for item in listed] and counts["active"] == len(listed)
+    # A reviewer's count never takes in the held ticket of a payment (admin-only); the admin's does.
+    assert _get(reviewer, "/staff/tickets").json()["counts"] == {**after, "active": after["active"] + 1}
+    assert _get(admin, "/staff/tickets").json()["counts"] == {**admin_before, "active": admin_before["active"] + 1, "open": admin_before["open"] - 1}
+    assert _get(user, "/tickets").json()["counts"] == {"active": 4, "resolved": 3}  # the customer's own tabs are the plain statuses
+    monkeypatch.undo()
+
+    # An older row with no status at all is in "active" (not resolved) and in no status tab, as the list has it.
+    monkeypatch.setattr(studio_support, "read_all_settings", lambda: _settings())
+    monkeypatch.setattr(studio_support, "check_rate_limit", lambda *a, **k: (True, 1, 0))
+    bare = _insert_entity(SUPPORT_TICKETS_TYPE, user["id"], {
+        "number": "T-900001", "seq": 900001, "ownerId": user["id"], "subject": "No status", "category": "ad", "audience": "staff",
+        "priority": "normal", "kind": "question", "createdAt": "2026-09-01T10:00:00.000Z", "updatedAt": "2026-09-01T10:00:00.000Z",
+    }, row_id="tkt_" + secrets.token_hex(20))
+    with_bare = _get(reviewer, "/staff/tickets").json()["counts"]
+    assert with_bare == {**after, "active": after["active"] + 1}
+    assert bare in [item["id"] for item in _all_pages(reviewer, "/staff/tickets", status="active")]
+    assert _get(user, "/tickets").json()["counts"] == {"active": 5, "resolved": 3}
+
+    # An older ticket about a payment that was saved for the whole team is still the admin's alone, in the
+    # list and in the numbers.
+    admin_now = _get(admin, "/staff/tickets").json()["counts"]
+    old_payment = _insert_entity(SUPPORT_TICKETS_TYPE, user["id"], {
+        "number": "T-900002", "seq": 900002, "ownerId": user["id"], "subject": "Old payment question", "category": "ad", "audience": "staff",
+        "relatedType": "payment", "relatedId": "PAY-OLD", "priority": "normal", "kind": "question", "status": "open",
+        "createdAt": "2026-09-01T10:00:00.000Z", "updatedAt": "2026-09-01T10:00:00.000Z",
+    }, row_id="tkt_" + secrets.token_hex(20))
+    assert _get(reviewer, "/staff/tickets").json()["counts"] == with_bare
+    assert old_payment not in [item["id"] for item in _all_pages(reviewer, "/staff/tickets", status="active")]
+    assert _get(admin, "/staff/tickets").json()["counts"] == {**admin_now, "active": admin_now["active"] + 1, "open": admin_now["open"] + 1}
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": SUPPORT_TICKETS_TYPE, "id": old_payment})
+
+    # Only the first page of a plain list carries them: not a later page, not a priority filter, not the TikTok lists.
+    first = _get(admin, "/staff/tickets", limit=1).json()
+    assert "counts" in first and first["nextCursor"]
+    assert "counts" not in _get(admin, "/staff/tickets", limit=1, cursor=first["nextCursor"]).json()
+    assert "counts" not in _get(admin, "/staff/tickets", priority="urgent").json()
+    mine = _get(user, "/tickets", limit=1).json()
+    assert "counts" in mine and "counts" not in _get(user, "/tickets", limit=1, cursor=mine["nextCursor"]).json()
+    with db_conn() as conn:
+        assert "counts" not in studio_support.list_tickets_page(conn, owner_id=user["id"])
+        assert "counts" not in studio_support.list_tickets_page(conn, admin=True, kind="tiktok_request", with_counts=True)
+        assert "counts" not in studio_support.list_tickets_page(conn, admin=True, tiktok_state="active", with_counts=True)
+        # the function itself, for another feature: the same numbers as the routes gave
+        assert studio_support.ticket_tab_counts(conn, owner_id=user["id"]) == {"active": 5, "resolved": 3}
+        assert studio_support.ticket_tab_counts(conn, admin=False) == with_bare
+    # Deleted tickets are in no tab.
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": SUPPORT_TICKETS_TYPE, "id": bare})
+    assert _get(reviewer, "/staff/tickets").json()["counts"] == after
+    assert _get(user, "/tickets").json()["counts"] == {"active": 4, "resolved": 3}
+
+
 # ------------------------------------------------------------------ numbers
 
 

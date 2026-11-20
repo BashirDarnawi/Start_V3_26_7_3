@@ -256,7 +256,12 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
 
     // Redesign round 4: a tab shows how many tickets it holds when the server's answer carries the counts. Here
     // the answer is given three- and four-digit counts, to see that both tabs still fit a 320 px phone.
-    await expect(page.locator('[data-testid^="studio-help-count-"]')).toHaveCount(0);  // this answer has none: no number is drawn
+    // First the server's own numbers: the Open tab says how many tickets its list shows, the other tab how many are resolved.
+    const listed = await page.locator('[data-testid="studio-help-tickets"] .studio-help-list > li').count();
+    expect(listed).toBeGreaterThan(0);
+    await expect(page.getByTestId('studio-help-more')).toHaveCount(0);
+    await expect(page.getByTestId('studio-help-count-active')).toHaveText(String(listed));
+    await expect(page.getByTestId('studio-help-count-resolved')).toHaveText(/^\d+$/);
     await page.route('**/api/studio/tickets?status=*', async route => {
       const response = await route.fetch();
       await route.fulfill({ response, json: { ...(await response.json()), counts: { active: 128, resolved: 4096, open: 7 } } });
@@ -473,8 +478,13 @@ test.describe('Albayan Studio help desk, inbox and stop requests', () => {
         await expect(section.locator('[data-testid="studio-staff-list"] > li').first()).toContainText(stopNumber, { timeout: BOOT_TIMEOUT });
         await expect(section).not.toContainText(paymentNumber);
         await expect(desk.getByTestId(`studio-ticket-${paymentTicketId}`)).toHaveCount(0);
-        // Redesign round 4: the team's five tabs show their counts when the answer carries them, and still fit a
-        // 320 px phone with four-digit counts in both languages.
+        // Redesign round 4: the server's own numbers first. The Active tab says how many tickets its list shows
+        // (all on this page); the team has no count of resolved tickets.
+        await expect(section.getByTestId('studio-staff-more')).toHaveCount(0);
+        await expect(section.getByTestId('studio-staff-count-active')).toHaveText(String(await section.locator('[data-testid="studio-staff-list"] > li').count()));
+        for (const tab of ['open', 'answered', 'waiting_customer']) await expect(section.getByTestId(`studio-staff-count-${tab}`)).toHaveText(/^\d+$/);
+        await expect(section.getByTestId('studio-staff-count-resolved')).toHaveCount(0);
+        // Then given ones: the team's five tabs still fit a 320 px phone with four-digit counts in both languages.
         await desk.route('**/api/studio/staff/tickets?status=*', async route => {
           const response = await route.fetch();
           await route.fulfill({ response, json: { ...(await response.json()), counts: { active: 1280, open: 640, answered: 320, waiting_customer: 160, resolved: 4096 } } });
