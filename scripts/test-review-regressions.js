@@ -2366,6 +2366,169 @@ async function main() {
     assert.deepEqual(box, [['تسجيل دفعة #0007', 'الإجمالي 150.00 د.ل · المدفوع حتى الآن 0.00 د.ل',
       'اكتب المبلغ المدفوع حتى الآن. الإجمالي كاملاً يجعل الطلب «مدفوع»، وصفر يجعله «غير مدفوع»، وما بينهما «مدفوع جزئياً».'], '0.00', 'حفظ الدفعة']);
   });
+  await test('round 3 legal pages: the privacy and account-deletion pages show one language at a time (both when scripts are off), follow the language and theme chosen in the app, open the language of a part named in the address, list the parts of the policy, and stay one self-contained file each', async () => {
+    const root = path.join(__dirname, '..');
+    const pages = { privacy: fs.readFileSync(path.join(root, 'privacy.html'), 'utf8'), 'delete-account': fs.readFileSync(path.join(root, 'delete-account.html'), 'utf8') };
+    const partsOf = {};
+    for (const [name, html] of Object.entries(pages)) {
+      // One file: the stores' crawlers may fetch nothing but this address, so the page brings its own styles and its
+      // few lines of script, and the only files it asks for are the app's own type files (which exist).
+      assert.ok(!/<link\b/i.test(html) && !/<script[^>]*\ssrc=/i.test(html) && !/@import/i.test(html), `${name}: no stylesheet or script file`);
+      assert.ok(!/<(img|picture|iframe|video|audio|object|embed|form|input)\b/i.test(html), `${name}: no picture, frame or form`);
+      const fetched = [...html.matchAll(/url\(([^)]+)\)/g)].map(match => match[1].replace(/['"]/g, ''));
+      assert.equal(fetched.length, 3, `${name}: three type files`);
+      for (const address of fetched) {
+        assert.match(address, /^\/assets\/fonts\/[\w.-]+\.woff2$/, `${name}: ${address}`);
+        assert.ok(fs.existsSync(path.join(root, address)), `${name}: ${address} is not in the project`);
+      }
+      assert.equal((html.match(/<style>/g) || []).length, 1);
+      assert.equal((html.match(/<script>/g) || []).length, 1);
+      // Two articles, English first, each with its language, its direction and its own page title.
+      const articles = [...html.matchAll(/<article id="(en|ar)" class="doc[^"]*" lang="(en|ar)" dir="(ltr|rtl)" data-title="([^"]+)">([\s\S]*?)\n    <\/article>/g)];
+      assert.deepEqual(articles.map(match => match.slice(1, 4)), [['en', 'en', 'ltr'], ['ar', 'ar', 'rtl']], name);
+      assert.equal(articles[0][4], html.match(/<title>(.*?)<\/title>/)[1], `${name}: the English title is the page's own title`);
+      assert.match(articles[1][4], /[؀-ۿ]/, `${name}: the Arabic title is Arabic`);
+      for (const article of articles) assert.equal((article[5].match(/<h1>/g) || []).length, 1, `${name}: one main heading in each language`);
+      // The switch: two links, each written in its own language; with scripts off each jumps to its article.
+      const switcher = html.match(/<nav class="langs"[^>]*>([\s\S]*?)<\/nav>/)[1];
+      assert.deepEqual([...switcher.matchAll(/<a href="#(en|ar)" data-set-lang="(en|ar)" lang="(en|ar)" hreflang="(en|ar)">([^<]+)<\/a>/g)].map(match => match.slice(1)),
+        [['en', 'en', 'en', 'en', 'English'], ['ar', 'ar', 'ar', 'ar', 'العربية']], name);
+      // A language is hidden only once the page's script has chosen one (html[data-lang]): with scripts off nothing
+      // is hidden and both languages show, as they always did. Printing hides the switch and the contents list only.
+      const css = html.match(/<style>([\s\S]*?)<\/style>/)[1].replace(/\/\*[\s\S]*?\*\//g, '');
+      const hidden = [...css.matchAll(/([^{}]*)\{[^{}]*display:\s*none[^{}]*\}/g)].map(match => match[1].trim());
+      assert.deepEqual(hidden, ['html[data-lang="en"] #ar, html[data-lang="ar"] #en', '.top, .toc'], name);
+      assert.ok(!/visibility:\s*hidden|opacity:\s*0\b|hidden\b[^-]/.test(css.replace(/overflow[^;]*;/g, '')) && !/\shidden[\s>=]/.test(html.slice(html.indexOf('<body>'))), `${name}: nothing else hides text`);
+      // The app's themes: the class the app's theme gives, else the browser's own setting.
+      assert.ok(css.includes(':root.dark {') && css.includes(':root.light {') && css.includes('@media (prefers-color-scheme: dark) { :root:not(.light) {'), `${name}: both themes`);
+      // Every part an address can name exists once, and every link inside the page leads to a part of the same language.
+      const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+      assert.equal(new Set(ids).size, ids.length, `${name}: an id is used once`);
+      partsOf[name] = articles.map(article => ({ lang: article[1], ids: [article[1], ...[...article[5].matchAll(/\sid="([^"]+)"/g)].map(match => match[1])],
+        inner: [...article[5].matchAll(/href="#([^"]+)"/g)].map(match => match[1]), body: article[5] }));
+      for (const part of partsOf[name]) {
+        for (const target of part.inner) assert.ok(part.ids.includes(target), `${name} ${part.lang}: #${target} is not in the same language`);
+        for (const id of part.ids.slice(1)) assert.equal(/-ar$/.test(id), part.lang === 'ar', `${name}: the Arabic parts, and only they, end in -ar (#${id})`);
+      }
+    }
+    // The privacy page lists its nine parts, in the order of the text, under the words each part is headed with.
+    for (const [part, title] of [[partsOf.privacy[0], 'On this page'], [partsOf.privacy[1], 'في هذه الصفحة']]) {
+      const toc = part.body.match(/<nav class="toc" aria-label="([^"]+)">\s*<p class="toc-title">([^<]+)<\/p>([\s\S]*?)<\/nav>/);
+      assert.deepEqual([toc[1], toc[2]], [title, title]);
+      const listed = [...toc[3].matchAll(/<li><a href="#([^"]+)">(.*?)<\/a><\/li>/g)].map(match => [match[1], match[2]]);
+      const text = part.body.slice(part.body.indexOf('<div class="text">'));
+      const headed = [...text.matchAll(/<section(?: id="([^"]+)")?>\s*<h2(?: id="([^"]+)")?>(.*?)<\/h2>/g)].map(match => [match[1] || match[2], match[3]]);
+      assert.equal(headed.length, 9, part.lang);
+      assert.deepEqual(listed, headed, `${part.lang}: the contents list and the headings are the same nine, in the same order`);
+      assert.equal((text.match(/<h2[ >]/g) || []).length, 9, `${part.lang}: no heading outside a listed part`);
+      assert.equal(headed[8][0], part.lang === 'ar' ? 'terms-ar' : 'terms', 'the customer terms keep the name the app links to');
+    }
+    assert.ok(!pages['delete-account'].includes('class="toc"'), 'a short page needs no contents list');
+
+    // The few lines of script are the same on both pages; they are run here against a small stand-in page.
+    const script = pages.privacy.match(/<script>([\s\S]*?)<\/script>/)[1];
+    assert.equal(pages['delete-account'].match(/<script>([\s\S]*?)<\/script>/)[1], script, 'both pages run the same lines');
+    const open = ({ search = '', hash = '', stored = {}, browser = 'en-GB', brokenStorage = false, type = true } = {}) => {
+      const page = { scrolled: [], top: 0, prevented: 0, typeArrives: [], listeners: { document: {}, window: {} } };
+      const html = { attrs: {}, classes: [], lang: 'en', dir: '', setAttribute(key, value) { this.attrs[key] = value; }, getAttribute(key) { return key in this.attrs ? this.attrs[key] : null; } };
+      html.classList = { add: name => html.classes.push(name) };
+      const link = code => ({ attrs: { 'data-set-lang': code }, getAttribute(key) { return key in this.attrs ? this.attrs[key] : null; }, setAttribute(key, value) { this.attrs[key] = value; },
+        removeAttribute(key) { delete this.attrs[key]; }, closest(selector) { return selector === '[data-set-lang]' ? this : null; } });
+      const links = [link('en'), link('ar')];
+      const article = (id, title) => ({ id, getAttribute: key => (key === 'data-title' ? title : null), closest() { return this; }, scrollIntoView() { page.scrolled.push(id); } });
+      const articles = { en: article('en', 'Privacy Policy — Albayan'), ar: article('ar', 'سياسة الخصوصية — البيان') };
+      const part = (id, home) => ({ id, closest: selector => (selector === 'article[id]' ? articles[home] : null), scrollIntoView() { page.scrolled.push(id); } });
+      const nodes = { ...articles, terms: part('terms', 'en'), rights: part('rights', 'en'), 'terms-ar': part('terms-ar', 'ar'), 'rights-ar': part('rights-ar', 'ar') };
+      const location = { pathname: '/privacy', search, hash };
+      const listen = where => (name, fn) => { (page.listeners[where][name] = page.listeners[where][name] || []).push(fn); };
+      const document = { documentElement: html, title: 'Privacy Policy — Albayan', getElementById: id => nodes[id] || null, querySelectorAll: () => links, addEventListener: listen('document') };
+      if (type) document.fonts = { ready: { then(fn) { page.typeArrives.push(fn); } } };
+      const window = { addEventListener: listen('window'), scrollTo(x, y) { page.top = y; page.scrolled.push(`top ${x},${y}`); } };
+      const localStorage = { getItem(key) { if (brokenStorage) throw new Error('storage is closed'); return key in stored ? stored[key] : null; } };
+      const history = { replaceState(_state, _title, address) { const [before, after = ''] = address.split('#'); location.search = before.includes('?') ? before.slice(before.indexOf('?')) : ''; location.hash = after ? `#${after}` : ''; page.address = address; } };
+      vm.runInNewContext(script, { document, window, location, localStorage, history, navigator: { language: browser }, URLSearchParams });
+      page.fire = (where, name, event) => { for (const fn of page.listeners[where][name] || []) fn(event); };
+      page.ready = () => { page.fire('document', 'DOMContentLoaded'); page.fire('window', 'load'); };
+      page.shows = () => [html.attrs['data-lang'], html.lang, html.dir, document.title, links.filter(item => item.attrs['aria-current'] === 'true').map(item => item.attrs['data-set-lang']).join()];
+      Object.assign(page, { html, links, nodes, location });
+      return page;
+    };
+    const english = ['en', 'en', 'ltr', 'Privacy Policy — Albayan', 'en'];
+    const arabic = ['ar', 'ar', 'rtl', 'سياسة الخصوصية — البيان', 'ar'];
+    const appState = language => ({ albayan_complete_state: JSON.stringify({ language, theme: 'light' }) });
+    const opened = options => { const page = open(options); const first = page.shows(); page.ready(); assert.deepEqual(page.shows(), options.late || first, 'the language chosen before the page is drawn stays'); return page; };
+    // Which language: a part named in the address first, then ?lang=, then the app's language, then the browser's.
+    assert.deepEqual(opened({}).shows(), english, 'an English browser');
+    assert.deepEqual(opened({ browser: 'ar-LY' }).shows(), arabic, 'an Arabic browser');
+    assert.deepEqual(opened({ browser: 'ar-LY', stored: appState('en') }).shows(), english, 'the app\'s language comes before the browser\'s');
+    assert.deepEqual(opened({ stored: appState('ar') }).shows(), arabic, 'the app in Arabic');
+    assert.deepEqual(opened({ stored: appState('ar'), search: '?lang=en' }).shows(), english, '?lang= comes before the app\'s language');
+    assert.deepEqual(opened({ stored: appState('en'), search: '?lang=AR' }).shows(), arabic, '?lang= in capitals');
+    assert.deepEqual(opened({ stored: appState('ar'), search: '?lang=fr' }).shows(), arabic, 'a language the page does not have is not a choice');
+    assert.deepEqual(opened({ stored: appState('en'), hash: '#terms-ar' }).shows(), arabic, 'the Arabic customer terms linked from the Arabic app');
+    assert.deepEqual(opened({ stored: appState('ar'), hash: '#terms' }).shows(), english, 'the English customer terms');
+    assert.deepEqual(opened({ search: '?lang=en', hash: '#terms-ar' }).shows(), arabic, 'a part named in the address comes before ?lang=');
+    assert.deepEqual(opened({ hash: '#ar' }).shows(), arabic, '#ar is the Arabic article itself');
+    assert.deepEqual(opened({ stored: appState('ar'), hash: '#no-such-part', late: arabic }).shows(), arabic, 'a name that is no part of the page chooses nothing');
+    assert.deepEqual(opened({ stored: { albayan_complete_state: '{not json' } }).shows(), english, 'unreadable saved state');
+    assert.deepEqual(opened({ stored: { albayan_complete_state: JSON.stringify({ language: 'de' }) }, browser: 'ar' }).shows(), arabic, 'a saved language the page does not have');
+    assert.deepEqual(opened({ brokenStorage: true, browser: 'ar-LY' }).shows(), arabic, 'a browser that refuses storage');
+    assert.deepEqual(opened({ type: false, hash: '#terms' }).shows(), english, 'a browser without the type interface');
+    // The two things the pages read are the two things the app writes: its saved state (with the language) and the theme it last drew.
+    const appSource = name => fs.readFileSync(path.join(root, 'src', name), 'utf8');
+    assert.ok(appSource('06-persistence.js').includes("localStorage.setItem('albayan_complete_state', dataString);"), 'the app saves its state under the name the pages read');
+    assert.ok(appSource('07-i18n-render-core.js').includes("localStorage.setItem('albayan_theme', isDark ? 'dark' : 'light')"), 'the app saves the theme it drew under the name the pages read');
+    assert.ok(/state\.language = state\.language === 'en' \? 'ar' : 'en';\n[^}]*saveState\(\);/.test(appSource('07-i18n-render-core.js')), 'the app saves its language when it changes');
+    // The theme chosen in the app (its own key first, then the saved state); otherwise no class, and the browser's setting decides.
+    const theme = stored => open({ stored }).html.classes;
+    assert.deepEqual(theme({ albayan_theme: 'dark' }), ['dark']);
+    assert.deepEqual(theme({ albayan_theme: 'light', albayan_complete_state: JSON.stringify({ theme: 'dark' }) }), ['light']);
+    assert.deepEqual(theme({ albayan_complete_state: JSON.stringify({ language: 'ar', theme: 'dark' }) }), ['dark']);
+    assert.deepEqual(theme({}), []);
+    assert.deepEqual(theme({ albayan_theme: 'sepia" onload="x' }), [], 'only the two known themes become a class');
+    assert.deepEqual(open({ brokenStorage: true }).html.classes, []);
+    // The switch: the other language, from the top, and the address says which (so a reload or a copied link keeps it).
+    const switched = opened({ hash: '#terms' });
+    const press = { target: switched.links[1], preventDefault() { switched.prevented += 1; } };
+    switched.fire('document', 'click', press);
+    assert.deepEqual(switched.shows(), arabic);
+    assert.deepEqual([switched.prevented, switched.address, switched.location.hash, switched.scrolled.join()], [1, '/privacy?lang=ar', '', 'terms,top 0,0']);
+    switched.fire('document', 'click', { target: { closest: () => null }, preventDefault() { switched.prevented += 1; } });
+    assert.deepEqual([switched.shows(), switched.prevented], [arabic, 1], 'any other press is left to the browser');
+    // The address changes while the page is open: a part of the other language brings its language; a part of the
+    // language on screen is left to the browser.
+    const moved = opened({ search: '?lang=en' });
+    moved.location.hash = '#rights'; moved.fire('window', 'hashchange');
+    assert.deepEqual([moved.shows(), moved.scrolled], [english, []]);
+    moved.location.hash = '#terms-ar'; moved.fire('window', 'hashchange');
+    assert.deepEqual([moved.shows(), moved.scrolled], [arabic, ['terms-ar']]);
+    moved.location.hash = '#gone'; moved.fire('window', 'hashchange');
+    assert.deepEqual([moved.shows(), moved.scrolled], [arabic, ['terms-ar']]);
+    // The part named in the address is lined up again when the page's type has arrived, but never once the reader has moved the page.
+    const settled = opened({ hash: '#terms' });
+    assert.deepEqual(settled.scrolled, ['terms'], 'once when everything has loaded');
+    assert.ok(settled.typeArrives.length >= 1);
+    settled.typeArrives[0]();
+    assert.deepEqual(settled.scrolled, ['terms', 'terms']);
+    settled.fire('window', 'wheel');
+    for (const arrive of settled.typeArrives) arrive();
+    assert.deepEqual(settled.scrolled, ['terms', 'terms'], 'the reader has started to read: the page is left alone');
+    const top = opened({});
+    for (const arrive of top.typeArrives) arrive();
+    assert.deepEqual(top.scrolled, [], 'no part asked for: the page stays at its top');
+    const again = opened({ search: '?lang=en' });
+    again.fire('window', 'wheel');
+    again.location.hash = '#terms-ar'; again.fire('window', 'hashchange');
+    again.typeArrives[again.typeArrives.length - 1]();
+    assert.deepEqual(again.scrolled, ['terms-ar', 'terms-ar'], 'a part asked for anew is lined up again when the other language\'s type has arrived');
+    for (const how of ['touchstart', 'keydown', 'mousedown']) {
+      const read = opened({ hash: '#rights-ar' });
+      read.fire('window', how);
+      for (const arrive of read.typeArrives) arrive();
+      assert.deepEqual(read.scrolled, ['rights-ar'], how);
+    }
+  });
+
 
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');

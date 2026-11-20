@@ -5,124 +5,316 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Privacy Policy — Albayan</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; line-height: 1.65; color: #1e293b; background: #f8fafc; }
-    @media (prefers-color-scheme: dark) { body { color: #e2e8f0; background: #0f172a; } h1, h2 { color: #f1f5f9; } }
-    h1 { font-size: 1.7rem; margin-bottom: 0.2em; }
-    h2 { font-size: 1.15rem; margin-top: 2em; }
-    .muted { opacity: 0.7; font-size: 0.9rem; }
-    .notice { margin: 1.5rem 0; padding: 1rem; border: 1px solid #c4b5fd; border-radius: 0.75rem; background: rgba(237, 233, 254, 0.65); }
-    .ar { direction: rtl; text-align: right; border-top: 2px solid #94a3b8; margin-top: 3em; padding-top: 2em; }
-    a { color: #6d28d9; }
+    /* The app's own colours (style.css, :root and html.dark) and type, so the public pages look like the app. */
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 800; font-display: swap; src: url(/assets/fonts/inter-07-UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    @font-face { font-family: 'IBM Plex Sans Arabic'; font-style: normal; font-weight: 400; font-display: swap; src: url(/assets/fonts/ibm-plex-sans-arabic-400-6010e7fd.woff2) format('woff2'); unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    @font-face { font-family: 'IBM Plex Sans Arabic'; font-style: normal; font-weight: 700; font-display: swap; src: url(/assets/fonts/ibm-plex-sans-arabic-700-04c730b4.woff2) format('woff2'); unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    :root { color-scheme: light dark; --canvas: #eef1fa; --surface: #ffffff; --soft: #f5f7fc; --line: #e2e7f1; --ink: #172236; --muted: #586780; --accent: #0649ed; --accent-soft: #eaf0ff; --on-accent: #ffffff; }
+    @media (prefers-color-scheme: dark) { :root:not(.light) { --canvas: #0d1423; --surface: #172236; --soft: #1c2a40; --line: #2c3b53; --ink: #eff4ff; --muted: #a3b3ce; --accent: #8babff; --accent-soft: #223a64; --on-accent: #172236; } }
+    :root.dark { color-scheme: dark; --canvas: #0d1423; --surface: #172236; --soft: #1c2a40; --line: #2c3b53; --ink: #eff4ff; --muted: #a3b3ce; --accent: #8babff; --accent-soft: #223a64; --on-accent: #172236; }
+    :root.light { color-scheme: light; }
+    * { box-sizing: border-box; }
+    html { scroll-padding-top: 16px; }
+    body { margin: 0; font-family: 'Inter', 'IBM Plex Sans Arabic', -apple-system, "Segoe UI", Roboto, Arial, sans-serif; font-size: 16px; line-height: 1.65; color: var(--ink); background: var(--canvas); overflow-wrap: break-word; }
+    a { color: var(--accent); text-underline-offset: 2px; }
+    a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    .page { max-width: 1080px; margin: 0 auto; padding: 16px 20px 64px; }
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0 16px; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
+    .brand { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-weight: 700; color: var(--ink); text-decoration: none; }
+    .mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: #0649ed; color: #fff; font-weight: 800; }
+    .langs { display: flex; gap: 6px; }
+    .langs a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-size: 14px; font-weight: 700; color: var(--ink); text-decoration: none; }
+    html[data-lang="en"] .langs a[data-set-lang="en"], html[data-lang="ar"] .langs a[data-set-lang="ar"] { border-color: var(--ink); background: var(--ink); color: var(--canvas); }
+    /* One language at a time. With scripts off there is no data-lang: both languages show, English first, as before. */
+    html[data-lang="en"] #ar, html[data-lang="ar"] #en { display: none; }
+    html:not([data-lang]) #ar { margin-top: 48px; padding-top: 32px; border-top: 2px solid var(--line); }
+    .doc { display: grid; gap: 20px; }
+    .intro, .text { min-width: 0; max-width: 760px; }
+    .text > section:first-child > h2 { margin-top: 0; }
+    h1 { margin: 0 0 6px; font-size: 1.75rem; line-height: 1.25; letter-spacing: -0.01em; }
+    h2 { margin: 2em 0 0.4em; font-size: 1.15rem; line-height: 1.35; }
+    p, ul, ol { margin: 0 0 1em; }
+    ul, ol { padding-inline-start: 1.4em; }
+    li { margin-bottom: 0.5em; }
+    .muted { font-size: 0.9rem; color: var(--muted); }
+    .notice, .card { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+    .notice { border-color: var(--accent); background: var(--accent-soft); }
+    .notice > :last-child, .card > :last-child { margin-bottom: 0; }
+    .button, .button:visited { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 12px 18px; border-radius: 12px; background: var(--accent); color: var(--on-accent); font-weight: 700; text-decoration: none; }
+    .button:hover { filter: brightness(.95); }
+    .address { overflow-wrap: anywhere; }
+    .toc { align-self: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+    .toc-title { margin: 0 0 6px; padding-inline: 10px; font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .toc ol { margin: 0; padding: 0; list-style: none; }
+    .toc li { margin: 0; }
+    .toc a { display: flex; align-items: center; min-height: 44px; padding: 6px 10px; border-radius: 10px; font-size: 14.5px; font-weight: 600; line-height: 1.35; color: var(--ink); text-decoration: none; }
+    .toc a:hover { background: var(--soft); color: var(--accent); }
+    /* A wide screen: the contents list stays in view beside the text. A phone: title, then the list, then the text. */
+    @media (min-width: 900px) {
+      .doc.has-toc { grid-template-columns: 260px minmax(0, 1fr); column-gap: 40px; row-gap: 8px; }
+      .doc.has-toc > .intro { grid-column: 2; grid-row: 1; }
+      .doc.has-toc > .text { grid-column: 2; grid-row: 2; }
+      .toc { grid-column: 1; grid-row: 1 / span 2; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; border: 0; background: none; padding: 0; }
+      .toc a { min-height: 36px; }
+    }
+    @media print { .top, .toc { display: none; } body { background: #fff; color: #000; } }
   </style>
+  <script>
+    // Before the page is drawn: one language and the theme chosen in the app. With scripts off, both languages show
+    // one after the other, as they always did.
+    (function () {
+      var root = document.documentElement, asked = '', saved = null, theme = '';
+      try { asked = (new URLSearchParams(location.search).get('lang') || '').toLowerCase(); } catch (e) {}
+      try { saved = JSON.parse(localStorage.getItem('albayan_complete_state') || 'null'); } catch (e) {}
+      try { theme = localStorage.getItem('albayan_theme') || (saved && saved.theme) || ''; } catch (e) {}
+      if (theme === 'dark' || theme === 'light') root.classList.add(theme);
+      // The language: the one asked for in the address (?lang=ar), else the app's, else the browser's.
+      var usual = asked === 'ar' || asked === 'en' ? asked
+        : saved && (saved.language === 'ar' || saved.language === 'en') ? saved.language
+        : /^ar/i.test(navigator.language || '') ? 'ar' : 'en';
+      // A part of the page named in the address (#terms, #terms-ar) decides first: the Arabic parts end in -ar.
+      function named() { return (location.hash || '').slice(1); }
+      function show(next) {
+        root.setAttribute('data-lang', next);
+        root.lang = next;
+        root.dir = next === 'ar' ? 'rtl' : 'ltr';
+        var doc = document.getElementById(next), links = document.querySelectorAll('[data-set-lang]');
+        if (doc && doc.getAttribute('data-title')) document.title = doc.getAttribute('data-title');
+        for (var i = 0; i < links.length; i += 1) {
+          if (links[i].getAttribute('data-set-lang') === next) links[i].setAttribute('aria-current', 'true'); else links[i].removeAttribute('aria-current');
+        }
+      }
+      show(named() ? (named() === 'ar' || /-ar$/.test(named()) ? 'ar' : 'en') : usual);
+      // The page's own type arrives a moment after the text and moves the lines a little: when the address asked for a
+      // part of the page, line that part up again, unless the reader has already started to move the page.
+      var touched = false;
+      function settle() {
+        var part = named() ? document.getElementById(named()) : null;
+        if (part && !touched) part.scrollIntoView();
+      }
+      function afterType() {
+        try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle); } catch (e) {}
+      }
+      ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (name) {
+        window.addEventListener(name, function () { touched = true; }, { passive: true });
+      });
+      window.addEventListener('load', function () { settle(); afterType(); });
+      document.addEventListener('DOMContentLoaded', function () {
+        // a name in the address that is no part of this page does not choose the language
+        show(named() && !document.getElementById(named()) ? usual : root.getAttribute('data-lang'));
+        afterType();
+      });
+      document.addEventListener('click', function (event) {
+        var link = event.target && event.target.closest ? event.target.closest('[data-set-lang]') : null;
+        if (!link) return;
+        event.preventDefault();
+        show(link.getAttribute('data-set-lang'));
+        try { history.replaceState(null, '', location.pathname + '?lang=' + link.getAttribute('data-set-lang')); } catch (e) {}
+        window.scrollTo(0, 0);
+      });
+      // The address changes while the page is open and names a part of the other language: show that language.
+      window.addEventListener('hashchange', function () {
+        var part = named() ? document.getElementById(named()) : null;
+        var home = part && part.closest ? part.closest('article[id]') : null;
+        if (!home || home.id === root.getAttribute('data-lang')) return;
+        touched = false;
+        show(home.id);
+        part.scrollIntoView();
+        afterType();
+      });
+    })();
+  </script>
 </head>
 <body>
-  <h1>Privacy Policy — Albayan</h1>
-  <p class="muted">Effective date: 24 September 2026 · Contact: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
+  <div class="page">
+  <header class="top">
+    <a class="brand" href="/"><span class="mark" aria-hidden="true">A</span><span>Albayan</span></a>
+    <nav class="langs" aria-label="Language / اللغة">
+      <a href="#en" data-set-lang="en" lang="en" hreflang="en">English</a>
+      <a href="#ar" data-set-lang="ar" lang="ar" hreflang="ar">العربية</a>
+    </nav>
+  </header>
+  <main>
+    <article id="en" class="doc has-toc" lang="en" dir="ltr" data-title="Privacy Policy — Albayan">
+      <div class="intro">
+        <h1>Privacy Policy — Albayan</h1>
+        <p class="muted">Effective date: 24 September 2026 · Contact: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
 
-  <div class="notice">
-    To ask us to delete your Albayan account, use the public
-    <a href="/delete-account"><strong>account-deletion request page</strong></a>.
-  </div>
+        <div class="notice">
+          To ask us to delete your Albayan account, use the public
+          <a href="/delete-account"><strong>account-deletion request page</strong></a>.
+        </div>
+      </div>
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-title">On this page</p>
+        <ol>
+          <li><a href="#what">What Albayan is</a></li>
+          <li><a href="#collect">Information we collect</a></li>
+          <li><a href="#use">How your information is used</a></li>
+          <li><a href="#stored">Where your information is stored</a></li>
+          <li><a href="#retention">Data retention and account deletion</a></li>
+          <li><a href="#rights">Your rights</a></li>
+          <li><a href="#children">Children</a></li>
+          <li><a href="#changes">Changes</a></li>
+          <li><a href="#terms">Customer terms for Albayan Studio (draft)</a></li>
+        </ol>
+      </nav>
+      <div class="text">
+        <section id="what">
+          <h2>What Albayan is</h2>
+          <p>Albayan is a business management application (web, iOS and Android) used by advertising-office teams to manage customers, advertisements, receipts, deliveries and related business records. Customers of Albayan also use its Ads Studio to request advertisements, follow them, manage their wallet and set up automatic replies to comments on the Facebook or Instagram pages linked to their account.</p>
+        </section>
 
-  <h2>What Albayan is</h2>
-  <p>Albayan is a business management application (web, iOS and Android) used by advertising-office teams to manage customers, advertisements, receipts, deliveries and related business records. Customers of Albayan also use its Ads Studio to request advertisements, follow them, manage their wallet and set up automatic replies to comments on the Facebook or Instagram pages linked to their account.</p>
+        <section id="collect">
+          <h2>Information we collect</h2>
+          <ul>
+            <li><strong>Account information:</strong> your name, email address and a securely hashed form of your password. We do not store your plain-text password.</li>
+            <li><strong>Business records you create:</strong> customers, advertisements, receipts, payments, delivery information and any photos you attach (for example receipt or advertisement photos).</li>
+            <li><strong>Ads Studio (customers of Albayan):</strong> your advertisement requests with the texts and images you add, wallet and payment requests (including any payment receipt photo), scheduled page posts and your automatic-reply rules. Help tickets keep their subject and messages, including the team's answers, and a TikTok service request keeps the TikTok handle (@name) you give. An optional WhatsApp number, with the time you agreed, is kept only if you type it and agree to be contacted: the team reaches it only through an audited link, you can remove it at any time (from the Account screen, from the Overview in the classic layout, or by asking the Albayan team), and it is erased when the account is anonymised. When automatic replies are active on a page linked to your account, Albayan processes the comments made on that page: the commenter's Facebook or Instagram identifier and the comment text are used to choose and send the reply, and a reply log is kept to avoid answering the same person twice and for troubleshooting.</li>
+            <li><strong>Technical and audit logs:</strong> basic request information (such as time, IP address and browser type) and an in-app history of who created or changed a record, used for security, troubleshooting and accountability.</li>
+          </ul>
+        </section>
 
-  <h2>Information we collect</h2>
-  <ul>
-    <li><strong>Account information:</strong> your name, email address and a securely hashed form of your password. We do not store your plain-text password.</li>
-    <li><strong>Business records you create:</strong> customers, advertisements, receipts, payments, delivery information and any photos you attach (for example receipt or advertisement photos).</li>
-    <li><strong>Ads Studio (customers of Albayan):</strong> your advertisement requests with the texts and images you add, wallet and payment requests (including any payment receipt photo), scheduled page posts and your automatic-reply rules. Help tickets keep their subject and messages, including the team's answers, and a TikTok service request keeps the TikTok handle (@name) you give. An optional WhatsApp number, with the time you agreed, is kept only if you type it and agree to be contacted: the team reaches it only through an audited link, you can remove it at any time (from the Account screen, from the Overview in the classic layout, or by asking the Albayan team), and it is erased when the account is anonymised. When automatic replies are active on a page linked to your account, Albayan processes the comments made on that page: the commenter's Facebook or Instagram identifier and the comment text are used to choose and send the reply, and a reply log is kept to avoid answering the same person twice and for troubleshooting.</li>
-    <li><strong>Technical and audit logs:</strong> basic request information (such as time, IP address and browser type) and an in-app history of who created or changed a record, used for security, troubleshooting and accountability.</li>
-  </ul>
+        <section id="use">
+          <h2>How your information is used</h2>
+          <p>Your data is used to provide the app's features to you and your team: signing in, showing and syncing your team's business records, protecting the service, troubleshooting problems and keeping an audit history. We do <strong>not</strong> sell your data, show advertising, or share your data with third parties for marketing.</p>
+        </section>
 
-  <h2>How your information is used</h2>
-  <p>Your data is used to provide the app's features to you and your team: signing in, showing and syncing your team's business records, protecting the service, troubleshooting problems and keeping an audit history. We do <strong>not</strong> sell your data, show advertising, or share your data with third parties for marketing.</p>
+        <section id="stored">
+          <h2>Where your information is stored</h2>
+          <ul>
+            <li><strong>Server mode:</strong> Albayan's current server infrastructure is hosted through the Libyan Spider JPaaS (Jelastic) platform. Data is transmitted between the app and the server over encrypted HTTPS connections.</li>
+            <li><strong>Local mode:</strong> when the application is deliberately configured to use local storage instead of server mode, its records remain in that browser or device storage unless a user exports or transfers them.</li>
+          </ul>
+        </section>
 
-  <h2>Where your information is stored</h2>
-  <ul>
-    <li><strong>Server mode:</strong> Albayan's current server infrastructure is hosted through the Libyan Spider JPaaS (Jelastic) platform. Data is transmitted between the app and the server over encrypted HTTPS connections.</li>
-    <li><strong>Local mode:</strong> when the application is deliberately configured to use local storage instead of server mode, its records remain in that browser or device storage unless a user exports or transfers them.</li>
-  </ul>
+        <section id="retention">
+          <h2>Data retention and account deletion</h2>
+          <p>Business records are generally kept while the team's workspace is active. Audit logs are retained for security and accountability and removed through the server's configured retention cleanup. The current default retention setting is 365 days, and the oldest entries are also removed when the log grows beyond 500,000 entries. Entries for certain money, Ads Studio and settings actions (closing or unlocking a month, backup imports, restores of deleted records, company-funded debt coverage, returned wallet captures, advertisement-request review decisions, changes to Ads Studio settings, owner-approved moves of Ads Studio advertisements out of the agency records, stopping advertisements, withdrawn ad requests, advertisement publishing status changes, customer requests to stop an advertisement, manual settlement decisions, opened customer contact links, page connection tests, manual comment checks and the audit-log cleanup records themselves) are kept permanently; all other entries, including wallet top-ups, payment confirmations and receipt settlements, follow the retention setting. An administrator may configure another permitted period, and the actual removal date depends on when operational cleanup runs. Operational backups may remain until their normal rotation expires.</p>
+          <p>When an administrator deletes an account, sign-in access is disabled. After a verified deletion request, an administrator can run Albayan's privacy-anonymization process to replace the account's name, email address and credentials with non-identifying values and remove its active sessions and password-reset records. Because Albayan is a shared business-record system, advertisements, receipts, payment records and other records belonging to the workspace are not automatically erased. The non-identifying internal account id and audit references may be retained when reasonably needed to preserve record integrity, investigate abuse, protect the service, or meet legal, tax or accounting obligations.</p>
+          <p>You may submit a verified request to delete or anonymize personal information that is not required for those purposes. Requests are reviewed rather than processed automatically. We will explain what action was taken and identify any information that must be retained. Submit a request through the <a href="/delete-account">account-deletion request page</a> or email <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a>.</p>
+        </section>
 
-  <h2>Data retention and account deletion</h2>
-  <p>Business records are generally kept while the team's workspace is active. Audit logs are retained for security and accountability and removed through the server's configured retention cleanup. The current default retention setting is 365 days, and the oldest entries are also removed when the log grows beyond 500,000 entries. Entries for certain money, Ads Studio and settings actions (closing or unlocking a month, backup imports, restores of deleted records, company-funded debt coverage, returned wallet captures, advertisement-request review decisions, changes to Ads Studio settings, owner-approved moves of Ads Studio advertisements out of the agency records, stopping advertisements, withdrawn ad requests, advertisement publishing status changes, customer requests to stop an advertisement, manual settlement decisions, opened customer contact links, page connection tests, manual comment checks and the audit-log cleanup records themselves) are kept permanently; all other entries, including wallet top-ups, payment confirmations and receipt settlements, follow the retention setting. An administrator may configure another permitted period, and the actual removal date depends on when operational cleanup runs. Operational backups may remain until their normal rotation expires.</p>
-  <p>When an administrator deletes an account, sign-in access is disabled. After a verified deletion request, an administrator can run Albayan's privacy-anonymization process to replace the account's name, email address and credentials with non-identifying values and remove its active sessions and password-reset records. Because Albayan is a shared business-record system, advertisements, receipts, payment records and other records belonging to the workspace are not automatically erased. The non-identifying internal account id and audit references may be retained when reasonably needed to preserve record integrity, investigate abuse, protect the service, or meet legal, tax or accounting obligations.</p>
-  <p>You may submit a verified request to delete or anonymize personal information that is not required for those purposes. Requests are reviewed rather than processed automatically. We will explain what action was taken and identify any information that must be retained. Submit a request through the <a href="/delete-account">account-deletion request page</a> or email <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a>.</p>
+        <section id="rights">
+          <h2>Your rights</h2>
+          <p>You can request access to your personal data, correction of inaccurate personal data, or deletion of eligible personal data using the contact options above. We may ask you to verify that you own the account before acting on a request.</p>
+        </section>
 
-  <h2>Your rights</h2>
-  <p>You can request access to your personal data, correction of inaccurate personal data, or deletion of eligible personal data using the contact options above. We may ask you to verify that you own the account before acting on a request.</p>
+        <section id="children">
+          <h2>Children</h2>
+          <p>Albayan is a business tool and is not directed at children under 13.</p>
+        </section>
 
-  <h2>Children</h2>
-  <p>Albayan is a business tool and is not directed at children under 13.</p>
+        <section id="changes">
+          <h2>Changes</h2>
+          <p>If this policy changes, the new version will be published at this address with an updated effective date.</p>
+        </section>
 
-  <h2>Changes</h2>
-  <p>If this policy changes, the new version will be published at this address with an updated effective date.</p>
+        <section>
+          <h2 id="terms">Customer terms for Albayan Studio (draft)</h2>
+          <div class="notice"><strong>Draft, not yet in force.</strong> This section is a proposal awaiting the lawyer's review. Points marked [lawyer] need the lawyer's confirmation and points marked [owner] need Albayan's owner to confirm a number or a decision. Until the lawyer approves it, pilot customers are covered by the signed pilot consent form.</div>
+          <p><strong>1. A managed service.</strong> Albayan Studio is a managed service: you request an advertisement from your phone, and the Albayan team reviews it by hand, sets it up by hand in Meta Ads Manager on Albayan's own Meta ad accounts, links it, and reads its stage and results from Meta. Nothing is launched automatically. Albayan may send a request back for changes or refuse it, with a stated reason (budget or dates, creative quality, text policy, targeting, page access, payment, or another reason). [lawyer]</p>
+          <p><strong>2. Your responsibility for the content.</strong> Every request you send carries your confirmation that the details are correct and that you have the right to use the text, the photos and the page. You are responsible for the legality of what you advertise and for its compliance with Meta's advertising policies. Because the ads run on Albayan's accounts, Albayan may refuse or stop any ad it judges unlawful, misleading or against those policies, and Meta may reject an ad on its own. [lawyer: liability wording]</p>
+          <p><strong>3. Money.</strong> Ad budgets are paid from your USD wallet; subscription plans are paid in LYD and are separate. Money you add is credited to your wallet only after Albayan confirms your payment (target: within 4 working hours). When you send a request, its total budget (the lifetime amount, or the daily amount multiplied by the number of days) is reserved; it stays yours, and you can withdraw a waiting request at any time, which releases the reservation. When Albayan approves the request, the total budget is charged from your wallet. Before the ad's start day, and as long as it has not been set up in Meta, you can stop it yourself and the whole amount returns at once. After that, you ask Albayan to stop the ad: Albayan pauses it in Meta and returns what Meta did not spend after Meta's final reading, which is taken 48 hours after delivery ends, and settles within 2 business days, usually 2 to 3 days in all. If Meta never showed the ad at all, the whole amount returns at once. The refund is the amount paid minus Meta's confirmed spend, never more than what you paid, and each payment is returned once. If Meta spends more than you paid, Albayan bears the difference; you are never charged more than the budget you approved. [owner] The total budget of one request must stay within the limits shown in the app (today $5 to $2,000, and at least $1 per day). [owner] Wallet balances are used for Albayan services; paying an unused balance out in cash is not handled in the app. [owner] [lawyer]</p>
+          <p><strong>4. Support and working hours.</strong> The team reviews requests and answers tickets during its working hours, shown in the app: Sunday to Thursday, 09:00 to 17:00 Tripoli time by default, excluding published holidays and with Ramadan hours when set. [owner: confirm days, hours, holidays and Ramadan hours] Our targets, counted in working time, are a first answer to a ticket within 4 working hours, a review within 1 business day and a stop request within 2 working hours; they are goals, not guarantees. [lawyer] Outside working hours, an urgent stop request shows you the on-duty WhatsApp line when Albayan has set one. [owner: number and on-duty hours]</p>
+          <p><strong>5. Automatic comment replies.</strong> Replies to comments on your linked Facebook or Instagram pages work only on the channels the app shows as working; a channel shown as waiting for Meta's approval or as not available sends nothing. Albayan processes commenters' identifiers to send the replies, as described in this policy. [lawyer]</p>
+          <p><strong>6. TikTok.</strong> The TikTok service is hands-on help from the Albayan team, without automatic replies and without any connection between your TikTok account and Albayan; a team member contacts you within one business day. [owner]</p>
+          <p><strong>7. No guaranteed results.</strong> Albayan does not promise any reach, likes, messages, sales or other result. Meta decides whether and how an ad is delivered and may reject it. [lawyer]</p>
+          <p><strong>8. Changes and governing law.</strong> Albayan may change these terms by publishing a new version at this address with a new effective date. Governing law and dispute resolution: to be written by the lawyer. [lawyer]</p>
+        </section>
+      </div>
+    </article>
 
-  <h2 id="terms">Customer terms for Albayan Studio (draft)</h2>
-  <div class="notice"><strong>Draft, not yet in force.</strong> This section is a proposal awaiting the lawyer's review. Points marked [lawyer] need the lawyer's confirmation and points marked [owner] need Albayan's owner to confirm a number or a decision. Until the lawyer approves it, pilot customers are covered by the signed pilot consent form.</div>
-  <p><strong>1. A managed service.</strong> Albayan Studio is a managed service: you request an advertisement from your phone, and the Albayan team reviews it by hand, sets it up by hand in Meta Ads Manager on Albayan's own Meta ad accounts, links it, and reads its stage and results from Meta. Nothing is launched automatically. Albayan may send a request back for changes or refuse it, with a stated reason (budget or dates, creative quality, text policy, targeting, page access, payment, or another reason). [lawyer]</p>
-  <p><strong>2. Your responsibility for the content.</strong> Every request you send carries your confirmation that the details are correct and that you have the right to use the text, the photos and the page. You are responsible for the legality of what you advertise and for its compliance with Meta's advertising policies. Because the ads run on Albayan's accounts, Albayan may refuse or stop any ad it judges unlawful, misleading or against those policies, and Meta may reject an ad on its own. [lawyer: liability wording]</p>
-  <p><strong>3. Money.</strong> Ad budgets are paid from your USD wallet; subscription plans are paid in LYD and are separate. Money you add is credited to your wallet only after Albayan confirms your payment (target: within 4 working hours). When you send a request, its total budget (the lifetime amount, or the daily amount multiplied by the number of days) is reserved; it stays yours, and you can withdraw a waiting request at any time, which releases the reservation. When Albayan approves the request, the total budget is charged from your wallet. Before the ad's start day, and as long as it has not been set up in Meta, you can stop it yourself and the whole amount returns at once. After that, you ask Albayan to stop the ad: Albayan pauses it in Meta and returns what Meta did not spend after Meta's final reading, which is taken 48 hours after delivery ends, and settles within 2 business days, usually 2 to 3 days in all. If Meta never showed the ad at all, the whole amount returns at once. The refund is the amount paid minus Meta's confirmed spend, never more than what you paid, and each payment is returned once. If Meta spends more than you paid, Albayan bears the difference; you are never charged more than the budget you approved. [owner] The total budget of one request must stay within the limits shown in the app (today $5 to $2,000, and at least $1 per day). [owner] Wallet balances are used for Albayan services; paying an unused balance out in cash is not handled in the app. [owner] [lawyer]</p>
-  <p><strong>4. Support and working hours.</strong> The team reviews requests and answers tickets during its working hours, shown in the app: Sunday to Thursday, 09:00 to 17:00 Tripoli time by default, excluding published holidays and with Ramadan hours when set. [owner: confirm days, hours, holidays and Ramadan hours] Our targets, counted in working time, are a first answer to a ticket within 4 working hours, a review within 1 business day and a stop request within 2 working hours; they are goals, not guarantees. [lawyer] Outside working hours, an urgent stop request shows you the on-duty WhatsApp line when Albayan has set one. [owner: number and on-duty hours]</p>
-  <p><strong>5. Automatic comment replies.</strong> Replies to comments on your linked Facebook or Instagram pages work only on the channels the app shows as working; a channel shown as waiting for Meta's approval or as not available sends nothing. Albayan processes commenters' identifiers to send the replies, as described in this policy. [lawyer]</p>
-  <p><strong>6. TikTok.</strong> The TikTok service is hands-on help from the Albayan team, without automatic replies and without any connection between your TikTok account and Albayan; a team member contacts you within one business day. [owner]</p>
-  <p><strong>7. No guaranteed results.</strong> Albayan does not promise any reach, likes, messages, sales or other result. Meta decides whether and how an ad is delivered and may reject it. [lawyer]</p>
-  <p><strong>8. Changes and governing law.</strong> Albayan may change these terms by publishing a new version at this address with a new effective date. Governing law and dispute resolution: to be written by the lawyer. [lawyer]</p>
+    <article id="ar" class="doc has-toc" lang="ar" dir="rtl" data-title="سياسة الخصوصية — البيان">
+      <div class="intro">
+        <h1>سياسة الخصوصية — البيان</h1>
+        <p class="muted">تاريخ السريان: 24 سبتمبر 2026 · للتواصل: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
 
-  <div class="ar" lang="ar" dir="rtl">
-    <h1>سياسة الخصوصية — البيان</h1>
-    <p class="muted">تاريخ السريان: 24 سبتمبر 2026 · للتواصل: <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a></p>
+        <div class="notice">
+          لطلب حذف حسابك في البيان، استخدم
+          <a href="/delete-account"><strong>صفحة طلب حذف الحساب</strong></a> العامة.
+        </div>
+      </div>
+      <nav class="toc" aria-label="في هذه الصفحة">
+        <p class="toc-title">في هذه الصفحة</p>
+        <ol>
+          <li><a href="#what-ar">ما هو تطبيق البيان</a></li>
+          <li><a href="#collect-ar">المعلومات التي نجمعها</a></li>
+          <li><a href="#use-ar">كيف نستخدم معلوماتك</a></li>
+          <li><a href="#stored-ar">أين تُخزَّن معلوماتك</a></li>
+          <li><a href="#retention-ar">الاحتفاظ بالبيانات وحذف الحساب</a></li>
+          <li><a href="#rights-ar">حقوقك</a></li>
+          <li><a href="#children-ar">الأطفال</a></li>
+          <li><a href="#changes-ar">التغييرات</a></li>
+          <li><a href="#terms-ar">شروط العملاء لاستوديو البيان (مسودة)</a></li>
+        </ol>
+      </nav>
+      <div class="text">
+        <section id="what-ar">
+          <h2>ما هو تطبيق البيان</h2>
+          <p>«البيان» تطبيق لإدارة الأعمال (ويب و iOS وأندرويد) تستخدمه فرق مكاتب الإعلانات لإدارة العملاء والإعلانات والإيصالات والتوصيل والسجلات التجارية المرتبطة بها. ويستخدم عملاء البيان أيضاً «استوديو الإعلانات» لطلب الإعلانات ومتابعتها وإدارة محفظتهم وضبط الردود التلقائية على التعليقات في صفحات فيسبوك أو إنستغرام المرتبطة بحسابهم.</p>
+        </section>
 
-    <div class="notice">
-      لطلب حذف حسابك في البيان، استخدم
-      <a href="/delete-account"><strong>صفحة طلب حذف الحساب</strong></a> العامة.
-    </div>
+        <section id="collect-ar">
+          <h2>المعلومات التي نجمعها</h2>
+          <ul>
+            <li><strong>معلومات الحساب:</strong> الاسم والبريد الإلكتروني ونسخة مؤمّنة بتقنية التجزئة من كلمة المرور. لا نخزّن كلمة المرور بصيغتها النصية الأصلية.</li>
+            <li><strong>السجلات التجارية التي تنشئها:</strong> العملاء والإعلانات والإيصالات والمدفوعات ومعلومات التوصيل وأي صور ترفقها، مثل صور الإيصالات أو الإعلانات.</li>
+            <li><strong>استوديو الإعلانات (عملاء البيان):</strong> طلبات الإعلانات مع النصوص والصور التي تضيفها، وطلبات الشحن والدفع في المحفظة (بما في ذلك صورة إيصال الدفع إن وُجدت)، والمنشورات المجدولة وقواعد الرد التلقائي. وتحفظ تذاكر المساعدة موضوعها ورسائلها، بما فيها ردود الفريق، ويحفظ طلب خدمة تيك توك معرّف حسابك في تيك توك (@الاسم) الذي تكتبه. ورقم واتساب الاختياري، مع وقت موافقتك، لا يُحفظ إلا إذا كتبته ووافقت على التواصل معك عليه: لا يصل إليه الفريق إلا عبر رابط مسجَّل، ويمكنك حذفه متى شئت (من شاشة «حسابي»، أو من «نظرة عامة» في الشكل القديم للاستوديو، أو بطلب ذلك من فريق البيان)، ويُمحى عند إخفاء هوية الحساب. وعند تفعيل الردود التلقائية على صفحة مرتبطة بحسابك، يعالج البيان التعليقات المكتوبة على تلك الصفحة: يُستخدم معرّف صاحب التعليق في فيسبوك أو إنستغرام ونص التعليق لاختيار الرد وإرساله، ويُحفظ سجل للردود حتى لا يُرد على الشخص نفسه مرتين ولحل المشكلات.</li>
+            <li><strong>السجلات التقنية وسجل التدقيق:</strong> معلومات الطلب الأساسية، مثل الوقت وعنوان IP ونوع المتصفح، وسجل داخل التطبيق يوضح من أنشأ سجلاً أو عدّله، وذلك للأمان وحل المشكلات والمساءلة.</li>
+          </ul>
+        </section>
 
-    <h2>ما هو تطبيق البيان</h2>
-    <p>«البيان» تطبيق لإدارة الأعمال (ويب و iOS وأندرويد) تستخدمه فرق مكاتب الإعلانات لإدارة العملاء والإعلانات والإيصالات والتوصيل والسجلات التجارية المرتبطة بها. ويستخدم عملاء البيان أيضاً «استوديو الإعلانات» لطلب الإعلانات ومتابعتها وإدارة محفظتهم وضبط الردود التلقائية على التعليقات في صفحات فيسبوك أو إنستغرام المرتبطة بحسابهم.</p>
+        <section id="use-ar">
+          <h2>كيف نستخدم معلوماتك</h2>
+          <p>تُستخدم بياناتك لتقديم ميزات التطبيق لك ولفريقك، مثل تسجيل الدخول وعرض سجلات العمل ومزامنتها وحماية الخدمة وحل المشكلات وحفظ سجل التدقيق. نحن <strong>لا</strong> نبيع بياناتك ولا نعرض إعلانات ولا نشاركها مع أطراف ثالثة لأغراض تسويقية.</p>
+        </section>
 
-    <h2>المعلومات التي نجمعها</h2>
-    <ul>
-      <li><strong>معلومات الحساب:</strong> الاسم والبريد الإلكتروني ونسخة مؤمّنة بتقنية التجزئة من كلمة المرور. لا نخزّن كلمة المرور بصيغتها النصية الأصلية.</li>
-      <li><strong>السجلات التجارية التي تنشئها:</strong> العملاء والإعلانات والإيصالات والمدفوعات ومعلومات التوصيل وأي صور ترفقها، مثل صور الإيصالات أو الإعلانات.</li>
-      <li><strong>استوديو الإعلانات (عملاء البيان):</strong> طلبات الإعلانات مع النصوص والصور التي تضيفها، وطلبات الشحن والدفع في المحفظة (بما في ذلك صورة إيصال الدفع إن وُجدت)، والمنشورات المجدولة وقواعد الرد التلقائي. وتحفظ تذاكر المساعدة موضوعها ورسائلها، بما فيها ردود الفريق، ويحفظ طلب خدمة تيك توك معرّف حسابك في تيك توك (@الاسم) الذي تكتبه. ورقم واتساب الاختياري، مع وقت موافقتك، لا يُحفظ إلا إذا كتبته ووافقت على التواصل معك عليه: لا يصل إليه الفريق إلا عبر رابط مسجَّل، ويمكنك حذفه متى شئت (من شاشة «حسابي»، أو من «نظرة عامة» في الشكل القديم للاستوديو، أو بطلب ذلك من فريق البيان)، ويُمحى عند إخفاء هوية الحساب. وعند تفعيل الردود التلقائية على صفحة مرتبطة بحسابك، يعالج البيان التعليقات المكتوبة على تلك الصفحة: يُستخدم معرّف صاحب التعليق في فيسبوك أو إنستغرام ونص التعليق لاختيار الرد وإرساله، ويُحفظ سجل للردود حتى لا يُرد على الشخص نفسه مرتين ولحل المشكلات.</li>
-      <li><strong>السجلات التقنية وسجل التدقيق:</strong> معلومات الطلب الأساسية، مثل الوقت وعنوان IP ونوع المتصفح، وسجل داخل التطبيق يوضح من أنشأ سجلاً أو عدّله، وذلك للأمان وحل المشكلات والمساءلة.</li>
-    </ul>
+        <section id="stored-ar">
+          <h2>أين تُخزَّن معلوماتك</h2>
+          <ul>
+            <li><strong>وضع الخادم:</strong> تتم استضافة البنية التحتية الحالية لخوادم البيان عبر منصة Libyan Spider JPaaS (Jelastic). تُنقل البيانات بين التطبيق والخادم عبر اتصالات HTTPS مشفّرة.</li>
+            <li><strong>الوضع المحلي:</strong> عندما يُضبط التطبيق عمداً على استخدام التخزين المحلي بدلاً من وضع الخادم، تبقى سجلاته داخل ذلك المتصفح أو الجهاز ما لم يصدّرها المستخدم أو ينقلها.</li>
+          </ul>
+        </section>
 
-    <h2>كيف نستخدم معلوماتك</h2>
-    <p>تُستخدم بياناتك لتقديم ميزات التطبيق لك ولفريقك، مثل تسجيل الدخول وعرض سجلات العمل ومزامنتها وحماية الخدمة وحل المشكلات وحفظ سجل التدقيق. نحن <strong>لا</strong> نبيع بياناتك ولا نعرض إعلانات ولا نشاركها مع أطراف ثالثة لأغراض تسويقية.</p>
+        <section id="retention-ar">
+          <h2>الاحتفاظ بالبيانات وحذف الحساب</h2>
+          <p>تُحفَظ السجلات التجارية عادةً طالما كانت مساحة عمل الفريق نشطة. وتُحتفظ بسجلات التدقيق لأغراض الأمان والمساءلة، ثم تُزال وفق إعداد مدة الاحتفاظ وعملية التنظيف المطبقة على الخادم. الإعداد الافتراضي الحالي هو 365 يوماً، وتُزال أقدم السجلات أيضاً عندما يتجاوز عددها 500,000 سجل. أما سجلات بعض العمليات المالية وعمليات استوديو الإعلانات وعمليات الإعدادات (إقفال شهر أو إعادة فتحه، واستيراد النسخ الاحتياطية، واستعادة السجلات المحذوفة، وتغطية الديون من أموال الشركة، وإرجاع المبالغ المخصومة من المحفظة، وقرارات مراجعة طلبات الإعلانات، وتغيير إعدادات استوديو الإعلانات، ونقل إعلانات الاستوديو من سجلات الوكالة بموافقة المالك، وإيقاف الإعلانات، وسحب طلبات الإعلانات، وتغييرات حالة نشر الإعلانات، وطلبات العملاء لإيقاف إعلان، وقرارات التسوية اليدوية، وفتح روابط التواصل مع العملاء، واختبارات ربط الصفحات، والفحص اليدوي للتعليقات، وسجلات تنظيف سجل التدقيق نفسه) فتُحفظ بشكل دائم، وتخضع باقي السجلات، ومنها شحن المحفظة وتأكيد المدفوعات وتسوية الإيصالات، لمدة الاحتفاظ نفسها. ويمكن للمدير اختيار مدة أخرى مسموح بها، كما يعتمد تاريخ الإزالة الفعلي على وقت تشغيل التنظيف التشغيلي. وقد تبقى النسخ الاحتياطية إلى أن تنتهي دورة الاستبدال المعتادة الخاصة بها.</p>
+          <p>عندما يحذف المدير حساباً، تتوقف إمكانية تسجيل الدخول. وبعد التحقق من طلب الحذف، يستطيع المدير تشغيل عملية إخفاء الهوية في البيان لاستبدال اسم الحساب وبريده الإلكتروني وبيانات اعتماده بقيم غير معرّفة للهوية، وحذف جلساته النشطة وسجلات إعادة تعيين كلمة المرور. ولأن البيان نظام مشترك للسجلات التجارية، لا تُمحى تلقائياً الإعلانات والإيصالات وسجلات الدفع والسجلات الأخرى التابعة لمساحة العمل. وقد نحتفظ بمعرّف الحساب الداخلي غير المعرّف للهوية ومراجع سجل التدقيق عندما يكون ذلك ضرورياً بصورة معقولة للحفاظ على سلامة السجلات أو التحقيق في إساءة الاستخدام أو حماية الخدمة أو الوفاء بالالتزامات القانونية أو الضريبية أو المحاسبية.</p>
+          <p>يمكنك تقديم طلب موثّق لحذف المعلومات الشخصية التي لا يلزم الاحتفاظ بها لهذه الأغراض أو إخفاء هويتها. تُراجع الطلبات ولا تُنفّذ تلقائياً. سنوضح الإجراء الذي اتُخذ ونبيّن أي معلومات يلزم الاحتفاظ بها. أرسل الطلب عبر <a href="/delete-account">صفحة طلب حذف الحساب</a> أو البريد الإلكتروني <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a>.</p>
+        </section>
 
-    <h2>أين تُخزَّن معلوماتك</h2>
-    <ul>
-      <li><strong>وضع الخادم:</strong> تتم استضافة البنية التحتية الحالية لخوادم البيان عبر منصة Libyan Spider JPaaS (Jelastic). تُنقل البيانات بين التطبيق والخادم عبر اتصالات HTTPS مشفّرة.</li>
-      <li><strong>الوضع المحلي:</strong> عندما يُضبط التطبيق عمداً على استخدام التخزين المحلي بدلاً من وضع الخادم، تبقى سجلاته داخل ذلك المتصفح أو الجهاز ما لم يصدّرها المستخدم أو ينقلها.</li>
-    </ul>
+        <section id="rights-ar">
+          <h2>حقوقك</h2>
+          <p>يمكنك طلب الوصول إلى بياناتك الشخصية أو تصحيح البيانات غير الدقيقة أو حذف البيانات الشخصية المؤهلة للحذف باستخدام وسائل التواصل أعلاه. وقد نطلب منك التحقق من ملكيتك للحساب قبل تنفيذ الطلب.</p>
+        </section>
 
-    <h2>الاحتفاظ بالبيانات وحذف الحساب</h2>
-    <p>تُحفَظ السجلات التجارية عادةً طالما كانت مساحة عمل الفريق نشطة. وتُحتفظ بسجلات التدقيق لأغراض الأمان والمساءلة، ثم تُزال وفق إعداد مدة الاحتفاظ وعملية التنظيف المطبقة على الخادم. الإعداد الافتراضي الحالي هو 365 يوماً، وتُزال أقدم السجلات أيضاً عندما يتجاوز عددها 500,000 سجل. أما سجلات بعض العمليات المالية وعمليات استوديو الإعلانات وعمليات الإعدادات (إقفال شهر أو إعادة فتحه، واستيراد النسخ الاحتياطية، واستعادة السجلات المحذوفة، وتغطية الديون من أموال الشركة، وإرجاع المبالغ المخصومة من المحفظة، وقرارات مراجعة طلبات الإعلانات، وتغيير إعدادات استوديو الإعلانات، ونقل إعلانات الاستوديو من سجلات الوكالة بموافقة المالك، وإيقاف الإعلانات، وسحب طلبات الإعلانات، وتغييرات حالة نشر الإعلانات، وطلبات العملاء لإيقاف إعلان، وقرارات التسوية اليدوية، وفتح روابط التواصل مع العملاء، واختبارات ربط الصفحات، والفحص اليدوي للتعليقات، وسجلات تنظيف سجل التدقيق نفسه) فتُحفظ بشكل دائم، وتخضع باقي السجلات، ومنها شحن المحفظة وتأكيد المدفوعات وتسوية الإيصالات، لمدة الاحتفاظ نفسها. ويمكن للمدير اختيار مدة أخرى مسموح بها، كما يعتمد تاريخ الإزالة الفعلي على وقت تشغيل التنظيف التشغيلي. وقد تبقى النسخ الاحتياطية إلى أن تنتهي دورة الاستبدال المعتادة الخاصة بها.</p>
-    <p>عندما يحذف المدير حساباً، تتوقف إمكانية تسجيل الدخول. وبعد التحقق من طلب الحذف، يستطيع المدير تشغيل عملية إخفاء الهوية في البيان لاستبدال اسم الحساب وبريده الإلكتروني وبيانات اعتماده بقيم غير معرّفة للهوية، وحذف جلساته النشطة وسجلات إعادة تعيين كلمة المرور. ولأن البيان نظام مشترك للسجلات التجارية، لا تُمحى تلقائياً الإعلانات والإيصالات وسجلات الدفع والسجلات الأخرى التابعة لمساحة العمل. وقد نحتفظ بمعرّف الحساب الداخلي غير المعرّف للهوية ومراجع سجل التدقيق عندما يكون ذلك ضرورياً بصورة معقولة للحفاظ على سلامة السجلات أو التحقيق في إساءة الاستخدام أو حماية الخدمة أو الوفاء بالالتزامات القانونية أو الضريبية أو المحاسبية.</p>
-    <p>يمكنك تقديم طلب موثّق لحذف المعلومات الشخصية التي لا يلزم الاحتفاظ بها لهذه الأغراض أو إخفاء هويتها. تُراجع الطلبات ولا تُنفّذ تلقائياً. سنوضح الإجراء الذي اتُخذ ونبيّن أي معلومات يلزم الاحتفاظ بها. أرسل الطلب عبر <a href="/delete-account">صفحة طلب حذف الحساب</a> أو البريد الإلكتروني <a href="mailto:bashirdernawi1999@gmail.com">bashirdernawi1999@gmail.com</a>.</p>
+        <section id="children-ar">
+          <h2>الأطفال</h2>
+          <p>«البيان» أداة أعمال وليست موجهة للأطفال دون 13 عاماً.</p>
+        </section>
 
-    <h2>حقوقك</h2>
-    <p>يمكنك طلب الوصول إلى بياناتك الشخصية أو تصحيح البيانات غير الدقيقة أو حذف البيانات الشخصية المؤهلة للحذف باستخدام وسائل التواصل أعلاه. وقد نطلب منك التحقق من ملكيتك للحساب قبل تنفيذ الطلب.</p>
+        <section id="changes-ar">
+          <h2>التغييرات</h2>
+          <p>إذا تغيّرت هذه السياسة فسيُنشر الإصدار الجديد على هذا العنوان مع تحديث تاريخ السريان.</p>
+        </section>
 
-    <h2>الأطفال</h2>
-    <p>«البيان» أداة أعمال وليست موجهة للأطفال دون 13 عاماً.</p>
-
-    <h2>التغييرات</h2>
-    <p>إذا تغيّرت هذه السياسة فسيُنشر الإصدار الجديد على هذا العنوان مع تحديث تاريخ السريان.</p>
-
-    <h2 id="terms-ar">شروط العملاء لاستوديو البيان (مسودة)</h2>
-    <div class="notice"><strong>مسودة غير سارية بعد.</strong> هذا القسم اقتراح بانتظار مراجعة المحامي. النقاط المعلَّمة بـ [lawyer] يؤكدها المحامي، والنقاط المعلَّمة بـ [owner] يؤكد فيها مالك البيان رقماً أو قراراً. وإلى أن يعتمده المحامي، يحكم عملاءَ التجربة نموذجُ موافقة التجربة الموقّع.</div>
-    <p><strong>1. خدمة يُديرها فريق.</strong> استوديو البيان خدمة يديرها فريق البيان: تطلب إعلانك من هاتفك، ويراجعه الفريق بيده، وينشئه بيده في «مدير إعلانات ميتا» على حسابات البيان الإعلانية، ويربطه، ويقرأ حالته ونتائجه من ميتا. لا يُطلق شيء تلقائياً. ويجوز للبيان إعادة الطلب للتعديل أو رفضه مع ذكر السبب (الميزانية أو التواريخ، جودة الصورة، سياسة النصوص، الاستهداف، صلاحية الصفحة، الدفع، أو سبب آخر). [lawyer]</p>
-    <p><strong>2. مسؤوليتك عن المحتوى.</strong> كل طلب ترسله يحمل تأكيدك أن البيانات صحيحة وأن لك الحق في استخدام النص والصور والصفحة. أنت المسؤول عن مشروعية ما تعلن عنه وعن التزامه بسياسات الإعلان لدى ميتا. ولأن الإعلانات تعمل على حسابات البيان، يجوز للبيان رفض أو إيقاف أي إعلان يراه مخالفاً للقانون أو مضللاً أو مخالفاً لتلك السياسات، وقد ترفض ميتا الإعلان من جهتها. [lawyer: صياغة المسؤولية]</p>
-    <p><strong>3. المال.</strong> تُدفع ميزانيات الإعلانات من محفظتك بالدولار؛ وتُدفع باقات الاشتراك بالدينار وهي منفصلة. المبلغ الذي تضيفه يُقيَّد في محفظتك بعد أن يؤكد البيان استلام دفعتك (الهدف: خلال 4 ساعات عمل). عندما ترسل طلباً يُحجز إجمالي ميزانيته (المبلغ الكلي، أو المبلغ اليومي مضروباً في عدد الأيام)؛ ويبقى المبلغ لك، ويمكنك سحب الطلب المنتظر في أي وقت فيُلغى الحجز. وعندما يوافق البيان على الطلب يُخصم إجمالي الميزانية من محفظتك. وقبل يوم بداية الإعلان، وما دام لم يُنشأ بعد في ميتا، يمكنك إيقافه بنفسك ويعود المبلغ كاملاً فوراً. وبعد ذلك تطلب من البيان إيقاف الإعلان: يوقفه البيان في ميتا ويعيد ما لم تصرفه ميتا بعد قراءة ميتا النهائية، التي تؤخذ بعد 48 ساعة من توقف العرض، ويسوّي خلال يومي عمل، أي عادةً خلال يومين إلى ثلاثة أيام. وإذا لم تعرض ميتا الإعلان أصلاً يعود المبلغ كاملاً فوراً. والمبلغ العائد هو المدفوع ناقص ما أكدت ميتا صرفه، ولا يزيد أبداً عما دفعت، ويُعاد مرة واحدة لكل دفعة. وإذا صرفت ميتا أكثر مما دفعت يتحمل البيان الفرق؛ ولا تُطالَب أبداً بأكثر من الميزانية التي وافقت عليها. [owner] ويجب أن يبقى إجمالي ميزانية الطلب الواحد ضمن الحدود المعروضة في التطبيق (اليوم من 5 إلى 2,000 دولار، وبما لا يقل عن دولار واحد في اليوم). [owner] ورصيد المحفظة يُستخدم لخدمات البيان؛ وصرف الرصيد غير المستخدم نقداً غير موجود في التطبيق. [owner] [lawyer]</p>
-    <p><strong>4. الدعم وساعات العمل.</strong> يراجع الفريق الطلبات ويرد على التذاكر خلال ساعات عمله المعروضة في التطبيق: من الأحد إلى الخميس، من 09:00 إلى 17:00 بتوقيت طرابلس افتراضياً، باستثناء العطل المعلنة ومع ساعات رمضان عند ضبطها. [owner: أكّد الأيام والساعات والعطل وساعات رمضان] وأهدافنا، محسوبةً ضمن ساعات العمل، هي: أول رد على التذكرة خلال 4 ساعات عمل، ومراجعة الطلب خلال يوم عمل، وطلب الإيقاف خلال ساعتي عمل؛ وهي أهداف لا ضمانات. [lawyer] وخارج ساعات العمل يعرض لك طلب الإيقاف العاجل رقم واتساب المناوب عندما يضبطه البيان. [owner: الرقم وساعات المناوبة]</p>
-    <p><strong>5. الردود التلقائية على التعليقات.</strong> تعمل الردود على تعليقات صفحاتك المرتبطة في فيسبوك أو إنستغرام فقط على القنوات التي يعرضها التطبيق بأنها تعمل؛ والقناة المعروضة بأنها بانتظار موافقة ميتا أو غير متاحة لا ترسل شيئاً. ويعالج البيان معرّفات أصحاب التعليقات لإرسال الردود كما هو موضح في هذه السياسة. [lawyer]</p>
-    <p><strong>6. تيك توك.</strong> خدمة تيك توك مساعدة يدوية من فريق البيان، بلا ردود تلقائية وبلا أي ربط بين حسابك في تيك توك والبيان؛ ويتواصل معك أحد أعضاء الفريق خلال يوم عمل. [owner]</p>
-    <p><strong>7. لا نتائج مضمونة.</strong> لا يعد البيان بأي وصول أو إعجابات أو رسائل أو مبيعات أو أي نتيجة أخرى. ميتا هي التي تقرر عرض الإعلان وطريقة عرضه وقد ترفضه. [lawyer]</p>
-    <p><strong>8. التغييرات والقانون الواجب التطبيق.</strong> يجوز للبيان تغيير هذه الشروط بنشر إصدار جديد على هذا العنوان مع تاريخ سريان جديد. القانون الواجب التطبيق وتسوية النزاعات: يكتبهما المحامي. [lawyer]</p>
+        <section>
+          <h2 id="terms-ar">شروط العملاء لاستوديو البيان (مسودة)</h2>
+          <div class="notice"><strong>مسودة غير سارية بعد.</strong> هذا القسم اقتراح بانتظار مراجعة المحامي. النقاط المعلَّمة بـ [lawyer] يؤكدها المحامي، والنقاط المعلَّمة بـ [owner] يؤكد فيها مالك البيان رقماً أو قراراً. وإلى أن يعتمده المحامي، يحكم عملاءَ التجربة نموذجُ موافقة التجربة الموقّع.</div>
+          <p><strong>1. خدمة يُديرها فريق.</strong> استوديو البيان خدمة يديرها فريق البيان: تطلب إعلانك من هاتفك، ويراجعه الفريق بيده، وينشئه بيده في «مدير إعلانات ميتا» على حسابات البيان الإعلانية، ويربطه، ويقرأ حالته ونتائجه من ميتا. لا يُطلق شيء تلقائياً. ويجوز للبيان إعادة الطلب للتعديل أو رفضه مع ذكر السبب (الميزانية أو التواريخ، جودة الصورة، سياسة النصوص، الاستهداف، صلاحية الصفحة، الدفع، أو سبب آخر). [lawyer]</p>
+          <p><strong>2. مسؤوليتك عن المحتوى.</strong> كل طلب ترسله يحمل تأكيدك أن البيانات صحيحة وأن لك الحق في استخدام النص والصور والصفحة. أنت المسؤول عن مشروعية ما تعلن عنه وعن التزامه بسياسات الإعلان لدى ميتا. ولأن الإعلانات تعمل على حسابات البيان، يجوز للبيان رفض أو إيقاف أي إعلان يراه مخالفاً للقانون أو مضللاً أو مخالفاً لتلك السياسات، وقد ترفض ميتا الإعلان من جهتها. [lawyer: صياغة المسؤولية]</p>
+          <p><strong>3. المال.</strong> تُدفع ميزانيات الإعلانات من محفظتك بالدولار؛ وتُدفع باقات الاشتراك بالدينار وهي منفصلة. المبلغ الذي تضيفه يُقيَّد في محفظتك بعد أن يؤكد البيان استلام دفعتك (الهدف: خلال 4 ساعات عمل). عندما ترسل طلباً يُحجز إجمالي ميزانيته (المبلغ الكلي، أو المبلغ اليومي مضروباً في عدد الأيام)؛ ويبقى المبلغ لك، ويمكنك سحب الطلب المنتظر في أي وقت فيُلغى الحجز. وعندما يوافق البيان على الطلب يُخصم إجمالي الميزانية من محفظتك. وقبل يوم بداية الإعلان، وما دام لم يُنشأ بعد في ميتا، يمكنك إيقافه بنفسك ويعود المبلغ كاملاً فوراً. وبعد ذلك تطلب من البيان إيقاف الإعلان: يوقفه البيان في ميتا ويعيد ما لم تصرفه ميتا بعد قراءة ميتا النهائية، التي تؤخذ بعد 48 ساعة من توقف العرض، ويسوّي خلال يومي عمل، أي عادةً خلال يومين إلى ثلاثة أيام. وإذا لم تعرض ميتا الإعلان أصلاً يعود المبلغ كاملاً فوراً. والمبلغ العائد هو المدفوع ناقص ما أكدت ميتا صرفه، ولا يزيد أبداً عما دفعت، ويُعاد مرة واحدة لكل دفعة. وإذا صرفت ميتا أكثر مما دفعت يتحمل البيان الفرق؛ ولا تُطالَب أبداً بأكثر من الميزانية التي وافقت عليها. [owner] ويجب أن يبقى إجمالي ميزانية الطلب الواحد ضمن الحدود المعروضة في التطبيق (اليوم من 5 إلى 2,000 دولار، وبما لا يقل عن دولار واحد في اليوم). [owner] ورصيد المحفظة يُستخدم لخدمات البيان؛ وصرف الرصيد غير المستخدم نقداً غير موجود في التطبيق. [owner] [lawyer]</p>
+          <p><strong>4. الدعم وساعات العمل.</strong> يراجع الفريق الطلبات ويرد على التذاكر خلال ساعات عمله المعروضة في التطبيق: من الأحد إلى الخميس، من 09:00 إلى 17:00 بتوقيت طرابلس افتراضياً، باستثناء العطل المعلنة ومع ساعات رمضان عند ضبطها. [owner: أكّد الأيام والساعات والعطل وساعات رمضان] وأهدافنا، محسوبةً ضمن ساعات العمل، هي: أول رد على التذكرة خلال 4 ساعات عمل، ومراجعة الطلب خلال يوم عمل، وطلب الإيقاف خلال ساعتي عمل؛ وهي أهداف لا ضمانات. [lawyer] وخارج ساعات العمل يعرض لك طلب الإيقاف العاجل رقم واتساب المناوب عندما يضبطه البيان. [owner: الرقم وساعات المناوبة]</p>
+          <p><strong>5. الردود التلقائية على التعليقات.</strong> تعمل الردود على تعليقات صفحاتك المرتبطة في فيسبوك أو إنستغرام فقط على القنوات التي يعرضها التطبيق بأنها تعمل؛ والقناة المعروضة بأنها بانتظار موافقة ميتا أو غير متاحة لا ترسل شيئاً. ويعالج البيان معرّفات أصحاب التعليقات لإرسال الردود كما هو موضح في هذه السياسة. [lawyer]</p>
+          <p><strong>6. تيك توك.</strong> خدمة تيك توك مساعدة يدوية من فريق البيان، بلا ردود تلقائية وبلا أي ربط بين حسابك في تيك توك والبيان؛ ويتواصل معك أحد أعضاء الفريق خلال يوم عمل. [owner]</p>
+          <p><strong>7. لا نتائج مضمونة.</strong> لا يعد البيان بأي وصول أو إعجابات أو رسائل أو مبيعات أو أي نتيجة أخرى. ميتا هي التي تقرر عرض الإعلان وطريقة عرضه وقد ترفضه. [lawyer]</p>
+          <p><strong>8. التغييرات والقانون الواجب التطبيق.</strong> يجوز للبيان تغيير هذه الشروط بنشر إصدار جديد على هذا العنوان مع تاريخ سريان جديد. القانون الواجب التطبيق وتسوية النزاعات: يكتبهما المحامي. [lawyer]</p>
+        </section>
+      </div>
+    </article>
+  </main>
   </div>
 </body>
 </html>

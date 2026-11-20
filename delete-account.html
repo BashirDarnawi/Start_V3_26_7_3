@@ -5,67 +5,190 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Request account deletion — Albayan</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; line-height: 1.65; color: #1e293b; background: #f8fafc; }
-    @media (prefers-color-scheme: dark) { body { color: #e2e8f0; background: #0f172a; } h1, h2 { color: #f1f5f9; } .card { background: #1e293b; border-color: #475569; } }
-    h1 { font-size: 1.7rem; margin-bottom: 0.2em; }
-    h2 { font-size: 1.15rem; margin-top: 1.7em; }
-    .muted { opacity: 0.75; font-size: 0.9rem; }
-    .card { margin: 1.5rem 0; padding: 1.25rem; border: 1px solid #cbd5e1; border-radius: 0.85rem; background: #fff; }
-    .button { display: inline-block; box-sizing: border-box; min-height: 48px; padding: 0.75rem 1rem; border-radius: 0.75rem; color: #fff; background: #6d28d9; font-weight: 700; text-decoration: none; }
+    /* The app's own colours (style.css, :root and html.dark) and type, so the public pages look like the app. */
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 800; font-display: swap; src: url(/assets/fonts/inter-07-UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    @font-face { font-family: 'IBM Plex Sans Arabic'; font-style: normal; font-weight: 400; font-display: swap; src: url(/assets/fonts/ibm-plex-sans-arabic-400-6010e7fd.woff2) format('woff2'); unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    @font-face { font-family: 'IBM Plex Sans Arabic'; font-style: normal; font-weight: 700; font-display: swap; src: url(/assets/fonts/ibm-plex-sans-arabic-700-04c730b4.woff2) format('woff2'); unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    :root { color-scheme: light dark; --canvas: #eef1fa; --surface: #ffffff; --soft: #f5f7fc; --line: #e2e7f1; --ink: #172236; --muted: #586780; --accent: #0649ed; --accent-soft: #eaf0ff; --on-accent: #ffffff; }
+    @media (prefers-color-scheme: dark) { :root:not(.light) { --canvas: #0d1423; --surface: #172236; --soft: #1c2a40; --line: #2c3b53; --ink: #eff4ff; --muted: #a3b3ce; --accent: #8babff; --accent-soft: #223a64; --on-accent: #172236; } }
+    :root.dark { color-scheme: dark; --canvas: #0d1423; --surface: #172236; --soft: #1c2a40; --line: #2c3b53; --ink: #eff4ff; --muted: #a3b3ce; --accent: #8babff; --accent-soft: #223a64; --on-accent: #172236; }
+    :root.light { color-scheme: light; }
+    * { box-sizing: border-box; }
+    html { scroll-padding-top: 16px; }
+    body { margin: 0; font-family: 'Inter', 'IBM Plex Sans Arabic', -apple-system, "Segoe UI", Roboto, Arial, sans-serif; font-size: 16px; line-height: 1.65; color: var(--ink); background: var(--canvas); overflow-wrap: break-word; }
+    a { color: var(--accent); text-underline-offset: 2px; }
+    a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    .page { max-width: 1080px; margin: 0 auto; padding: 16px 20px 64px; }
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0 16px; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
+    .brand { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-weight: 700; color: var(--ink); text-decoration: none; }
+    .mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: #0649ed; color: #fff; font-weight: 800; }
+    .langs { display: flex; gap: 6px; }
+    .langs a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-size: 14px; font-weight: 700; color: var(--ink); text-decoration: none; }
+    html[data-lang="en"] .langs a[data-set-lang="en"], html[data-lang="ar"] .langs a[data-set-lang="ar"] { border-color: var(--ink); background: var(--ink); color: var(--canvas); }
+    /* One language at a time. With scripts off there is no data-lang: both languages show, English first, as before. */
+    html[data-lang="en"] #ar, html[data-lang="ar"] #en { display: none; }
+    html:not([data-lang]) #ar { margin-top: 48px; padding-top: 32px; border-top: 2px solid var(--line); }
+    .doc { display: grid; gap: 20px; }
+    .intro, .text { min-width: 0; max-width: 760px; }
+    .text > section:first-child > h2 { margin-top: 0; }
+    h1 { margin: 0 0 6px; font-size: 1.75rem; line-height: 1.25; letter-spacing: -0.01em; }
+    h2 { margin: 2em 0 0.4em; font-size: 1.15rem; line-height: 1.35; }
+    p, ul, ol { margin: 0 0 1em; }
+    ul, ol { padding-inline-start: 1.4em; }
+    li { margin-bottom: 0.5em; }
+    .muted { font-size: 0.9rem; color: var(--muted); }
+    .notice, .card { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+    .notice { border-color: var(--accent); background: var(--accent-soft); }
+    .notice > :last-child, .card > :last-child { margin-bottom: 0; }
+    .button, .button:visited { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 12px 18px; border-radius: 12px; background: var(--accent); color: var(--on-accent); font-weight: 700; text-decoration: none; }
+    .button:hover { filter: brightness(.95); }
     .address { overflow-wrap: anywhere; }
-    .ar { direction: rtl; text-align: right; border-top: 2px solid #94a3b8; margin-top: 3em; padding-top: 2em; }
-    a { color: #6d28d9; }
-    .button, .button:visited { color: #fff; }
+    .toc { align-self: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+    .toc-title { margin: 0 0 6px; padding-inline: 10px; font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .toc ol { margin: 0; padding: 0; list-style: none; }
+    .toc li { margin: 0; }
+    .toc a { display: flex; align-items: center; min-height: 44px; padding: 6px 10px; border-radius: 10px; font-size: 14.5px; font-weight: 600; line-height: 1.35; color: var(--ink); text-decoration: none; }
+    .toc a:hover { background: var(--soft); color: var(--accent); }
+    /* A wide screen: the contents list stays in view beside the text. A phone: title, then the list, then the text. */
+    @media (min-width: 900px) {
+      .doc.has-toc { grid-template-columns: 260px minmax(0, 1fr); column-gap: 40px; row-gap: 8px; }
+      .doc.has-toc > .intro { grid-column: 2; grid-row: 1; }
+      .doc.has-toc > .text { grid-column: 2; grid-row: 2; }
+      .toc { grid-column: 1; grid-row: 1 / span 2; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; border: 0; background: none; padding: 0; }
+      .toc a { min-height: 36px; }
+    }
+    @media print { .top, .toc { display: none; } body { background: #fff; color: #000; } }
   </style>
+  <script>
+    // Before the page is drawn: one language and the theme chosen in the app. With scripts off, both languages show
+    // one after the other, as they always did.
+    (function () {
+      var root = document.documentElement, asked = '', saved = null, theme = '';
+      try { asked = (new URLSearchParams(location.search).get('lang') || '').toLowerCase(); } catch (e) {}
+      try { saved = JSON.parse(localStorage.getItem('albayan_complete_state') || 'null'); } catch (e) {}
+      try { theme = localStorage.getItem('albayan_theme') || (saved && saved.theme) || ''; } catch (e) {}
+      if (theme === 'dark' || theme === 'light') root.classList.add(theme);
+      // The language: the one asked for in the address (?lang=ar), else the app's, else the browser's.
+      var usual = asked === 'ar' || asked === 'en' ? asked
+        : saved && (saved.language === 'ar' || saved.language === 'en') ? saved.language
+        : /^ar/i.test(navigator.language || '') ? 'ar' : 'en';
+      // A part of the page named in the address (#terms, #terms-ar) decides first: the Arabic parts end in -ar.
+      function named() { return (location.hash || '').slice(1); }
+      function show(next) {
+        root.setAttribute('data-lang', next);
+        root.lang = next;
+        root.dir = next === 'ar' ? 'rtl' : 'ltr';
+        var doc = document.getElementById(next), links = document.querySelectorAll('[data-set-lang]');
+        if (doc && doc.getAttribute('data-title')) document.title = doc.getAttribute('data-title');
+        for (var i = 0; i < links.length; i += 1) {
+          if (links[i].getAttribute('data-set-lang') === next) links[i].setAttribute('aria-current', 'true'); else links[i].removeAttribute('aria-current');
+        }
+      }
+      show(named() ? (named() === 'ar' || /-ar$/.test(named()) ? 'ar' : 'en') : usual);
+      // The page's own type arrives a moment after the text and moves the lines a little: when the address asked for a
+      // part of the page, line that part up again, unless the reader has already started to move the page.
+      var touched = false;
+      function settle() {
+        var part = named() ? document.getElementById(named()) : null;
+        if (part && !touched) part.scrollIntoView();
+      }
+      function afterType() {
+        try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle); } catch (e) {}
+      }
+      ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (name) {
+        window.addEventListener(name, function () { touched = true; }, { passive: true });
+      });
+      window.addEventListener('load', function () { settle(); afterType(); });
+      document.addEventListener('DOMContentLoaded', function () {
+        // a name in the address that is no part of this page does not choose the language
+        show(named() && !document.getElementById(named()) ? usual : root.getAttribute('data-lang'));
+        afterType();
+      });
+      document.addEventListener('click', function (event) {
+        var link = event.target && event.target.closest ? event.target.closest('[data-set-lang]') : null;
+        if (!link) return;
+        event.preventDefault();
+        show(link.getAttribute('data-set-lang'));
+        try { history.replaceState(null, '', location.pathname + '?lang=' + link.getAttribute('data-set-lang')); } catch (e) {}
+        window.scrollTo(0, 0);
+      });
+      // The address changes while the page is open and names a part of the other language: show that language.
+      window.addEventListener('hashchange', function () {
+        var part = named() ? document.getElementById(named()) : null;
+        var home = part && part.closest ? part.closest('article[id]') : null;
+        if (!home || home.id === root.getAttribute('data-lang')) return;
+        touched = false;
+        show(home.id);
+        part.scrollIntoView();
+        afterType();
+      });
+    })();
+  </script>
 </head>
 <body>
-  <h1>Request deletion of your Albayan account</h1>
-  <p class="muted">This page is available without signing in.</p>
+  <div class="page">
+  <header class="top">
+    <a class="brand" href="/"><span class="mark" aria-hidden="true">A</span><span>Albayan</span></a>
+    <nav class="langs" aria-label="Language / اللغة">
+      <a href="#en" data-set-lang="en" lang="en" hreflang="en">English</a>
+      <a href="#ar" data-set-lang="ar" lang="ar" hreflang="ar">العربية</a>
+    </nav>
+  </header>
+  <main>
+    <article id="en" class="doc" lang="en" dir="ltr" data-title="Request account deletion — Albayan">
+      <div class="text">
+        <h1>Request deletion of your Albayan account</h1>
+        <p class="muted">This page is available without signing in.</p>
 
-  <div class="card">
-    <p><strong>Send the request from the email address used by your Albayan account.</strong> Include your name, account email and workspace or business name. Do not include your password, financial information or identity documents in the first message.</p>
-    <p>
-      <a class="button" href="mailto:bashirdernawi1999@gmail.com?subject=Albayan%20account%20deletion%20request&amp;body=Name%3A%20%0AAlbayan%20account%20email%3A%20%0AWorkspace%20or%20business%20name%3A%20%0ARequest%3A%20Please%20delete%20my%20Albayan%20account%20and%20eligible%20personal%20data.%0A">Email account-deletion request</a>
-    </p>
-    <p class="address">If the button does not open your email application, send the request to <a href="mailto:bashirdernawi1999@gmail.com"><strong>bashirdernawi1999@gmail.com</strong></a> with the subject “Albayan account deletion request”.</p>
-  </div>
+        <div class="card">
+          <p><strong>Send the request from the email address used by your Albayan account.</strong> Include your name, account email and workspace or business name. Do not include your password, financial information or identity documents in the first message.</p>
+          <p>
+            <a class="button" href="mailto:bashirdernawi1999@gmail.com?subject=Albayan%20account%20deletion%20request&amp;body=Name%3A%20%0AAlbayan%20account%20email%3A%20%0AWorkspace%20or%20business%20name%3A%20%0ARequest%3A%20Please%20delete%20my%20Albayan%20account%20and%20eligible%20personal%20data.%0A">Email account-deletion request</a>
+          </p>
+          <p class="address">If the button does not open your email application, send the request to <a href="mailto:bashirdernawi1999@gmail.com"><strong>bashirdernawi1999@gmail.com</strong></a> with the subject “Albayan account deletion request”.</p>
+        </div>
 
-  <h2>What happens next</h2>
-  <ol>
-    <li>We verify that the requester owns the account. We may reply with a safe verification question.</li>
-    <li>An administrator reviews and disables or deletes the account so it can no longer sign in.</li>
-    <li>After verification, an administrator uses Albayan's privacy-anonymization process to replace the account name, email address and credentials with non-identifying values and remove active sessions and password-reset records.</li>
-    <li>We explain the result of the request and any information that must be retained.</li>
-  </ol>
+        <h2>What happens next</h2>
+        <ol>
+          <li>We verify that the requester owns the account. We may reply with a safe verification question.</li>
+          <li>An administrator reviews and disables or deletes the account so it can no longer sign in.</li>
+          <li>After verification, an administrator uses Albayan's privacy-anonymization process to replace the account name, email address and credentials with non-identifying values and remove active sessions and password-reset records.</li>
+          <li>We explain the result of the request and any information that must be retained.</li>
+        </ol>
 
-  <h2>Information that may be retained</h2>
-  <p>Albayan is a shared business-record system. Deleting one user's account does not automatically delete advertisements, receipts, payments, delivery records or other records belonging to the team's workspace. A non-identifying internal account id, audit references and backups may be retained where reasonably needed for security, record integrity, fraud prevention, or legal, tax and accounting obligations. Backups remain until their normal rotation expires.</p>
-  <p>Submitting this request does not immediately or automatically delete data. See the <a href="/privacy">Albayan Privacy Policy</a> for more information.</p>
+        <h2>Information that may be retained</h2>
+        <p>Albayan is a shared business-record system. Deleting one user's account does not automatically delete advertisements, receipts, payments, delivery records or other records belonging to the team's workspace. A non-identifying internal account id, audit references and backups may be retained where reasonably needed for security, record integrity, fraud prevention, or legal, tax and accounting obligations. Backups remain until their normal rotation expires.</p>
+        <p>Submitting this request does not immediately or automatically delete data. See the <a href="/privacy">Albayan Privacy Policy</a> for more information.</p>
+      </div>
+    </article>
 
-  <div class="ar" lang="ar" dir="rtl">
-    <h1>طلب حذف حسابك في البيان</h1>
-    <p class="muted">هذه الصفحة متاحة دون الحاجة إلى تسجيل الدخول.</p>
+    <article id="ar" class="doc" lang="ar" dir="rtl" data-title="طلب حذف حسابك في البيان">
+      <div class="text">
+        <h1>طلب حذف حسابك في البيان</h1>
+        <p class="muted">هذه الصفحة متاحة دون الحاجة إلى تسجيل الدخول.</p>
 
-    <div class="card">
-      <p><strong>أرسل الطلب من عنوان البريد الإلكتروني المستخدم في حسابك على البيان.</strong> اذكر اسمك وبريد الحساب واسم مساحة العمل أو النشاط التجاري. لا ترسل كلمة المرور أو المعلومات المالية أو مستندات الهوية في الرسالة الأولى.</p>
-      <p>
-        <a class="button" href="mailto:bashirdernawi1999@gmail.com?subject=Albayan%20account%20deletion%20request&amp;body=Name%3A%20%0AAlbayan%20account%20email%3A%20%0AWorkspace%20or%20business%20name%3A%20%0ARequest%3A%20Please%20delete%20my%20Albayan%20account%20and%20eligible%20personal%20data.%0A">إرسال طلب حذف الحساب بالبريد</a>
-      </p>
-      <p class="address">إذا لم يفتح الزر تطبيق البريد، فأرسل الطلب إلى <a href="mailto:bashirdernawi1999@gmail.com"><strong>bashirdernawi1999@gmail.com</strong></a> واكتب في عنوان الرسالة “Albayan account deletion request”.</p>
-    </div>
+        <div class="card">
+          <p><strong>أرسل الطلب من عنوان البريد الإلكتروني المستخدم في حسابك على البيان.</strong> اذكر اسمك وبريد الحساب واسم مساحة العمل أو النشاط التجاري. لا ترسل كلمة المرور أو المعلومات المالية أو مستندات الهوية في الرسالة الأولى.</p>
+          <p>
+            <a class="button" href="mailto:bashirdernawi1999@gmail.com?subject=Albayan%20account%20deletion%20request&amp;body=Name%3A%20%0AAlbayan%20account%20email%3A%20%0AWorkspace%20or%20business%20name%3A%20%0ARequest%3A%20Please%20delete%20my%20Albayan%20account%20and%20eligible%20personal%20data.%0A">إرسال طلب حذف الحساب بالبريد</a>
+          </p>
+          <p class="address">إذا لم يفتح الزر تطبيق البريد، فأرسل الطلب إلى <a href="mailto:bashirdernawi1999@gmail.com"><strong>bashirdernawi1999@gmail.com</strong></a> واكتب في عنوان الرسالة “Albayan account deletion request”.</p>
+        </div>
 
-    <h2>ماذا يحدث بعد إرسال الطلب</h2>
-    <ol>
-      <li>نتحقق من أن مقدم الطلب هو صاحب الحساب، وقد نرد بسؤال تحقق آمن.</li>
-      <li>يراجع المدير الطلب ويعطّل الحساب أو يحذفه حتى لا يعود قادراً على تسجيل الدخول.</li>
-      <li>بعد التحقق، يستخدم المدير عملية إخفاء الهوية في البيان لاستبدال اسم الحساب وبريده الإلكتروني وبيانات اعتماده بقيم غير معرّفة للهوية، وحذف الجلسات النشطة وسجلات إعادة تعيين كلمة المرور.</li>
-      <li>نوضح لك نتيجة الطلب وأي معلومات يلزم الاحتفاظ بها.</li>
-    </ol>
+        <h2>ماذا يحدث بعد إرسال الطلب</h2>
+        <ol>
+          <li>نتحقق من أن مقدم الطلب هو صاحب الحساب، وقد نرد بسؤال تحقق آمن.</li>
+          <li>يراجع المدير الطلب ويعطّل الحساب أو يحذفه حتى لا يعود قادراً على تسجيل الدخول.</li>
+          <li>بعد التحقق، يستخدم المدير عملية إخفاء الهوية في البيان لاستبدال اسم الحساب وبريده الإلكتروني وبيانات اعتماده بقيم غير معرّفة للهوية، وحذف الجلسات النشطة وسجلات إعادة تعيين كلمة المرور.</li>
+          <li>نوضح لك نتيجة الطلب وأي معلومات يلزم الاحتفاظ بها.</li>
+        </ol>
 
-    <h2>المعلومات التي قد نحتفظ بها</h2>
-    <p>البيان نظام مشترك للسجلات التجارية. لا يؤدي حذف حساب مستخدم واحد تلقائياً إلى حذف الإعلانات أو الإيصالات أو المدفوعات أو سجلات التوصيل أو السجلات الأخرى التابعة لمساحة عمل الفريق. وقد نحتفظ بمعرّف حساب داخلي غير معرّف للهوية ومراجع سجل التدقيق والنسخ الاحتياطية عندما يكون ذلك ضرورياً بصورة معقولة للأمان أو سلامة السجلات أو منع الاحتيال أو الوفاء بالالتزامات القانونية أو الضريبية أو المحاسبية. وتبقى النسخ الاحتياطية إلى أن تنتهي دورة الاستبدال المعتادة الخاصة بها.</p>
-    <p>لا يؤدي إرسال هذا الطلب إلى حذف البيانات فوراً أو تلقائياً. راجع <a href="/privacy">سياسة خصوصية البيان</a> لمزيد من المعلومات.</p>
+        <h2>المعلومات التي قد نحتفظ بها</h2>
+        <p>البيان نظام مشترك للسجلات التجارية. لا يؤدي حذف حساب مستخدم واحد تلقائياً إلى حذف الإعلانات أو الإيصالات أو المدفوعات أو سجلات التوصيل أو السجلات الأخرى التابعة لمساحة عمل الفريق. وقد نحتفظ بمعرّف حساب داخلي غير معرّف للهوية ومراجع سجل التدقيق والنسخ الاحتياطية عندما يكون ذلك ضرورياً بصورة معقولة للأمان أو سلامة السجلات أو منع الاحتيال أو الوفاء بالالتزامات القانونية أو الضريبية أو المحاسبية. وتبقى النسخ الاحتياطية إلى أن تنتهي دورة الاستبدال المعتادة الخاصة بها.</p>
+        <p>لا يؤدي إرسال هذا الطلب إلى حذف البيانات فوراً أو تلقائياً. راجع <a href="/privacy">سياسة خصوصية البيان</a> لمزيد من المعلومات.</p>
+      </div>
+    </article>
+  </main>
   </div>
 </body>
 </html>
