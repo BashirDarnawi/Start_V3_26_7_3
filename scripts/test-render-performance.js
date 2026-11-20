@@ -360,7 +360,9 @@ function driverDashboardFixture() {
   const cards = () => {
     const html = String(f.sandbox.renderDeliveryDashboard());
     return { html, numbers: [...html.matchAll(/Receipt: (D\d+) \(Temp\)/g)].map(m => m[1]),
-      tiles: [...html.matchAll(/workspace-stat-value[^>]*><bdi>([^<]*)<\/bdi>/g)].map(m => m[1]) };
+      // The four counters are tabs with counts since the redesign (round 3); the held cash has its own line.
+      tiles: [...(html.split('id="driver-job-tabs"')[1] || '').split('</div>')[0].matchAll(/>([^<>]+)<b>(\d+)<\/b>/g)].map(m => `${m[1]} ${m[2]}`)
+        .concat([...html.matchAll(/class="driver-cash">.*?<bdi>([^<]*)<\/bdi>/g)].map(m => m[1])) };
   };
   return { ...f, cards };
 }
@@ -371,9 +373,9 @@ test('R5 performance-phone-4: the driver Home draws 30 jobs, open ones first, an
   const first = cards();
   console.log(`  WORK  driver Home cards: ${first.numbers.length} of ${state.receipts.length} jobs; customer scans: ${finds.calls}`);
   assert.equal(first.numbers.length, 30, 'before: every job ever assigned, in one page');
-  assert.deepEqual(first.numbers.slice(0, 10), ['D3', 'D2', 'D1', 'D0', 'D5', 'D4', 'D9', 'D8', 'D7', 'D6'], 'open jobs, then held cash, each newest first');
+  assert.deepEqual(first.numbers.slice(0, 10), ['D5', 'D4', 'D3', 'D2', 'D1', 'D0', 'D9', 'D8', 'D7', 'D6'], 'the jobs on the way, then the jobs to accept, then held cash, each newest first');
   assert.deepEqual(first.numbers.slice(10, 13), ['D99', 'D98', 'D97']);
-  assert.deepEqual(first.tiles, ['4', '2', '94', '4 (200.00 LYD)'], 'the tiles still count every job');
+  assert.deepEqual(first.tiles, ['All 100', 'Needs Delivery 4', 'In Progress 2', 'Delivered 94', 'Held 4', '200.00 LYD'], 'the counters still count every job, and the held cash is said');
   assert.ok(first.html.includes('onclick="loadMoreDeliveryDashboard()"') && first.html.includes('Load more (70 remaining)'));
   assert.ok(finds.calls <= 1, `before: one customers scan per card (${finds.calls})`);
   sandbox.loadMoreDeliveryDashboard();

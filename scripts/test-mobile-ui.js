@@ -1512,7 +1512,7 @@ check('collect-a-debt and reminders delegate to the existing money flows and nev
 check('home hero hides money without analytics.viewFinancials and onboarding only shows in the packaged app',
   views.includes("renderManagerHomeHero(receipts, ads, canViewFinancials)") &&
   managerShell.includes('${canViewFinancials ? shellEsc(shellLyd(collectedLyd)) : receiptsThisMonth}') &&
-  managerShell.includes('if (canViewFinancials) {\n    const statsIndex = buildCustomerStatsIndex();') &&
+  managerShell.includes('const statsIndex = canViewFinancials || shellCanCollect() ? buildCustomerStatsIndex() : null;\n  if (canViewFinancials) {\n    getCustomersVisibleToCurrentUser().forEach(c => {') &&
   managerShell.includes("if (!state.currentUser || IS_STUDIO_SHELL || !shellIsNativeApp()) return false;") &&
   managerShell.includes("localStorage.getItem(SHELL_ONBOARDED_KEY) !== '1'") &&
   views.includes("shellShouldShowOnboarding() ? renderMobileOnboarding() : ''") &&

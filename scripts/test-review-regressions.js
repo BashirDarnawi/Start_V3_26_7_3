@@ -1610,6 +1610,153 @@ async function main() {
     assert.equal(type('1000')[1], 'Update and return $500.00');
     assert.equal(JSON.stringify(f.state.ads[0].spentUSD), undefined, 'a preview only');
   });
+  await test('round 3 Home: staff start with "Needs you", each count is the length of the list its button opens, and a line exists only for a screen the person may open', async () => {
+    const f = frameFixture(frameAdmin, 'analytics');
+    f.sandbox.render = () => {};
+    const staff = permissions => ({ id: 'emp', name: 'Sara', role: 'Employee', permissions });
+    const driver = { id: 'drv', name: 'Ali', role: 'Delivery', permissions: {} };
+    f.state.defaultExchangeRate = 7;
+    f.state.customers = [{ id: 'c1', name: 'Medina Coffee', createdBy: 'emp' }, { id: 'c2', name: 'Tripoli Sweets', createdBy: 'emp' }];
+    const old = new Date(Date.now() - 45 * 86400000).toISOString(), recent = new Date(Date.now() - 2 * 86400000).toISOString();
+    const day = n => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    const receipt = (id, customerId, extra) => ({ id, customerId, amountUSD: 100, amountLocal: 700, exchangeRate: 7, paymentMethod: 'Cash (LYD)', serialNumber: id, createdAt: recent, createdBy: 'emp', ...extra });
+    f.state.receipts = [
+      receipt('r1', 'c1', { status: 'Not Paid', isPaid: false, createdAt: old }),
+      receipt('r2', 'c2', { status: 'Not Paid', isPaid: false }),
+      receipt('r3', 'c2', { status: 'Paid', isPaid: true }),
+      receipt('r4', 'c1', { status: 'Not Paid', isPaid: false, deliveryStatus: 'Needs Delivery', needsDelivery: true, receiptType: 'DELIVERY', tempReceiptNo: 'D4', deliveryPersonId: '' }),
+      receipt('r5', 'c1', { status: 'Not Paid', isPaid: false, deliveryStatus: 'In Progress', needsDelivery: true, receiptType: 'DELIVERY', tempReceiptNo: 'D5', deliveryPersonId: 'drv' })
+    ];
+    f.state.ads = [
+      { id: 'a1', customerId: 'c1', amountUSD: 50, status: 'Active', paymentStatus: 'pending_setup', isPaid: false, metaImportState: 'needs_completion', startDate: day(-3), endDate: day(4), createdAt: recent, createdBy: 'emp' },
+      { id: 'a2', customerId: 'c1', amountUSD: 50, status: 'Active', paymentStatus: 'paid', isPaid: true, startDate: day(-20), endDate: day(-5), createdAt: old, createdBy: 'emp' },
+      { id: 'a3', customerId: 'c2', amountUSD: 50, status: 'Active', paymentStatus: 'paid', isPaid: true, startDate: day(-2), endDate: day(5), createdAt: recent, createdBy: 'emp' }
+    ];
+    const hero = () => String(f.run('renderManagerHomeHero(getReceiptsVisibleToCurrentUser(), getAdsVisibleToCurrentUser(), false)'));
+    const lines = () => Array.from(hero().matchAll(/<li data-attention="([^"]+)"><span class="management-attention-count is-([a-z]+)"><bdi>(\d+)<\/bdi><\/span><span class="management-attention-text"><strong>(.*?)<\/strong><\/span><button type="button" onclick="([^"]*)" class="management-button">(.*?)<\/button><\/li>/g),
+      m => ({ id: m[1], tone: m[2], count: Number(m[3]), words: m[4], open: m[5], label: m[6] }));
+    const everything = { receipts: ['view', 'add'], customers: ['view', 'viewBalance'], ads: ['view', 'edit'], deliveries: ['view', 'assign'], analytics: ['view'] };
+    const signIn = user => { f.state.currentUser = user; f.state.users = [user, driver]; f.state.currentView = 'analytics'; };
+    signIn(staff(everything));
+    assert.deepEqual(lines().map(line => `${line.count} ${line.words} [${line.label}] ${line.tone}`), [
+      '4 receipts are unpaid [Open receipts] danger', '1 customer is overdue [Collect] danger', '1 delivery is waiting for a driver [Assign] warning',
+      '1 ad needs setup [Open ads] warning', '1 finished ad is waiting for reconciliation [Open] info']);
+    // The block is the first thing of the Home column, before the month figure.
+    const html = hero();
+    assert.ok(html.indexOf('data-home-needs') > 0 && html.indexOf('data-home-needs') < html.indexOf('class="hub-hero'), 'Needs you leads');
+    assert.ok(html.includes('<h2 class="hub-section-title">Needs you</h2><ul class="management-attention-list">'));
+    // Press each button: the screen it opens shows a list exactly as long as the count said.
+    f.sandbox.navigateTo = view => { f.state.currentView = view; };
+    const counted = {
+      'receipts-unpaid': () => Number((String(f.run('renderReceiptsView()')).match(/id="receipts-count"[^>]*>(\d+)/) || [])[1]),
+      overdue: () => { assert.equal(f.run('_collectFilter'), 'overdue'); return f.run('shellDebtorRows().filter(row => row.overdue).length'); },
+      'delivery-unassigned': () => Number((String(f.run('renderDeliveriesView()')).match(/<h3 class="ops-group is-urgent">No driver yet <span>\((\d+)\)<\/span>/) || [])[1]),
+      'ads-setup': () => Number((String(f.run('renderAdsView()')).match(/id="ads-count"[^>]*>(\d+)/) || [])[1]),
+      reconciliation: () => Number((String(f.run('renderReconciliationView()')).match(/<div class="ops-hero-count"><strong>(\d+)<\/strong>/) || [])[1])
+    };
+    const screens = { 'receipts-unpaid': 'receipts', overdue: 'collect', 'delivery-unassigned': 'deliveries', 'ads-setup': 'ads', reconciliation: 'reconciliation' };
+    f.state.receiptSearch = 'left over from an earlier search'; f.state.adSearch = 'left over';
+    for (const line of lines()) {
+      f.state.currentView = 'analytics';
+      f.run(line.open);
+      assert.equal(f.state.currentView, screens[line.id], line.id);
+      assert.equal(counted[line.id](), line.count, `${line.id}: the list behind the button`);
+    }
+    assert.equal(f.state.receiptSearch, '', 'an earlier search would have shortened the list');
+    // Opening Receipts draws once: the filter is set quietly and the screen change does the drawing.
+    let draws = 0; f.sandbox.render = () => { draws += 1; };
+    f.state.currentView = 'analytics'; f.run(lines()[0].open);
+    assert.equal(draws, 0);
+    f.sandbox.applyReceiptQuickFilter('all'); assert.equal(draws, 1, 'a press on a tab of the Receipts screen itself still draws');
+    f.sandbox.render = () => {};
+    // Limited to what the person may open: receipts only, then nothing at all; nothing waiting draws no block.
+    signIn(staff({ receipts: ['view'] }));
+    assert.deepEqual(lines().map(line => line.id), ['receipts-unpaid']);
+    signIn(staff({ receipts: ['view'], customers: ['view', 'viewBalance'], deliveries: ['view'] }));
+    assert.deepEqual(lines().map(line => line.id), ['receipts-unpaid', 'overdue'], 'a delivery waits, but this person may not assign one');
+    signIn(staff({ customers: ['view'] }));
+    assert.ok(!hero().includes('data-home-needs'));
+    // The Admin has the owner dashboard for these lines.
+    signIn(frameAdmin);
+    assert.ok(!hero().includes('data-home-needs'));
+    signIn(staff(everything));
+    f.state.language = 'ar';
+    assert.deepEqual(lines().map(line => `${line.count} ${line.words} [${line.label}]`), ['4 وصولات غير مدفوعة [فتح الوصولات]', '1 عميل متأخر عن السداد [تحصيل]', '1 توصيلة بانتظار تعيين سائق [تعيين]', '1 إعلان يحتاج استكمال البيانات [فتح الإعلانات]', '1 إعلان منتهٍ بانتظار التسوية [فتح]']);
+    assert.ok(hero().includes('<h2 class="hub-section-title">يحتاج إليك</h2>'));
+    f.state.language = 'en';
+    f.state.receipts = f.state.receipts.map(row => ({ ...row, status: 'Paid', isPaid: true, deliveryPersonId: 'drv' })); f.state.ads = [f.state.ads[2]];
+    assert.ok(!hero().includes('data-home-needs'), 'nothing waits: no empty box');
+  });
+  await test('round 3 driver Home: the four counters are tabs, the job on the way comes first, each job has one main button (Accept, then Mark delivered) and the other actions in words', async () => {
+    // The permissions of the app's own "Delivery Driver" preset.
+    const f = frameFixture({ id: 'drv', name: 'Ali', role: 'Delivery', permissions: { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'] } }, 'delivery-dashboard');
+    f.sandbox.render = () => {};
+    f.state.defaultExchangeRate = 7;
+    f.state.customers = [{ id: 'c1', name: 'Medina Coffee', phones: ['0911111111'] }, { id: 'c2', name: 'No Phone Shop' }];
+    const job = (n, status, extra = {}) => ({ id: 'r' + n, recordType: 'receipt', customerId: 'c1', amountUSD: 100, amountLocal: 1234.5, exchangeRate: 7, status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' },
+      needsDelivery: true, receiptType: 'DELIVERY', tempReceiptNo: 'D' + n, deliveryStatus: status, deliveryPersonId: 'drv', payments: [], transfers: [], createdAt: `2026-11-${String(10 + n).padStart(2, '0')}T10:00:00Z`, ...extra });
+    f.state.receipts = [
+      job(1, 'Needs Delivery', { quotedDeliveryFee: 15, deliveryPlaceName: 'Janzour', deliveryInstructions: 'Ring twice', editCount: 2 }),
+      job(2, 'In Progress', { customerId: 'c2', paymentMethod: 'Cash' }),
+      job(3, 'Delivered', { status: 'Paid', isPaid: true, amountCollectedFromCustomer: 1234.5, isReceivedInOffice: false, actualDeliveryFeeCollected: 12, deliveryFeePaidBy: 'shop', feeDifferenceStatus: 'LOWER', feeDiff: -3, quotedDeliveryFee: 15 }),
+      job(4, 'Needs Delivery'),
+      job(5, 'Needs Delivery', { deliveryPersonId: 'someone-else' })
+    ];
+    let html = '';
+    const draw = () => { html = String(f.run('renderDeliveryDashboard()')); return html; };
+    const card = id => (html.split(`data-driver-job="${id}"`)[1] || '').split('</article>')[0];
+    const order = () => Array.from(html.matchAll(/data-driver-job="([^"]+)"/g), m => m[1]);
+    const text = part => part.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const buttons = id => Array.from(card(id).matchAll(/<(a|button)\b((?:[^>"']|"[^"]*"|'[^']*')*)>(.*?)<\/\1>/gs), m => ({ tag: m[1], attrs: m[2], words: text(m[3]) }));
+    draw();
+    // Only this driver's jobs: the one on the way, then the ones to accept (newest first), then the delivered one whose cash is still held.
+    assert.deepEqual(order(), ['r2', 'r4', 'r1', 'r3']);
+    const tabs = Array.from((html.split('id="driver-job-tabs"')[1] || '').split('</div>')[0].matchAll(/onclick="([^"]*)" aria-pressed="(true|false)"[^>]*>(.*?)<b>(\d+)<\/b>/g), m => `${m[3]} ${m[4]}${m[2] === 'true' ? '*' : ''} ${m[1]}`);
+    assert.deepEqual(tabs, ["All 4* setDeliveryDashboardFilter('all')", "Needs Delivery 2 setDeliveryDashboardFilter('Needs Delivery')", "In Progress 1 setDeliveryDashboardFilter('In Progress')", "Delivered 1 setDeliveryDashboardFilter('Delivered')", "Held 1 setDeliveryDashboardFilter('Held')"]);
+    assert.ok(/class="driver-cash">.*Cash with you, not yet handed to the office: <strong><bdi>1,234\.50 LYD<\/bdi><\/strong>/.test(html), 'the held cash keeps its figure');
+    // One filled main button per open job, and it is the step that job is ready for.
+    const main = id => Array.from(card(id).matchAll(/<button type="button" onclick="([^"]*)" class="driver-job-main">(.*?)<\/button>/g), m => `${text(m[2])} ${m[1]}`);
+    assert.deepEqual(main('r4'), ["Accept acceptDelivery('r4')"]);
+    assert.deepEqual(main('r2'), ["Mark delivered openReceiptDeliveryCompletionModal('r2')"]);
+    assert.deepEqual(main('r3'), [], 'a delivered job has no step left');
+    assert.ok(card('r3').includes('<p class="driver-job-done">') && text(card('r3')).includes('Complete'));
+    // Every other action is a worded button; a job without a phone number offers no call, WhatsApp or copy.
+    assert.deepEqual(buttons('r4').map(button => button.words), ['Accept', 'Call', 'WhatsApp', 'Copy', 'Share to Group', 'Cancel']);
+    assert.deepEqual(buttons('r2').map(button => button.words), ['Mark delivered', 'Share to Group', 'Cancel']);
+    assert.ok(buttons('r4').find(button => button.words === 'Call').attrs.includes('href="tel:0911111111"') && buttons('r4').find(button => button.words === 'Cancel').attrs.includes(`onclick="openDeliveryCancelModal('r4')" class="is-danger"`));
+    assert.deepEqual(buttons('r3').map(button => button.words), ['Call', 'WhatsApp', 'Copy'], 'a delivered job cannot be cancelled or shared from here, as before');
+    assert.ok(buttons('r4').find(button => button.words === 'Copy').attrs.includes('data-phone="0911111111"') && buttons('r4').find(button => button.words === 'Share to Group').attrs.includes('data-receipt-id="r4" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)"'));
+    // Sharing to the group sends the customer's phone and address: without the permission to see contacts it is not offered (the rule it always had).
+    const contacts = f.state.currentUser.permissions.customers;
+    f.state.currentUser.permissions.customers = ['viewOwn']; draw();
+    assert.deepEqual(buttons('r2').map(button => button.words), ['Mark delivered', 'Cancel']);
+    f.state.currentUser.permissions.customers = contacts; draw();
+    // The facts: what to collect in dinars first, the quoted fee, the area, the instructions, and after delivery the fee and who paid it.
+    assert.ok(text(card('r1')).includes('Receipt: D1 (Temp) · 0911111111') && text(card('r1')).includes('To collect 1,234.50 LYD $100.00 Quoted fee 15.00 LYD') && text(card('r1')).includes('Area Janzour') && text(card('r1')).includes('Instructions: Ring twice'), text(card('r1')));
+    assert.ok(text(card('r2')).includes('Receipt: D2 (Temp) · No phone') && !card('r2').includes('Quoted fee'));
+    assert.ok(text(card('r3')).includes('Amount 1,234.50 LYD') && text(card('r3')).includes('Fee collected 12.00 LYD · paid by shop (loss) (- 3.00 LYD vs quoted)'), text(card('r3')));
+    // The payment method is a badge only when the job has one; the edit history is offered only when there is one.
+    assert.ok(/<span class="payment-badge text-xs">Cash<\/span>/.test(card('r2')) && !card('r2').includes('showAdEditHistory'));
+    assert.ok(!card('r1').includes('payment-badge') && /<button type="button" onclick="showAdEditHistory\('r1'\)"><i data-lucide="history"><\/i>2<\/button>/.test(card('r1')), 'no empty badge for a job with no payment method yet');
+    assert.ok(!card('r4').includes('driver-job-tags'), 'a job with neither has no empty row');
+    // A tab lists exactly its jobs; Refresh and Logout stay, as quiet buttons.
+    f.run("setDeliveryDashboardFilter('Needs Delivery')"); draw();
+    assert.deepEqual(order(), ['r4', 'r1']);
+    f.run("setDeliveryDashboardFilter('Held')"); draw();
+    assert.deepEqual(order(), ['r3']);
+    f.run("setDeliveryDashboardFilter('all')"); draw();
+    assert.ok(html.includes('<button type="button" onclick="refreshDeliveryDashboard()" class="management-button"') && html.includes('<button type="button" onclick="handleLogout()" class="management-button">'));
+    // Once the office has the cash, the line about cash in hand is gone and Held lists nothing.
+    f.state.receipts[2].isReceivedInOffice = true; draw();
+    assert.ok(!html.includes('driver-cash') && /setDeliveryDashboardFilter\('Held'\)"[^>]*>[^<]*<b>0<\/b>/.test(html), 'no cash line when nothing is held');
+    f.run("setDeliveryDashboardFilter('Held')"); draw();
+    assert.deepEqual(order(), []);
+    assert.ok(html.includes('No deliveries for this filter'));
+    f.run("setDeliveryDashboardFilter('all')"); f.state.receipts[2].isReceivedInOffice = false;
+    f.state.language = 'ar'; draw();
+    assert.deepEqual(buttons('r4').map(button => button.words), ['قبول', 'اتصال', 'WhatsApp', 'نسخ', 'مشاركة للمجموعة', 'إلغاء']);
+    assert.ok(text(card('r1')).includes('المطلوب تحصيله 1,234.50 د.ل $100.00'), text(card('r1')));
+  });
   await test('redesign M4: every filter and sort control on the list screens has a name a screen reader can say, in English and in Arabic', async () => {
     const f = frameFixture(frameAdmin, 'customers');
     const unnamed = html => {
@@ -3331,7 +3478,7 @@ async function main() {
       amountUSD: 15, amountLocal: 0, exchangeRate: 7.15, payments: [], transfers: [], createdAt: '2026-09-01' };
     state.receipts = [{ ...debt, id: 'r1', tempReceiptNo: 'D1', deliveryStatus: 'In Progress', deliveryPersonId: 'drv1' }];
     const job = String(sandbox.renderDeliveryDashboard());
-    assert.ok(job.includes('$15.00 (107.25 LYD)') && !job.includes('(107 LYD)'), 'the driver job list rounds the debt to whole dinars');
+    assert.ok(job.includes('<strong><bdi>107.25 LYD</bdi></strong><small><bdi>$15.00</bdi></small>') && !job.includes('>107 LYD<') && !job.includes('>107.00 LYD<'), 'the driver job list rounds the debt to whole dinars');
     state.currentUser = { id: 'adm', name: 'Admin', role: 'Admin', permissions: {} };
     state.receipts = [{ ...debt, id: 'r2', tempReceiptNo: 'D2', deliveryStatus: 'Delivered', collected: true, collectedAmount: 107.25,
       collectedMatchesReceipt: false, collectedPayments: [{ method: 'Cash', amount: 100.25 }, { method: 'Bank Transfer', amount: 7 }] }];
@@ -8465,8 +8612,9 @@ async function main() {
     state.receipts = [{ ...base, id: 'r1', tempReceiptNo: 'D1', finalReceiptNo: '4521', status: 'Paid', isPaid: true, deliveryStatus: 'Delivered',
       amountLocal: 107.25, amountCollectedFromCustomer: 107.25, actualDeliveryFeeCollected: 5.25, deliveryFeePaidBy: 'customer', feeDifferenceStatus: 'LOWER', feeDiff: -2.25 }];
     const dash = String(sandbox.renderDeliveryDashboard());
-    assert.ok(dash.includes('1 (107.25 LYD)') && !dash.includes('(107 LYD)'), 'before: the Held tile reads 107 LYD while the office sees 107.25');
-    assert.ok(dash.includes('>7.50 LYD</span>') && dash.includes('>5.25 LYD</span>') && dash.includes('(-2.25 LYD vs quoted)'), 'quoted fee, fee collected, variance');
+    // Since the redesign (round 3) "Held" is a tab with its count and the cash has its own line.
+    assert.ok(dash.includes('>Held<b>1</b></button>') && /class="driver-cash">.*<strong><bdi>107\.25 LYD<\/bdi><\/strong>/.test(dash) && !dash.includes('>107 LYD<') && !dash.includes('>107.00 LYD<'), 'before: the Held tile reads 107 LYD while the office sees 107.25');
+    assert.ok(dash.includes('<strong><bdi>7.50 LYD</bdi></strong>') && dash.includes('<bdi>5.25 LYD</bdi> · paid by customer') && dash.includes('(-<bdi>2.25 LYD</bdi> vs quoted)'), 'quoted fee, fee collected, variance');
     state.currentUser = admin;
     assert.ok(String(sandbox.renderReceiptsView()).includes('Delivery fee: 5.25 LYD'), 'the receipt card fee line');
     state.receipts.push({ ...base, id: 'r2', tempReceiptNo: 'D2', status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' },

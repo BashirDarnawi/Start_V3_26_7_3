@@ -115,7 +115,7 @@
 .ops-workspace .ops-status { display: inline-flex; align-items: center; justify-content: center; padding: 5px 9px; font-size: 10px; line-height: 1.4; font-weight: 750; border-radius: 8px; }
 .ops-workspace .ops-status--waiting { background: #fff0d2; color: #985209; }
 .ops-workspace .ops-status--active { background: #e9efff; color: #2458c1; }
-.ops-workspace .ops-status--done { background: #e2f7eb; color: #168154; }
+.ops-workspace .ops-status--done { background: #e2f7eb; color: var(--ui-success-text); }
 .ops-workspace .ops-status--canceled { background: #ffe8ed; color: #b92348; }
 .ops-workspace .ops-status--neutral { background: var(--ui-surface-soft); color: var(--ui-muted); }
 .ops-workspace .ops-attention { display: flex; gap: 7px; align-items: center; margin-top: 12px; padding: 9px 10px; border-radius: 10px; background: #fff5e8; color: #a85b12; font-size: 11px; }

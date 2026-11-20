@@ -4635,7 +4635,7 @@ function clearReceiptSearch() {
   lucide.createIcons();
 }
 
-function applyReceiptQuickFilter(mode) {
+function applyReceiptQuickFilter(mode, quiet) {
   // Quick filters are intentionally mutually exclusive (no empty list from a hidden
   // combination): keep the search term, reset only the dropdowns, then apply the view.
   state.receiptStatusFilter = 'all';
@@ -4647,7 +4647,7 @@ function applyReceiptQuickFilter(mode) {
   if (mode === 'unpaid') state.receiptStatusFilter = 'not_paid';
   if (mode === 'debt') state.receiptDebtFilter = 'any-debt';
   if (mode === 'not-collected') state.receiptCollectedFilter = 'not-collected';
-  render();
+  if (!quiet) render();  // quiet: the caller opens Receipts next, which draws once
 }
 
 function updateReceiptFilter(filterType, value) {

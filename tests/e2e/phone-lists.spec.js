@@ -74,8 +74,17 @@ test('on a phone the Filters button shares a row with the search and the first c
   expect(counters.length).toBe(4);
   expect(Math.max(...counters) - Math.min(...counters), 'four counters on one row').toBeLessThanOrEqual(1);
   expect(await top(page.locator('.ops-deliveries .ops-controls')), 'the search of the delivery log is on the first screen').toBeLessThan(viewport.height - 160);
-  // The two lists keep their names for a screen reader although the small labels are not drawn.
-  await expect(page.locator('.ops-deliveries .ops-controls select').first()).toHaveAccessibleName('Status');
+  // The driver filter keeps its name for a screen reader although its small label is not drawn; the
+  // status filter is a named row of tabs with counts since round 3, and "All" says how many jobs the log holds.
+  await expect(page.locator('.ops-deliveries .ops-controls select')).toHaveCount(1);
+  await expect(page.locator('.ops-deliveries .ops-controls select')).toHaveAccessibleName('Driver');
+  const statusTabs = page.getByRole('group', { name: 'Delivery status' }).getByRole('button');
+  await expect(statusTabs).toHaveCount(6);
+  await expect(statusTabs.first()).toHaveAttribute('aria-pressed', 'true');
+  const jobs = await page.evaluate(() => getDeliveryRows().length);
+  await expect(statusTabs.first()).toHaveText(`All${jobs}`);
+  // The plain title row took the place of the blue block: its text is dark on the page, not white on blue.
+  expect(await page.locator('.ops-deliveries > .ops-hero').evaluate(hero => getComputedStyle(hero).backgroundImage + '|' + getComputedStyle(hero).backgroundColor)).toBe('none|rgba(0, 0, 0, 0)');
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
   expect(errors).toEqual([]);
 });

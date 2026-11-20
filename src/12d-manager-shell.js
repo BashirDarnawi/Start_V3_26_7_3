@@ -208,6 +208,38 @@ function shellMonthCollected(receipts) {
   return { now, monthStart, inWindow, revenueReceipts, collectedLyd, collectedUsd, pct };
 }
 
+// The staff Home starts with "Needs you" (DESIGN.md 7.4): a count, what it is and one button, only
+// for the screens this person may open. Each count is the length of the list its button opens,
+// worked out by that screen's own rule. The Admin has the owner dashboard for this, and more.
+function shellHomeNeeds(statsIndex) {
+  if (isCurrentUserAdmin()) return '';
+  const lines = [];
+  const add = (id, count, tone, one, many, label, open) => {
+    if (count > 0) lines.push(`<li data-attention="${id}"><span class="management-attention-count is-${tone}"><bdi>${count}</bdi></span><span class="management-attention-text"><strong>${count === 1 ? one : many}</strong></span><button type="button" onclick="${open}" class="management-button">${label}</button></li>`);
+  };
+  // Receipts: its "Unpaid" tab.
+  if (shellCanOpen('receipts')) add('receipts-unpaid', getReceiptsVisibleToCurrentUser().filter(r => getReceiptPaymentState(r) === 'not_paid').length, 'danger',
+    shellText('receipt is unpaid', 'وصل غير مدفوع'), shellText('receipts are unpaid', 'وصولات غير مدفوعة'), shellText('Open receipts', 'فتح الوصولات'),
+    "state.receiptSearch='';state.receiptRecordFilter='';state.receiptCustomerFilter='';applyReceiptQuickFilter('unpaid',1);navigateTo('receipts')");
+  // Collect a debt: its "Overdue" filter.
+  if (shellCanCollect()) add('overdue', shellDebtorRows(statsIndex).filter(row => row.overdue).length, 'danger',
+    shellText('customer is overdue', 'عميل متأخر عن السداد'), shellText('customers are overdue', 'عملاء متأخرون عن السداد'), shellText('Collect', 'تحصيل'),
+    "navigateTo('collect');collectSetFilter('overdue')");
+  // Deliveries: "Pending Assignment".
+  if (shellCanOpen('deliveries') && can('deliveries', 'assign')) add('delivery-unassigned', getDeliveryStats(getDeliveryRows()).pendingAssignment, 'warning',
+    shellText('delivery is waiting for a driver', 'توصيلة بانتظار تعيين سائق'), shellText('deliveries are waiting for a driver', 'توصيلات بانتظار تعيين سائق'), shellText('Assign', 'تعيين'),
+    "state.deliveryFilter={};navigateTo('deliveries')");
+  // Ads: its "Needs setup" tab.
+  if (shellCanOpen('ads')) add('ads-setup', getAdsVisibleToCurrentUser().filter(isMetaAdSetupPending).length, 'warning',
+    shellText('ad needs setup', 'إعلان يحتاج استكمال البيانات'), shellText('ads need setup', 'إعلانات تحتاج استكمال البيانات'), shellText('Open ads', 'فتح الإعلانات'),
+    "state.adSearch='';state.adReceiptFilter='';state.adFilters={status:'all',payment:'pending_setup',page:'all'};navigateTo('ads')");
+  // Reconciliation: "Ads ready for review".
+  if (shellCanOpen('reconciliation')) add('reconciliation', getVisibleRecords(state.ads).filter(ad => isAdReadyForReconciliation(ad) && !isAdReconciliationDone(ad)).length, 'info',
+    shellText('finished ad is waiting for reconciliation', 'إعلان منتهٍ بانتظار التسوية'), shellText('finished ads are waiting for reconciliation', 'إعلانات منتهية بانتظار التسوية'), shellText('Open', 'فتح'),
+    "navigateTo('reconciliation')");
+  return lines.length ? `<div class="workspace-home-needs" data-home-needs><h2 class="hub-section-title">${shellText('Needs you', 'يحتاج إليك')}</h2><ul class="management-attention-list">${lines.join('')}</ul></div>` : '';
+}
+
 function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const isAr = state.language === 'ar';
   const { now, monthStart, inWindow, revenueReceipts, collectedLyd, collectedUsd, pct } = shellMonthCollected(receipts);
@@ -219,8 +251,9 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.startDate || a.createdAt, monthStart, Infinity)).reduce((sum, a) => sum + adActual(a), 0);
   let owedLyd = 0;
   let owedCount = 0;
+  // One pass over the customers' money for "Owed" and for the overdue line of "Needs you".
+  const statsIndex = canViewFinancials || shellCanCollect() ? buildCustomerStatsIndex() : null;
   if (canViewFinancials) {
-    const statsIndex = buildCustomerStatsIndex();
     getCustomersVisibleToCurrentUser().forEach(c => {
       const view = customerBalanceView(getCustomerStats(c.id, statsIndex));  // debtors as Collect sees them
       if (view.sign < 0) {
@@ -249,6 +282,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   return `
     <section class="manager-home-hero workspace-home-overview" data-manager-home-hero>
       <div class="workspace-home-primary">
+      ${shellHomeNeeds(statsIndex)}
       <button type="button" onclick="navigateTo('receipts')" class="hub-hero relative overflow-hidden w-full rounded-3xl p-5 text-start text-white touch-target">
         <span class="absolute -top-10 -end-6 w-40 h-40 rounded-full bg-white/10"></span>
         <span class="relative block">
@@ -305,8 +339,8 @@ function collectSetFilter(mode) {
   render();
 }
 
-function shellDebtorRows() {
-  const statsIndex = buildCustomerStatsIndex();
+function shellDebtorRows(index) {
+  const statsIndex = index || buildCustomerStatsIndex();
   const now = Date.now();
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {

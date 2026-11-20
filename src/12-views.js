@@ -4892,8 +4892,8 @@ function renderDeliveryDashboard() {
   if (filterStatus === 'Delivered') visibleDeliveries = delivered;
   // "Held" filter shows items driver is holding (delivered but not handed to office)
   if (filterStatus === 'Held') visibleDeliveries = heldByDriver;
-  if (visibleDeliveries === myDeliveries) {  // open jobs, then held cash, first (each newest first): never an old open job on page 2
-    const first = new Set([...needsDelivery, ...inProgress, ...heldByDriver]);
+  if (visibleDeliveries === myDeliveries) {  // the job on the way, then the jobs to accept, then held cash (each newest first): never an old open job on page 2
+    const first = new Set([...inProgress, ...needsDelivery, ...heldByDriver]);
     visibleDeliveries = [...first, ...myDeliveries.filter(d => !first.has(d))];
   }
   const scope = JSON.stringify([uid, _serverLiveSync.sessionEpoch]);
@@ -4905,162 +4905,69 @@ function renderDeliveryDashboard() {
   const customersById = new Map();
   for (const c of state.customers || []) if (c && !customersById.has(c.id)) customersById.set(c.id, c);
   
+  // The four counters are tabs: each says how many jobs it lists.
+  const driverTabs = [['all', isAr ? 'الكل' : 'All', myDeliveries], ['Needs Delivery', trStatus('Needs Delivery'), needsDelivery], ['In Progress', trStatus('In Progress'), inProgress],
+    ['Delivered', trStatus('Delivered'), delivered], ['Held', isAr ? 'بحوزة السائق' : 'Held', heldByDriver]].map(([key, words, rows]) => [key, `setDeliveryDashboardFilter('${key}')`, words, rows.length]);
+
   return `
-    <div class="space-y-4 md:space-y-6 animate-fade-in-up px-2 md:px-0 max-w-full overflow-x-hidden">
-      <!-- Header with Logout -->
-      <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+    <div class="driver-home space-y-4 animate-fade-in-up">
+      <div class="page-header flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 class="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 dark:text-white">${isAr ? 'لوحة التوصيل' : 'Delivery Dashboard'}</h1>
-          <p class="text-xs sm:text-sm text-slate-500 mt-1">${isAr ? `مرحباً، ${Security.escapeHtml(state.currentUser?.name || '')}!` : `Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!`}</p>
+          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'لوحة التوصيل' : 'Delivery Dashboard'}</h1>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? `مرحباً، ${Security.escapeHtml(state.currentUser?.name || '')}!` : `Welcome, ${Security.escapeHtml(state.currentUser?.name || '')}!`}</p>
         </div>
-        <div class="flex items-center gap-2 w-full sm:w-auto">
-          <button onclick="refreshDeliveryDashboard()" class="btn-shine bg-blue-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm" title="${isAr ? 'حدِّث لرؤية آخر التحديثات' : 'Refresh to see latest updates'}">
-            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            <span>${isAr ? 'تحديث' : 'Refresh'}</span>
-          </button>
-          <button onclick="handleLogout()" class="btn-shine bg-rose-600 text-white px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1 flex-1 sm:flex-none text-sm">
-            <i data-lucide="log-out" class="w-4 h-4"></i>
-            <span>${t('logout')}</span>
-          </button>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="refreshDeliveryDashboard()" class="management-button" title="${isAr ? 'حدِّث لرؤية آخر التحديثات' : 'Refresh to see latest updates'}"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
+          <button type="button" onclick="handleLogout()" class="management-button"><i data-lucide="log-out" class="w-4 h-4"></i>${t('logout')}</button>
         </div>
       </div>
-
-      <!-- Stats -->
-      <div class="grid grid-cols-2 gap-2 md:gap-4 md:grid-cols-4">
-        ${renderStatCard(trStatus('Needs Delivery'), needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
-        ${renderStatCard(trStatus('In Progress'), inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
-        ${renderStatCard(trStatus('Delivered'), delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
-        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(2)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
-      </div>
-
-      <!-- My Deliveries -->
-      <div class="glass-panel rounded-2xl p-3 md:p-6">
-        <div class="flex items-center justify-between mb-3 md:mb-4">
-          <h2 class="text-lg md:text-xl font-bold">${isAr ? 'توصيلاتي' : 'My Deliveries'} ${filterStatus !== 'all' ? `<span class="ml-1 md:ml-2 text-xs md:text-sm font-bold text-indigo-600">(${Security.escapeHtml(filterStatus === 'Held' ? (isAr ? 'بحوزة السائق' : 'Held') : trStatus(filterStatus))})</span>` : ''}</h2>
-          ${filterStatus !== 'all' ? `
-            <button type="button" onclick="setDeliveryDashboardFilter('all')" class="text-xs font-bold text-slate-600 hover:text-slate-800">${isAr ? 'عرض الكل' : 'Show All'}</button>
-          ` : ''}
-        </div>
-        ${visibleDeliveries.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد توصيلات لهذا الفلتر' : 'No deliveries for this filter'}</p>` : `
-          <div class="space-y-3 w-full">
-            ${visibleDeliveries.slice(0, _deliveryDashboardShowLimit).map(ad => {
-              const customer = customersById.get(ad.customerId);
-              const amounts = _deliveryDisplayAmounts(ad);
-              const phone = String(ad.phoneNumber || customer?.phones?.[0] || '').trim();
-              const wa = phone ? buildWhatsAppLink(phone) : '';
-              const displayFinalNo = ad.finalReceiptNo || ad.serialNumber || '';
-              const displayTempNo = ad.tempReceiptNo || '';
-              return `
-                <div class="glass-panel rounded-xl p-3 md:p-4 w-full box-border">
-                  <div class="flex flex-col gap-3 md:gap-4">
-                    <div class="w-full min-w-0">
-                      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
-                        <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
-                        ${phone ? `
-                          <div class="flex items-center gap-2 flex-shrink-0">
-                            <a href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
-                            ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
-                            <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? ${JSON.stringify(isAr ? 'تم النسخ' : 'Copied')} : ${JSON.stringify(isAr ? 'فشل النسخ' : 'Copy Failed')}, ok ? ${JSON.stringify(isAr ? 'تم نسخ رقم الهاتف' : 'Phone number copied')} : ${JSON.stringify(isAr ? 'تعذّر نسخ رقم الهاتف' : 'Could not copy phone number')}, ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">${isAr ? 'نسخ' : 'Copy'}</button>
-                          </div>
-                        ` : ''}
-                      </div>
-                      <p class="text-xs md:text-sm text-slate-500 mt-1">${phone ? phoneLtrHtml(phone) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</p>
-                      ${ad.isReceipt && (displayTempNo || displayFinalNo) ? `
-                        <div class="text-xs text-indigo-600 font-bold mt-1">
-                          ${isAr ? 'الوصل' : 'Receipt'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isAr ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
-                        </div>
-                      ` : ''}
-                      ${ad.isReceipt && ad.deliveryPlaceName ? `
-                        <div class="text-xs text-slate-600 dark:text-slate-300 mt-1">
-                          <span class="font-bold">📍</span> ${Security.escapeHtml(String(ad.deliveryPlaceName || ''))}
-                        </div>
-                      ` : ''}
-                      ${ad.isReceipt && (ad.quotedDeliveryFee !== undefined && ad.quotedDeliveryFee !== null) ? `
-                        <div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(2)} LYD</span>
-                        </div>
-                      ` : ''}
-                      ${(() => {
-                        // After completion: the fee collected, who paid it, and its HIGHER/LOWER variance vs the quoted fee.
-                        if (!ad.isReceipt || String(ad.deliveryStatus || '') !== 'Delivered') return '';
-                        const feeRaw = ad.actualDeliveryFeeCollected ?? ad.deliveryFeeCollected;
-                        if (feeRaw === undefined || feeRaw === null) return '';
-                        const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
-                        const feeDiffNum = Number(ad.feeDiff) || 0;
-                        const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
-                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(2)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
-                          : '';
-                        return `<div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(2)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
-                        </div>`;
-                      })()}
-                      ${ad.isReceipt && ad.deliveryInstructions ? `
-                        <div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-2 mt-1 border border-amber-200 dark:border-amber-800">
-                          <span class="font-bold">📝 ${isAr ? 'تعليمات' : 'Instructions'}:</span> ${Security.escapeHtml(String(ad.deliveryInstructions || ''))}
-                        </div>
-                      ` : ''}
-                      <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
-                        <span class="text-xs font-bold text-emerald-600">$${Number(amounts.usd || 0).toFixed(2)} (${Number(amounts.local || 0).toFixed(2)} LYD)</span>
-                        <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
-                        <span class="delivery-${Security.escapeHtml(String(ad.deliveryStatus || '').toLowerCase().replace(' ', ''))} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
-                        ${(() => {
-                          const n = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
-                          return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium flex items-center gap-1"><i data-lucide="history" class="w-3 h-3"></i>${n}</button>` : '';
-                        })()}
-                      </div>
-                    </div>
-                    <div class="flex flex-row md:flex-col gap-2 w-full md:w-auto">
-                      ${canShareDeliveryReceiptToWhatsApp(ad) ? `
-                        <button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="min-h-11 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center gap-1" title="${isAr ? 'مشاركة معلومات التوصيل في مجموعة واتساب' : 'Share delivery information to a WhatsApp group'}">
-                          <i data-lucide="message-circle" class="w-4 h-4"></i>${isAr ? 'مشاركة للمجموعة' : 'Share to Group'}
-                        </button>
-                      ` : ''}
-                      ${ad.deliveryStatus === 'Needs Delivery' ? `
-                        <button onclick="acceptDelivery('${ad.id}')" class="btn-shine bg-blue-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check" class="w-4 h-4 mr-1"></i>${isAr ? 'قبول' : 'Accept'}
-                        </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
-                        </button>
-                      ` : ''}
-                      ${ad.deliveryStatus === 'In Progress' && ad.isReceipt ? `
-                        <button onclick="openReceiptDeliveryCompletionModal('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التوصيل' : 'Delivered'}
-                        </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
-                        </button>
-                      ` : ''}
-                      ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && !ad.isPaid ? `
-                        <button onclick="markAsCollected('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="dollar-sign" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التحصيل' : 'Collected'}
-                        </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
-                        </button>
-                      ` : ''}
-                      ${ad.deliveryStatus === 'In Progress' && !ad.isReceipt && ad.isPaid ? `
-                        <button onclick="markAsDelivered('${ad.id}')" class="btn-shine bg-emerald-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'تم التوصيل' : 'Delivered'}
-                        </button>
-                        <button onclick="openDeliveryCancelModal('${ad.id}')" class="btn-shine bg-rose-600 text-white px-3 md:px-4 py-2 rounded-lg font-bold text-sm flex-1 md:flex-none flex items-center justify-center">
-                          <i data-lucide="x-circle" class="w-4 h-4 mr-1"></i>${t('cancel')}
-                        </button>
-                      ` : ''}
-                      ${ad.deliveryStatus === 'Delivered' ? `
-                        <div class="text-emerald-600 font-bold text-sm flex items-center justify-center py-2">
-                          <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i>${isAr ? 'مكتمل' : 'Complete'}
-                        </div>
-                      ` : ''}
-                    </div>
-                  </div>
+      ${renderQuickTabs('driver-job-tabs', isAr ? 'توصيلاتي حسب الحالة' : 'My deliveries by status', filterStatus, driverTabs)}
+      ${cashHeldByDriver > 0 ? `<p class="driver-cash"><i data-lucide="wallet"></i><span>${isAr ? 'نقد بحوزتك لم يُسلَّم للمكتب بعد' : 'Cash with you, not yet handed to the office'}: <strong><bdi>${fmtLyd(cashHeldByDriver)}</bdi></strong></span></p>` : ''}
+      <h2 class="text-lg font-bold text-slate-800 dark:text-white">${isAr ? 'توصيلاتي' : 'My Deliveries'}</h2>
+      ${visibleDeliveries.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد توصيلات لهذا الفلتر' : 'No deliveries for this filter'}</p>` : `
+        <div class="driver-jobs">
+          ${visibleDeliveries.slice(0, _deliveryDashboardShowLimit).map(ad => {
+            const customer = customersById.get(ad.customerId);
+            const amounts = _deliveryDisplayAmounts(ad);
+            const phone = String(ad.phoneNumber || customer?.phones?.[0] || '').trim();
+            const wa = phone ? buildWhatsAppLink(phone) : '';
+            const displayFinalNo = ad.finalReceiptNo || ad.serialNumber || '';
+            const displayTempNo = ad.tempReceiptNo || '';
+            const status = String(ad.deliveryStatus || '');
+            const edits = (Array.isArray(ad.editHistory) ? ad.editHistory.length : 0) || Number(ad.editCount || 0);
+            // After completion: the fee collected, who paid it, and its HIGHER/LOWER variance vs the quoted fee.
+            const feeRaw = status === 'Delivered' ? (ad.actualDeliveryFeeCollected ?? ad.deliveryFeeCollected) : null;
+            const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
+            return `
+              <article class="driver-job" data-driver-job="${Security.escapeHtml(String(ad.id || ''))}">
+                <header>
+                  <h3>${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
+                  <span class="delivery-${Security.escapeHtml(status.toLowerCase().replace(' ', ''))}">${Security.escapeHtml(trStatus(status))}</span>
+                </header>
+                <p class="driver-job-ref">${displayTempNo || displayFinalNo ? `${isAr ? 'الوصل' : 'Receipt'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isAr ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)} · ` : ''}${phone ? phoneLtrHtml(phone) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</p>
+                <div class="driver-job-facts">
+                  <div><span>${getReceiptDebtType(ad) === 'none' ? (isAr ? 'المبلغ' : 'Amount') : (isAr ? 'المطلوب تحصيله' : 'To collect')}</span><strong><bdi>${fmtLyd(amounts.local)}</bdi></strong><small><bdi>${fmtUsd(amounts.usd)}</bdi></small></div>
+                  ${ad.quotedDeliveryFee !== undefined && ad.quotedDeliveryFee !== null ? `<div><span>${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}</span><strong><bdi>${fmtLyd(ad.quotedDeliveryFee)}</bdi></strong></div>` : ''}
                 </div>
-              `;
-            }).join('')}
-          </div>
-          ${remainingDeliveries > 0 ? `<div class="flex justify-center pt-3"><button type="button" onclick="loadMoreDeliveryDashboard()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveries} متبقي)` : `Load more (${remainingDeliveries} remaining)`}</button></div>` : ''}
-        `}
-      </div>
+                ${ad.deliveryPlaceName ? `<p class="driver-job-line"><span>${isAr ? 'المنطقة' : 'Area'}</span><b>${Security.escapeHtml(String(ad.deliveryPlaceName))}</b></p>` : ''}
+                ${feeRaw === undefined || feeRaw === null ? '' : `<p class="driver-job-line"><span>${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}</span><b class="${shopPaid ? 'is-danger' : ''}"><bdi>${fmtLyd(feeRaw)}</bdi> · ${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}${ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME' ? ` (${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}<bdi>${fmtLyd(Math.abs(Number(ad.feeDiff) || 0))}</bdi> ${isAr ? 'عن المتفق عليه' : 'vs quoted'})` : ''}</b></p>`}
+                ${ad.deliveryInstructions ? `<p class="driver-job-note"><b>${isAr ? 'تعليمات' : 'Instructions'}:</b> ${Security.escapeHtml(String(ad.deliveryInstructions))}</p>` : ''}
+                ${ad.paymentMethod || edits ? `<div class="driver-job-tags">${ad.paymentMethod ? `<span class="payment-badge text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod))}</span>` : ''}${edits ? `<button type="button" onclick="showAdEditHistory('${ad.id}')"><i data-lucide="history"></i>${edits}</button>` : ''}</div>` : ''}
+                ${status === 'Needs Delivery' ? `<button type="button" onclick="acceptDelivery('${ad.id}')" class="driver-job-main"><i data-lucide="check"></i>${isAr ? 'قبول' : 'Accept'}</button>`
+                  : status === 'In Progress' ? `<button type="button" onclick="openReceiptDeliveryCompletionModal('${ad.id}')" class="driver-job-main"><i data-lucide="check-circle"></i>${isAr ? 'تم التوصيل' : 'Mark delivered'}</button>`
+                  : status === 'Delivered' ? `<p class="driver-job-done"><i data-lucide="check-circle"></i>${isAr ? 'مكتمل' : 'Complete'}</p>` : ''}
+                <div class="driver-job-more">
+                  ${phone ? `<a href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}">${isAr ? 'اتصال' : 'Call'}</a>
+                  ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer">WhatsApp</a>` : ''}
+                  <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? ${JSON.stringify(isAr ? 'تم النسخ' : 'Copied')} : ${JSON.stringify(isAr ? 'فشل النسخ' : 'Copy Failed')}, ok ? ${JSON.stringify(isAr ? 'تم نسخ رقم الهاتف' : 'Phone number copied')} : ${JSON.stringify(isAr ? 'تعذّر نسخ رقم الهاتف' : 'Could not copy phone number')}, ok ? "success" : "error"))'>${isAr ? 'نسخ' : 'Copy'}</button>` : ''}
+                  ${canShareDeliveryReceiptToWhatsApp(ad) ? `<button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" title="${isAr ? 'مشاركة معلومات التوصيل في مجموعة واتساب' : 'Share delivery information to a WhatsApp group'}">${isAr ? 'مشاركة للمجموعة' : 'Share to Group'}</button>` : ''}
+                  ${status === 'Needs Delivery' || status === 'In Progress' ? `<button type="button" onclick="openDeliveryCancelModal('${ad.id}')" class="is-danger">${t('cancel')}</button>` : ''}
+                </div>
+              </article>`;
+          }).join('')}
+        </div>
+        ${remainingDeliveries > 0 ? `<div class="flex justify-center pt-3"><button type="button" onclick="loadMoreDeliveryDashboard()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveries} متبقي)` : `Load more (${remainingDeliveries} remaining)`}</button></div>` : ''}
+      `}
     </div>
   `;
 }
