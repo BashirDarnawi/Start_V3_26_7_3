@@ -2,7 +2,8 @@
 // bar, as the approved design says; what they did not have was a check at their own sizes. Measuring at 601 to
 // 1,024 px found amounts of money cut off, under an icon or split over two lines, and one label cut short on the
 // narrowest phone. These tests hold the fixes at every width, with short and with seven-digit amounts, in English
-// and Arabic. The phone projects set tablet-sized windows themselves; computer widths run on the desktop project.
+// and Arabic. The phone projects set tablet-sized windows themselves; computer widths run on a desktop project
+// (Chromium here; desktop Safari where the owner's check runs this file with it).
 const { test, expect } = require('@playwright/test');
 
 const ADMIN_EMAIL = 'e2e.admin@albayan.example.com';
@@ -30,7 +31,7 @@ async function setLanguage(page, language) {
   await expect(page.locator('html')).toHaveAttribute('dir', language === 'ar' ? 'rtl' : 'ltr');
 }
 
-const widthsFor = testInfo => (testInfo.project.name === 'desktop-chromium' ? [...PHONES, ...TABLETS, ...COMPUTERS] : [...PHONES, ...TABLETS]);
+const widthsFor = testInfo => (testInfo.project.name.startsWith('desktop-') ? [...PHONES, ...TABLETS, ...COMPUTERS] : [...PHONES, ...TABLETS]);
 
 // Writes `amount` into the money tiles (the page's text only; nothing is saved) and measures every tile:
 // is its amount whole, on one line, inside its tile and clear of the tile's icon?
