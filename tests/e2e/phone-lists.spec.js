@@ -263,7 +263,14 @@ test('on a phone the main button of Reminders stays in view above the bottom bar
   await expect.poll(() => page.evaluate(() => state.currentView)).toBe('reminders');
   const button = page.getByRole('button', { name: 'Remind all overdue (3)', exact: true });
   await expect(button).toBeVisible();
-  const measure = () => page.evaluate(() => {
+  // While it draws a screen the app holds the previous screen's height (12-views.js lockLayoutForRender) and lets
+  // it go two animation frames later: about 20 ms on a Mac, about 350 ms in Linux WebKit (CI), where the end of the
+  // list was measured inside the Dashboard's height and the button seemed to jump by 631 px. Measure at rest.
+  const measure = async () => {
+    await page.waitForFunction(() => !document.getElementById('app').classList.contains('is-rendering'), null, { timeout: 5000 });
+    return measureNow();
+  };
+  const measureNow = () => page.evaluate(() => {
     const pin = document.querySelector('.phone-pin'); const main = pin.querySelector('button');
     const bar = document.querySelector('.mobile-bottom-nav');
     const rows = [...document.querySelectorAll('.hub-shell .hub-card button[onclick^="remindDebtor"]')];
