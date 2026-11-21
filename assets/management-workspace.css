@@ -105,7 +105,8 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
 .management-audit-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; align-items: center; gap: 8px; }
 .audit-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .audit-facts > div { padding: 12px 16px; border: 1px solid var(--ui-line); border-radius: 14px; background: var(--ui-surface); }
-.audit-facts dt { color: var(--ui-muted); font-size: 12px; line-height: 1.4; }
+/* A tile label wraps only between words (the workspace lets other text break anywhere). */
+.audit-facts dt { color: var(--ui-muted); font-size: 12px; line-height: 1.4; overflow-wrap: normal; word-break: normal; hyphens: none; }
 .audit-facts dd { margin: 3px 0 0; color: var(--ui-ink); font-size: 20px; font-weight: 750; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .audit-workspace > .smart-filter-panel { padding: 16px; }
 .management-storage-caption { color: var(--ui-muted); font-size: 10px; font-weight: 650; }
@@ -187,7 +188,9 @@ button.management-metric:hover { border-color: var(--ui-accent); background: var
   .management-plan-workspace details .grid.grid-cols-2 { grid-template-columns: minmax(0, 1fr); }
   .management-audit-actions { gap: 6px; }
   .management-audit-actions > .management-button { gap: 6px; padding-inline: 10px; }
-  .audit-facts { grid-template-columns: 1.7fr 1fr 1fr 1fr; gap: 6px; }
+  /* Every tile is at least as wide as its longest label word; the first tile gives up the room. At 360 px
+     "Updates" had 0.4 px to spare on a Mac, and Linux draws letters a little wider, so CI saw it cut in two. */
+  .audit-facts { grid-template-columns: minmax(min-content, 1.7fr) repeat(3, minmax(min-content, 1fr)); gap: 6px; }
   .audit-facts > div { padding: 8px 10px; border-radius: 12px; }
   .audit-facts dt { font-size: 11px; }
   .audit-facts dd { font-size: 16px; }
